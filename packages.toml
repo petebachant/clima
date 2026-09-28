@@ -4,13 +4,23 @@
 # standalone repo it is synced from while the monorepo is being evaluated.
 # `tools/subtree.sh` reads this file.
 #
+# `owners` feeds .github/CODEOWNERS (`julia tools/mono.jl codeowners`).
+# Initial values are proposals derived from who reviewed/authored merged PRs
+# in each standalone repo, 2025-09-28 → 2026-09-28; see docs/OWNERSHIP.md.
+# Prefer GitHub teams (@CliMA/<team>) once they exist.
+#
 # Excluded on purpose (high independent traffic / separate communities):
 # Oceananigans, ClimaOcean, ClimaSeaIce, EnsembleKalmanProcesses.
+
+# Owners of repo-wide infrastructure (tools/, CI, workspace, this file).
+[_repo]
+owners = ["@CliMA/software"]
 
 [dev-guides]
 path = "docs/dev"
 upstream = "https://github.com/CliMA/DeveloperGuides.git"
 branch = "main"
+owners = ["@imreddyTeja", "@tapios"]
 julia = false
 
 # --- Foundations (no in-repo deps) ---
@@ -18,91 +28,109 @@ julia = false
 path = "packages/ClimaComms"
 upstream = "https://github.com/CliMA/ClimaComms.jl.git"
 branch = "main"
+owners = ["@nefrathenrici", "@imreddyTeja", "@haakon-e"]
 
 [ClimaParams]
 path = "packages/ClimaParams"
 upstream = "https://github.com/CliMA/ClimaParams.jl.git"
 branch = "main"
+owners = ["@szy21", "@trontrytel", "@nefrathenrici"]
 
 [RootSolvers]
 path = "packages/RootSolvers"
 upstream = "https://github.com/CliMA/RootSolvers.jl.git"
 branch = "main"
+owners = ["@imreddyTeja", "@tapios"]
 
 [ClimaInterpolations]
 path = "packages/ClimaInterpolations"
 upstream = "https://github.com/CliMA/ClimaInterpolations.jl.git"
 branch = "main"
+owners = ["@giordano", "@ph-kev", "@imreddyTeja"]
 
 [Insolation]
 path = "packages/Insolation"
 upstream = "https://github.com/CliMA/Insolation.jl.git"
 branch = "main"
+owners = ["@tapios", "@ph-kev", "@szy21"]
 
 [ClimaAnalysis]
 path = "packages/ClimaAnalysis"
 upstream = "https://github.com/CliMA/ClimaAnalysis.jl.git"
 branch = "main"
+owners = ["@imreddyTeja", "@nefrathenrici", "@ph-kev"]
 
 # --- Physics parameterizations ---
 [Thermodynamics]
 path = "packages/Thermodynamics"
 upstream = "https://github.com/CliMA/Thermodynamics.jl.git"
 branch = "main"
+owners = ["@szy21", "@tapios"]
 
 [SurfaceFluxes]
 path = "packages/SurfaceFluxes"
 upstream = "https://github.com/CliMA/SurfaceFluxes.jl.git"
 branch = "main"
+owners = ["@akshaysridhar", "@tapios", "@szy21"]
 
 [CloudMicrophysics]
 path = "packages/CloudMicrophysics"
 upstream = "https://github.com/CliMA/CloudMicrophysics.jl.git"
 branch = "main"
+owners = ["@trontrytel", "@haakon-e", "@tapios"]
 
 [RRTMGP]
 path = "packages/RRTMGP"
 upstream = "https://github.com/CliMA/RRTMGP.jl.git"
 branch = "main"
+owners = ["@szy21", "@tapios"]
 
 # --- Infrastructure ---
 [ClimaCore]
 path = "packages/ClimaCore"
 upstream = "https://github.com/CliMA/ClimaCore.jl.git"
 branch = "main"
+owners = ["@imreddyTeja", "@dennisYatunin", "@ph-kev"]
 
 [ClimaTimeSteppers]
 path = "packages/ClimaTimeSteppers"
 upstream = "https://github.com/CliMA/ClimaTimeSteppers.jl.git"
 branch = "main"
+owners = ["@tapios", "@dennisYatunin", "@ph-kev"]
 
 [ClimaUtilities]
 path = "packages/ClimaUtilities"
 upstream = "https://github.com/CliMA/ClimaUtilities.jl.git"
 branch = "main"
+owners = ["@ph-kev", "@imreddyTeja", "@nefrathenrici"]
 
 [ClimaDiagnostics]
 path = "packages/ClimaDiagnostics"
 upstream = "https://github.com/CliMA/ClimaDiagnostics.jl.git"
 branch = "main"
+owners = ["@imreddyTeja", "@ph-kev", "@nefrathenrici"]
 
 # --- Models ---
 [ClimaAtmos]
 path = "packages/ClimaAtmos"
 upstream = "https://github.com/CliMA/ClimaAtmos.jl.git"
 branch = "main"
+owners = ["@szy21", "@tapios"]
 
 [ClimaLand]
 path = "packages/ClimaLand"
 upstream = "https://github.com/CliMA/ClimaLand.jl.git"
 branch = "main"
+owners = ["@kmdeck", "@ph-kev"]
 
 [ClimaCoupler]
 path = "packages/ClimaCoupler"
 upstream = "https://github.com/CliMA/ClimaCoupler.jl.git"
 branch = "main"
+owners = ["@szy21", "@juliasloan25"]
 
 [ClimaCalibrate]
 path = "packages/ClimaCalibrate"
 upstream = "https://github.com/CliMA/ClimaCalibrate.jl.git"
 branch = "main"
+owners = ["@nefrathenrici", "@ph-kev"]

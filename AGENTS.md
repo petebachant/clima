@@ -24,6 +24,10 @@ Instructions for AI agents (and humans) working in the CliMA monorepo.
   editing versions by hand. It widens dependents' compat for you.
 - **Releases.** Bumping `version` in a `Project.toml` *is* a release once
   merged. Only do it when asked, and update that package's `NEWS.md`.
+- **Ownership.** `.github/CODEOWNERS` is generated from `owners` in
+  `packages.toml` (`julia tools/mono.jl codeowners`); see
+  [docs/OWNERSHIP.md](docs/OWNERSHIP.md). For a PR spanning packages, keep
+  upstream changes and downstream adaptations in separate commits.
 - **Workspace file.** `Project.toml` at the root is generated; edit
   `packages.toml` and run `julia tools/mono.jl workspace`.
 - **Upstream sync.** During the evaluation, don't edit `docs/dev/`

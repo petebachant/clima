@@ -213,7 +213,10 @@ to serve the models: ClimaUtilities, ClimaDiagnostics, ClimaInterpolations.
 - Tag namespace changes to `<Pkg>-vX.Y.Z`; anything that parses tags
   (Documenter versioned docs, scripts) must follow.
 - Issues and permissions become shared. Label and CODEOWNERS discipline
-  replaces repo boundaries.
+  replaces repo boundaries: see [docs/OWNERSHIP.md](docs/OWNERSHIP.md).
+  Review load is already concentrated: one reviewer did 487 reviews across
+  these repos last year. Required code-owner review must use teams with
+  load-balanced assignment, or it will make that worse.
 
 **Measure.**
 - Merged "compat / version bump" PRs as a fraction of all merged PRs

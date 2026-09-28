@@ -33,10 +33,11 @@ jobs:
           version: '1.12'
       - name: Compat drift
         run: julia tools/mono.jl compat --strict
-      - name: Workspace is up to date
+      - name: Generated files are up to date
         run: |
           julia tools/mono.jl workspace
-          git diff --exit-code Project.toml
+          julia tools/mono.jl codeowners
+          git diff --exit-code Project.toml .github/CODEOWNERS .github/labeler.yml
       - name: Affected packages
         id: affected
         run: |

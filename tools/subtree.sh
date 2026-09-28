@@ -17,7 +17,7 @@ import sys, tomllib
 d = tomllib.load(open("packages.toml", "rb"))
 want = sys.argv[1:]
 for name, e in d.items():
-    if want and name not in want:
+    if (want and name not in want) or "upstream" not in e:
         continue
     print(name, e["path"], e["upstream"], e.get("branch", "main"))
 PY
