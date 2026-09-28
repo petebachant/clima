@@ -14,8 +14,12 @@ version, `Project.toml`, and `[compat]`. Only the repository is shared.
 
 ```text
 packages/<Pkg>/     one directory per package (a git subtree of CliMA/<Pkg>.jl)
+examples/           small cross-package recipes, run in CI (start here as a user)
+experiments/        the org's flagship scheduled simulations (AMIP, long runs; proposal)
 docs/dev/           DeveloperGuides: shared engineering standards
-tools/mono.jl       graph, affected, compat, test, bump, releases, workspace
+docs/PLAN.md        plan for one consolidated docs site
+docs/OWNERSHIP.md   CODEOWNERS, team boards, review policy
+tools/mono.jl       graph, affected, compat, test, bump, releases, workspace, codeowners
 tools/subtree.sh    import/sync packages from their standalone repos
 tools/register.sh   registers bumped packages, upstream first
 packages.toml       what's in the repo and where it comes from
@@ -28,6 +32,18 @@ RRTMGP, ClimaCore, ClimaTimeSteppers, ClimaUtilities, ClimaDiagnostics,
 ClimaAtmos, ClimaLand, ClimaCoupler, ClimaCalibrate. Oceananigans, ClimaOcean,
 ClimaSeaIce and EnsembleKalmanProcesses stay out on purpose: they have
 large communities of their own.
+
+## Examples
+
+If you want to *use* CliMA, start with [examples/](examples/). Each one is a
+short, tested script for a common task:
+
+- [CliMA physics in your own model](examples/physics-in-your-model/)
+- [ClimaAtmos single-column simulation](examples/atmos-single-column/)
+- [Single-column soil simulation](examples/land-single-site/)
+- [Build your own model on ClimaCore](examples/build-on-climacore/)
+- [Calibrate a toy model](examples/calibrate-toy-model/)
+- [Coupled slabplanet](examples/coupled-slabplanet/) (nightly)
 
 ## Setup
 
@@ -58,6 +74,9 @@ There's no `Pkg.develop` step to remember or undo.
 | Test on Julia 1.10 | `julia +1.10 tools/mono.jl test ClimaAtmos` |
 | Release a package | bump `version` in its `Project.toml` in your PR (see below) |
 | Make a breaking release | `julia tools/mono.jl bump ClimaCore minor --release-dependents` |
+| Run an example | `julia --project=examples/<name> examples/<name>/run.jl` |
+| Format and lint before committing | `prek install` once; hooks run on `git commit` |
+| Update CODEOWNERS / triage after editing `packages.toml` | `julia tools/mono.jl codeowners` |
 | Use this repo's HEAD from another project | see [Using unreleased code elsewhere](#using-unreleased-code-elsewhere) |
 
 ¹ Only packages with a `test/Project.toml` have their test env in the
@@ -128,11 +147,30 @@ Package-specific Buildkite pipelines (ClimaAtmos's configs, ClimaCoupler's
 AMIP runs, …) still live under `packages/<Pkg>/.buildkite/` and are not yet
 wired in.
 
+### Formatting
+
+One style for the whole repo, adopted from ClimaAtmos:
+[.JuliaFormatter.toml](.JuliaFormatter.toml) and
+[.pre-commit-config.yaml](.pre-commit-config.yaml), with JuliaFormatter
+pinned in `.dev/format`. Run `prek install` once; CI runs the same hooks.
+While `packages/*` are synced from upstream, they keep their own formatter
+configs, and ClimaAtmos's and ClimaCore's own hooks run through prek's
+nested-config support. The one-time whole-repo reformat happens at cutover.
+
+### Ownership
+
+`packages.toml` lists each package's `owners` and `team`. From those,
+`mono.jl codeowners` generates CODEOWNERS (required reviews), the issue
+form, and the triage map. A workflow uses them to label issues and PRs and
+put them on each team's project board. See
+[docs/OWNERSHIP.md](docs/OWNERSHIP.md).
+
 ### Adding a package
 
 1. Add an entry to [packages.toml](packages.toml).
 2. `tools/subtree.sh add <Pkg>`
-3. `julia tools/mono.jl workspace` (CI checks it's up to date)
+3. Add `owners` and `team` to its entry, then run `julia tools/mono.jl workspace`
+   and `julia tools/mono.jl codeowners` (CI checks both are up to date)
 4. `julia --project=. -e 'using Pkg; Pkg.resolve()'`. If it doesn't resolve,
    the error names the stale bound.
 

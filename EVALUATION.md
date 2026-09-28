@@ -254,6 +254,18 @@ to serve the models: ClimaUtilities, ClimaDiagnostics, ClimaInterpolations.
 - Per-repo copies of CI, TagBot, docs cleanup, formatter, CLA, and
   dev-guide sync workflows (5–13 workflow files per repo today, e.g. ClimaComms 5, ClimaCore 12, ClimaAtmos 13) become one set.
 - DeveloperGuides stops being vendored 10 times.
+- **One formatting style.** Today, 17 of 18 packages use JuliaFormatter
+  (Insolation has no config) with 11 different configurations: margins of
+  80, 92, and 120, plus differing options. Only ClimaAtmos and ClimaCore
+  have pre-commit hooks. The root setup, adopted from ClimaAtmos, already
+  covers repo-level code.
+
+  Measured cutover cost (delete the per-package configs, format
+  everything): **423 files, +13,168 / −7,639 lines, 11 s**. Most of it is
+  CloudMicrophysics (89 files; margin 120 today) and ClimaLand (98 files;
+  margin 80). ClimaAtmos and ClimaCore change 1 file each. 9 files crash
+  the pinned JuliaFormatter 2.10.1 and need `#! format: off` or a fix
+  first. It's a one-time commit, listed in `.git-blame-ignore-revs`.
 - Downstream CI workflows that clone other repos (e.g. ClimaAtmos →
   ClimaCoupler) become the default behavior, not a hand-maintained file.
 
