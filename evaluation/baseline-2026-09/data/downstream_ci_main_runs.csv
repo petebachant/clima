@@ -1,0 +1,12 @@
+repo,workflow,main_push_runs,failure,success,other,first,last
+"ClimaAtmos","downstream",512,88,396,28,"2025-09-30","2026-09-26"
+"ClimaCore","Downstream",156,66,74,16,"2025-10-17","2026-09-28"
+"ClimaDiagnostics","Downstream",40,17,20,3,"2025-10-14","2026-09-16"
+"ClimaLand","downstream",227,82,132,13,"2025-09-30","2026-09-28"
+"ClimaTimeSteppers","downstream",44,0,41,3,"2026-03-21","2026-09-16"
+"ClimaUtilities","downstream",47,22,17,8,"2025-09-29","2026-09-24"
+"CloudMicrophysics","downstream",17,3,13,1,"2026-07-31","2026-09-25"
+"RRTMGP","downstream",0,0,0,0,,
+"SurfaceFluxes","downstream",61,22,34,5,"2025-09-29","2026-09-21"
+"Thermodynamics","Downstream-ClimaCoupler",70,70,0,0,"2025-12-04","2026-08-12"
+"Thermodynamics","Downstream",59,19,32,8,"2025-09-30","2026-09-01"

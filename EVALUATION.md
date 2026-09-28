@@ -46,9 +46,34 @@ clima-perf's own conclusion: the PR-count saving is modest, because
 propagation PRs already merge in under a day. The bigger cost is the
 per-release ritual, most of which serves no one outside the org.
 
-**Propagation lag** (upstream release → dependent admits it in
-`[compat]`): <!-- LAG --> being computed from clima-perf's Project.toml
-commit history.
+**Last 12 months**, measured directly (details, per-edge tables, and data
+in [evaluation/baseline-2026-09/](evaluation/baseline-2026-09/SUMMARY.md)):
+
+| | Value |
+|:--|:--|
+| Registered versions / breaking | 287 / 48 (17%) |
+| Release/compat/deps churn PRs | 322 of 1,975 merged (16%) |
+| Upgrade PRs that also had to change code | 54% |
+| **Breaking release → direct dependent's `main` admits it** | median **1.1 d**, p90 **9.7 d**, max **63 d** |
+| **Breaking release → Atmos/Land/Coupler `main`** (end to end) | median **1.8 d**, p90 **14 d**, max **63 d**; 13 of 74 never |
+| **…→ a registered Atmos/Land/Coupler** | median **4.4 d**, p90 **29 d**, max **84 d**; 26 of 74 not yet |
+| Upstream `main` pushes whose Downstream CI was red | 32% (advisory; merged anyway) |
+| Thermodynamics → ClimaCoupler downstream job | red on 100% of 70 runs for 8 months |
+| Same fix made separately in 3 repos | e.g. ClimaCore 0.16 renames: Atmos#4814, Land#1872, Coupler#2110 |
+
+**The typical case is already fast.** A coordinated breaking release
+reaches the models in about a day; the ClimaCore 0.15/0.16/1.0 cascades
+reached Coupler in under 2 days.
+
+**The cost is in the tail and in what the lag hides:**
+- a p90 of two weeks, and outliers of two months (ClimaDiagnostics 0.3:
+  55–63 days to Atmos/Coupler);
+- users waiting a median 4.4 days (p90 a month) for a *registered*
+  model that works with an upstream breaking release;
+- a third of downstream CI runs red on upstream `main`, and ignored.
+
+Lag also only measures when compat admitted a version, not the adaptation
+work done on branches beforehand.
 
 ## What the prototype showed on day one
 
@@ -83,6 +108,15 @@ where the rot was. `mono.jl compat --strict` now fails CI on this class of
 problem.
 
 Other observations:
+
+- **The shared workspace couples unrelated environments.** Adding the
+  `examples/` environments pulled in FastBroadcast 1.x, which conflicted
+  with ClimaCore's test-only pin of `FastBroadcast = "0.3.1"`. Usually
+  that's the point: it's how the five stale bounds above were found. But it
+  also means one new example or test dependency can force changes in
+  another package's test setup. If this becomes a nuisance, split the
+  workspace: packages + test envs in one, examples/experiments resolved
+  per directory against in-repo paths via `[sources]`.
 
 - **Two test conventions.** 7 packages use `[extras]`/`[targets]`, 11 use
   `test/Project.toml` (ClimaInterpolations has both). Only the latter can

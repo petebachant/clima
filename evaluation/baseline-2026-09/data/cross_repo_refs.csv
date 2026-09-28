@@ -1,0 +1,90 @@
+repo,number,merged,dep_keyword,refs,title,url
+ClimaComms,128,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/ClimaComms.jl/pull/128
+ClimaParams,299,2026-06-26,0,ClimaAtmos#4382,Add Beres parameters for convective non-orographic gravity waves,https://github.com/CliMA/ClimaParams.jl/pull/299
+ClimaParams,283,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/ClimaParams.jl/pull/283
+ClimaInterpolations,22,2026-01-27,0,ClimaCore#2422,Relax compat for DocStringExtensions,https://github.com/CliMA/ClimaInterpolations.jl/pull/22
+Thermodynamics,314,2026-03-24,0,ClimaCoupler#1775,update ClimaCoupler env for downstream tests,https://github.com/CliMA/Thermodynamics.jl/pull/314
+Thermodynamics,311,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/Thermodynamics.jl/pull/311
+SurfaceFluxes,235,2026-03-24,0,ClimaCoupler#1775,update ClimaCoupler env for downstream test,https://github.com/CliMA/SurfaceFluxes.jl/pull/235
+SurfaceFluxes,226,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/SurfaceFluxes.jl/pull/226
+CloudMicrophysics,739,2026-06-23,0,ClimaParams#295,fix: units of Barklie Gokhale 1959,https://github.com/CliMA/CloudMicrophysics.jl/pull/739
+CloudMicrophysics,714,2026-05-21,0,ClimaAtmos#4502,Adding microphysics options to bulk tendency (+ temperature dependent cloud ice formation),https://github.com/CliMA/CloudMicrophysics.jl/pull/714
+CloudMicrophysics,686,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/CloudMicrophysics.jl/pull/686
+RRTMGP,601,2026-07-06,0,ClimaAtmos#4624;ClimaCoupler#2009,"API Redesign: Functional Core, Standalone API, and ClimaCore Decoupling (#1 in refactor chain)",https://github.com/CliMA/RRTMGP.jl/pull/601
+RRTMGP,599,2026-05-24,0,ClimaAtmos#4515,add cloud cover,https://github.com/CliMA/RRTMGP.jl/pull/599
+RRTMGP,596,2026-03-24,0,ClimaCoupler#1775,update ClimaCoupler env for downstream test,https://github.com/CliMA/RRTMGP.jl/pull/596
+ClimaCore,2657,2026-09-28,0,ClimaAtmos#4843;ClimaCoupler#2132;ClimaLand#1884,Fix lint issues,https://github.com/CliMA/ClimaCore.jl/pull/2657
+ClimaCore,2655,2026-09-24,1,ClimaLand#1889,Add land model end to end benchmark,https://github.com/CliMA/ClimaCore.jl/pull/2655
+ClimaCore,2641,2026-09-14,0,ClimaCoupler#2113,Update ClimaCoupler commit in perf pipeline,https://github.com/CliMA/ClimaCore.jl/pull/2641
+ClimaCore,2629,2026-09-10,0,ClimaDiagnostics#188,Support pressure interpolation on multi-col spaces,https://github.com/CliMA/ClimaCore.jl/pull/2629
+ClimaCore,2598,2026-09-01,0,ClimaAtmos#4793,Enable fusion of spectral element operators,https://github.com/CliMA/ClimaCore.jl/pull/2598
+ClimaCore,2525,2026-08-10,0,ClimaLand#1723,Add space with multiple columns,https://github.com/CliMA/ClimaCore.jl/pull/2525
+ClimaCore,2505,2026-05-04,0,ClimaAtmos#4458,Auto retry builkite jobs failed from lost agent,https://github.com/CliMA/ClimaCore.jl/pull/2505
+ClimaCore,2504,2026-05-02,0,ClimaAtmos#4287;ClimaCoupler#1722;ClimaLand#1738,Use MacOS runners only on PR merges,https://github.com/CliMA/ClimaCore.jl/pull/2504
+ClimaCore,2472,2026-03-31,0,ClimaCoupler#1775,update ClimaCoupler env in downstream tests,https://github.com/CliMA/ClimaCore.jl/pull/2472
+ClimaCore,2464,2026-04-03,0,ClimaAtmos#4336;ClimaParams#280,Add support for nonuniform data structures,https://github.com/CliMA/ClimaCore.jl/pull/2464
+ClimaCore,2458,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/ClimaCore.jl/pull/2458
+ClimaCore,2379,2025-10-17,0,ClimaAtmos#3968,rft: update formatter + shortening,https://github.com/CliMA/ClimaCore.jl/pull/2379
+ClimaTimeSteppers,404,2026-03-31,0,ClimaCoupler#1775,update ClimaCoupler env in downstream tests,https://github.com/CliMA/ClimaTimeSteppers.jl/pull/404
+ClimaTimeSteppers,402,2026-03-24,0,ClimaLand#1682,Fix callback issue in SciMLBase.solve,https://github.com/CliMA/ClimaTimeSteppers.jl/pull/402
+ClimaTimeSteppers,384,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/ClimaTimeSteppers.jl/pull/384
+ClimaTimeSteppers,380,2026-05-14,0,ClimaAtmos#4248,Generalize benchmarking extension,https://github.com/CliMA/ClimaTimeSteppers.jl/pull/380
+ClimaUtilities,245,2026-08-12,0,ClimaAnalysis#418,Refactor TimeVaryingInputs0DExt,https://github.com/CliMA/ClimaUtilities.jl/pull/245
+ClimaUtilities,244,2026-08-10,0,ClimaCore#2522,Update ClimaCore extension,https://github.com/CliMA/ClimaUtilities.jl/pull/244
+ClimaUtilities,209,2026-03-24,0,ClimaCoupler#1775,update ClimaCoupler env for downstream test,https://github.com/CliMA/ClimaUtilities.jl/pull/209
+ClimaDiagnostics,165,2026-03-31,0,ClimaCoupler#1775,update ClimaCoupler env in downstream test,https://github.com/CliMA/ClimaDiagnostics.jl/pull/165
+ClimaDiagnostics,155,2026-02-06,0,ClimaCore#2422,Add diagnostics in pressure coordinates,https://github.com/CliMA/ClimaDiagnostics.jl/pull/155
+ClimaAnalysis,428,2026-08-06,0,ClimaCalibrate#334,Release v0.5.23,https://github.com/CliMA/ClimaAnalysis.jl/pull/428
+ClimaAnalysis,425,2026-08-06,0,ClimaLand#1836,Exclude NaNs from normalization in error metrics,https://github.com/CliMA/ClimaAnalysis.jl/pull/425
+ClimaAnalysis,377,2026-02-19,0,ClimaAtmos#4308,ci: use dependabot to update julia packages,https://github.com/CliMA/ClimaAnalysis.jl/pull/377
+ClimaAnalysis,362,2026-02-09,1,ClimaDiagnostics#136,Add support for filenames produced from diagnostics in pressure coordinates,https://github.com/CliMA/ClimaAnalysis.jl/pull/362
+ClimaAtmos,4824,2026-09-19,1,ClimaCore#2638,Apply the vertical Smagorinsky diffusion implicitly; drop unused AMD cache,https://github.com/CliMA/ClimaAtmos.jl/pull/4824
+ClimaAtmos,4776,2026-08-20,0,ClimaCore#2544,Delete unused `UpwindBiasedGradient`,https://github.com/CliMA/ClimaAtmos.jl/pull/4776
+ClimaAtmos,4734,2026-07-30,1,CloudMicrophysics#767;CloudMicrophysics#768,Update to CM.jl v0.38,https://github.com/CliMA/ClimaAtmos.jl/pull/4734
+ClimaAtmos,4535,2026-06-04,0,ClimaCoupler#1956,Initialize albedo as NaN for CouplerAlbedo,https://github.com/CliMA/ClimaAtmos.jl/pull/4535
+ClimaAtmos,4516,2026-06-22,0,ClimaCalibrate#319,Add perfect SCM calibration,https://github.com/CliMA/ClimaAtmos.jl/pull/4516
+ClimaAtmos,4503,2026-06-04,1,CloudMicrophysics#713,`noinline` quadrature point evaluation,https://github.com/CliMA/ClimaAtmos.jl/pull/4503
+ClimaAtmos,4474,2026-05-08,0,ClimaCoupler#1914,avoid dividing by zero ustar in edmf boundary conditions,https://github.com/CliMA/ClimaAtmos.jl/pull/4474
+ClimaAtmos,4429,2026-04-24,0,CloudMicrophysics#711,Time-averaged 1m microphysics tendencies,https://github.com/CliMA/ClimaAtmos.jl/pull/4429
+ClimaAtmos,4386,2026-03-24,0,ClimaCoupler#1775,update ClimaCoupler env in downstream test,https://github.com/CliMA/ClimaAtmos.jl/pull/4386
+ClimaAtmos,4321,2026-02-25,1,ClimaDiagnostics#158,Update compat for CairoMakie,https://github.com/CliMA/ClimaAtmos.jl/pull/4321
+ClimaAtmos,4276,2026-02-07,0,ClimaCoupler#1712,Create IC type to allow initializing AMIP with ERA5 on model levels,https://github.com/CliMA/ClimaAtmos.jl/pull/4276
+ClimaAtmos,4252,2026-02-10,1,ClimaAnalysis#362;ClimaCore#2422;ClimaDiagnostics#155,Add diagnostics in pressure coordinates,https://github.com/CliMA/ClimaAtmos.jl/pull/4252
+ClimaAtmos,4216,2026-01-16,0,ClimaCoupler#1656,chore(ci): fix Poppler version in buildkite env,https://github.com/CliMA/ClimaAtmos.jl/pull/4216
+ClimaAtmos,4189,2026-01-05,0,ClimaDiagnostics#149,Fix initialization of EveryCalendarDtSchedule for diagnostics,https://github.com/CliMA/ClimaAtmos.jl/pull/4189
+ClimaAtmos,4113,2026-03-06,1,ClimaDiagnostics#64,rft: clean up edmfx diagnostics,https://github.com/CliMA/ClimaAtmos.jl/pull/4113
+ClimaAtmos,4055,2025-11-19,0,ClimaCore#2376,Update `benchmark_step.jl` for CUDA benchmarking with useful kernel names,https://github.com/CliMA/ClimaAtmos.jl/pull/4055
+ClimaLand,1889,2026-09-23,0,ClimaCore#2655,benchmarks: Write the timings to a file,https://github.com/CliMA/ClimaLand.jl/pull/1889
+ClimaLand,1826,2026-08-26,0,ClimaCore#2525;ClimaUtilities#248,Add ColumnEnsemble,https://github.com/CliMA/ClimaLand.jl/pull/1826
+ClimaLand,1738,2026-05-01,0,ClimaAtmos#4287;ClimaCoupler#1722,Use MacOS runners only on PR merges,https://github.com/CliMA/ClimaLand.jl/pull/1738
+ClimaLand,1704,2026-04-03,1,ClimaDiagnostics#164,(1.6.5) up deps and patch release,https://github.com/CliMA/ClimaLand.jl/pull/1704
+ClimaLand,1688,2026-03-27,0,ClimaUtilities#207,Update compat for CTS and ClimaUtilities,https://github.com/CliMA/ClimaLand.jl/pull/1688
+ClimaLand,1685,2026-03-26,0,ClimaCoupler#1775,update ClimaCoupler env in downstream test,https://github.com/CliMA/ClimaLand.jl/pull/1685
+ClimaLand,1678,2026-04-03,0,Thermodynamics#322,rm SciMLBase; use new CTS interface,https://github.com/CliMA/ClimaLand.jl/pull/1678
+ClimaLand,1677,2026-04-08,0,ClimaCoupler#1865,don't compute fluxes in coupled case,https://github.com/CliMA/ClimaLand.jl/pull/1677
+ClimaLand,1631,2026-02-28,0,ClimaParams#277,Neural parameterization overhaul,https://github.com/CliMA/ClimaLand.jl/pull/1631
+ClimaLand,1578,2025-12-10,0,ClimaAtmos#4152,use gryanik surface flux parameters,https://github.com/CliMA/ClimaLand.jl/pull/1578
+ClimaLand,1562,2025-12-03,0,ClimaDiagnostics#139,Update ClimaDiagnostics to v0.3.0,https://github.com/CliMA/ClimaLand.jl/pull/1562
+ClimaLand,1538,2025-11-26,0,ClimaCoupler#1557,compute fluxes when using CoupledAtmosphere,https://github.com/CliMA/ClimaLand.jl/pull/1538
+ClimaCoupler,2133,2026-09-26,0,ClimaAtmos#4855;ClimaParams#325,Update dependencies for weekly run,https://github.com/CliMA/ClimaCoupler.jl/pull/2133
+ClimaCoupler,2119,2026-09-16,0,ClimaAtmos#4833;ClimaLand#1879,"Widen ClimaCore compat to 0.16, 1",https://github.com/CliMA/ClimaCoupler.jl/pull/2119
+ClimaCoupler,2118,2026-09-22,0,ClimaAtmos#4836,Parse YYYYMMDD-HHMM start_date,https://github.com/CliMA/ClimaCoupler.jl/pull/2118
+ClimaCoupler,2117,2026-09-15,0,ClimaAtmos#4825,Add ClimaTimeSteppers v1 to compat,https://github.com/CliMA/ClimaCoupler.jl/pull/2117
+ClimaCoupler,2113,2026-09-12,0,ClimaAtmos#4819,Update compat,https://github.com/CliMA/ClimaCoupler.jl/pull/2113
+ClimaCoupler,2110,2026-09-16,1,ClimaCore#2633,"Replace DataLayouts.AbstractData, removed in ClimaCore v0.16",https://github.com/CliMA/ClimaCoupler.jl/pull/2110
+ClimaCoupler,2101,2026-09-04,1,ClimaAtmos#4801;ClimaLand#1869,Update compats,https://github.com/CliMA/ClimaCoupler.jl/pull/2101
+ClimaCoupler,2022,2026-07-09,0,ClimaAtmos#4624;RRTMGP#601,Temporarily use latest compatible versions of SF / RRTMGP + Up deps,https://github.com/CliMA/ClimaCoupler.jl/pull/2022
+ClimaCoupler,1953,2026-05-27,0,ClimaAtmos#4501,Prevent dependabot from pushing doc previews,https://github.com/CliMA/ClimaCoupler.jl/pull/1953
+ClimaCoupler,1897,2026-05-06,0,ClimaAtmos#4458,Auto retry lost agent gpu steps on buildkite,https://github.com/CliMA/ClimaCoupler.jl/pull/1897
+ClimaCoupler,1865,2026-04-09,1,ClimaLand#1677,compute bucket fluxes in compute_surface_fluxes,https://github.com/CliMA/ClimaCoupler.jl/pull/1865
+ClimaCoupler,1864,2026-04-06,1,ClimaDiagnostics#164,up deps,https://github.com/CliMA/ClimaCoupler.jl/pull/1864
+ClimaCoupler,1854,2026-04-01,0,ClimaAtmos#4386;ClimaCore#2472;ClimaDiagnostics#165;ClimaLand#1685;ClimaTimeSteppers#404;ClimaUtilities#209;RRTMGP#596;SurfaceFluxes#235;Thermodynamics#314,remove experiments/ClimaEarth,https://github.com/CliMA/ClimaCoupler.jl/pull/1854
+ClimaCoupler,1778,2026-03-27,1,ClimaAtmos#4346,Added and enabled GW flags in AMIP run files,https://github.com/CliMA/ClimaCoupler.jl/pull/1778
+ClimaCoupler,1776,2026-03-06,0,ClimaCalibrate#277;ClimaCalibrate#285,Add calibration pipeline for AMIP,https://github.com/CliMA/ClimaCoupler.jl/pull/1776
+ClimaCoupler,1722,2026-02-10,0,ClimaAtmos#4287,run macOS tests on merge instead of push,https://github.com/CliMA/ClimaCoupler.jl/pull/1722
+ClimaCoupler,1675,2026-01-20,0,ClimaCore#2430,pin GPUCompiler < 1.7.6,https://github.com/CliMA/ClimaCoupler.jl/pull/1675
+ClimaCoupler,1604,2026-02-04,1,ClimaAtmos#4151,Update ClimaDiagnostics in toml and compat ,https://github.com/CliMA/ClimaCoupler.jl/pull/1604
+ClimaCoupler,1562,2025-11-26,1,ClimaLand#1538,compute integrated land fluxes in step,https://github.com/CliMA/ClimaCoupler.jl/pull/1562
+ClimaCoupler,1530,2025-10-28,0,ClimaLand#1511,use central queue for change to Vast,https://github.com/CliMA/ClimaCoupler.jl/pull/1530
+ClimaCoupler,1506,2025-10-14,1,ClimaLand#1492,use PhaseNonEquil instead of PhaseEquil,https://github.com/CliMA/ClimaCoupler.jl/pull/1506
+ClimaCalibrate,319,2026-06-08,0,ClimaAtmos#4516,Add more reconstruct functions,https://github.com/CliMA/ClimaCalibrate.jl/pull/319

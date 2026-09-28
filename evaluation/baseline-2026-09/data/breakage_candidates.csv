@@ -1,0 +1,57 @@
+repo,kind,number,created,state,broad,strict_title,upstreams,title,url
+ClimaAtmos,issue,4285,2026-02-08,CLOSED,1,0,CloudMicrophysics;Thermodynamics,Microphysics architecture: remaining refactoring TODOs,https://github.com/CliMA/ClimaAtmos.jl/issues/4285
+ClimaAtmos,pr,4855,2026-09-25,MERGED,1,0,ClimaAnalysis;ClimaComms;ClimaParams,Release v0.42.12,https://github.com/CliMA/ClimaAtmos.jl/pull/4855
+ClimaAtmos,pr,4818,2026-09-11,OPEN,1,0,ClimaCore,Make `Microphysics1MEvaluator` `mp` and `tps` into arguments rather than evaluator fields,https://github.com/CliMA/ClimaAtmos.jl/pull/4818
+ClimaAtmos,pr,4814,2026-09-10,MERGED,0,1,ClimaCore,"Replace deprecated ClimaCore names, aliases and constructors",https://github.com/CliMA/ClimaAtmos.jl/pull/4814
+ClimaAtmos,pr,4758,2026-08-11,MERGED,1,0,ClimaCore;ClimaDiagnostics,"Index parent arrays by rank, for ClimaCore 0.15 layouts",https://github.com/CliMA/ClimaAtmos.jl/pull/4758
+ClimaAtmos,pr,4756,2026-08-10,OPEN,1,0,ClimaParams;RRTMGP;SurfaceFluxes,Prognostic sea salt aerosol emission + transport,https://github.com/CliMA/ClimaAtmos.jl/pull/4756
+ClimaAtmos,pr,4752,2026-08-07,MERGED,1,0,ClimaCore,Patch release v0.24.4,https://github.com/CliMA/ClimaAtmos.jl/pull/4752
+ClimaAtmos,pr,4643,2026-07-06,OPEN,1,0,ClimaTimeSteppers,Seed-scaled sparse autodiff Jacobian,https://github.com/CliMA/ClimaAtmos.jl/pull/4643
+ClimaAtmos,pr,4642,2026-07-06,CLOSED,1,0,ClimaCore;CloudMicrophysics,Update CloudMicrophysics compat to v0.37.0,https://github.com/CliMA/ClimaAtmos.jl/pull/4642
+ClimaAtmos,pr,4632,2026-07-02,CLOSED,1,0,ClimaTimeSteppers;CloudMicrophysics,Speed up cloud-fraction quadrature kernel on GPU,https://github.com/CliMA/ClimaAtmos.jl/pull/4632
+ClimaAtmos,pr,4516,2026-05-22,MERGED,1,0,ClimaCalibrate;ClimaLand,Add perfect SCM calibration,https://github.com/CliMA/ClimaAtmos.jl/pull/4516
+ClimaAtmos,pr,4504,2026-05-20,MERGED,1,0,ClimaCore,"Remove duplicate callback, add coupler perf pipeline",https://github.com/CliMA/ClimaAtmos.jl/pull/4504
+ClimaAtmos,pr,4429,2026-04-18,MERGED,1,0,CloudMicrophysics,Time-averaged 1m microphysics tendencies,https://github.com/CliMA/ClimaAtmos.jl/pull/4429
+ClimaAtmos,pr,4389,2026-03-24,MERGED,1,0,CloudMicrophysics;Thermodynamics,Part one of microphysics names cleanup,https://github.com/CliMA/ClimaAtmos.jl/pull/4389
+ClimaAtmos,pr,4382,2026-03-20,MERGED,1,0,ClimaParams,Convective gravity wave source based on Beres et al. (2004) driven by the prognostic EDMF scheme,https://github.com/CliMA/ClimaAtmos.jl/pull/4382
+ClimaAtmos,pr,4321,2026-02-20,MERGED,1,0,ClimaDiagnostics,Update compat for CairoMakie,https://github.com/CliMA/ClimaAtmos.jl/pull/4321
+ClimaAtmos,pr,4198,2026-01-06,MERGED,1,0,SurfaceFluxes,modify surface conditions and update SurfaceFluxes,https://github.com/CliMA/ClimaAtmos.jl/pull/4198
+ClimaAtmos,pr,4151,2025-12-09,MERGED,1,0,ClimaDiagnostics,Update ClimaDiagnostics in compat,https://github.com/CliMA/ClimaAtmos.jl/pull/4151
+ClimaAtmos,pr,4072,2025-10-24,MERGED,1,0,ClimaCore;ClimaParams,tag v0.31.7; up deps,https://github.com/CliMA/ClimaAtmos.jl/pull/4072
+ClimaAtmos,pr,4069,2025-10-23,MERGED,1,0,CloudMicrophysics,Update to new release of CloudMicrophysics,https://github.com/CliMA/ClimaAtmos.jl/pull/4069
+ClimaLand,issue,1887,2026-09-22,OPEN,1,0,ClimaUtilities,"`solve!` closes every open NetCDF file, breaking other simulations in the same session",https://github.com/CliMA/ClimaLand.jl/issues/1887
+ClimaLand,pr,1888,2026-09-22,MERGED,1,0,ClimaCore,Update deps for ClimaCore v1.0.1,https://github.com/CliMA/ClimaLand.jl/pull/1888
+ClimaLand,pr,1872,2026-09-10,MERGED,0,1,ClimaCore,Replace deprecated ClimaCore names removed in ClimaCore v0.16,https://github.com/CliMA/ClimaLand.jl/pull/1872
+ClimaLand,pr,1840,2026-08-05,MERGED,1,0,ClimaCore,Add a restart test for the global land model with the P-model,https://github.com/CliMA/ClimaLand.jl/pull/1840
+ClimaLand,pr,1839,2026-08-04,CLOSED,1,0,ClimaCore,Add a restart test for the global land model with the P-model,https://github.com/CliMA/ClimaLand.jl/pull/1839
+ClimaLand,pr,1835,2026-07-31,MERGED,1,0,SurfaceFluxes,fix compat,https://github.com/CliMA/ClimaLand.jl/pull/1835
+ClimaLand,pr,1832,2026-07-28,CLOSED,1,0,ClimaDiagnostics,"Unsupervised calibration pipeline: GPP/energy, rebuilt LAI initial conditions, prognostic LAI",https://github.com/CliMA/ClimaLand.jl/pull/1832
+ClimaLand,pr,1798,2026-07-07,CLOSED,1,0,ClimaTimeSteppers,Update to ClimaTimeSteppers v0.10.3,https://github.com/CliMA/ClimaLand.jl/pull/1798
+ClimaLand,pr,1797,2026-07-07,MERGED,1,0,ClimaCore,Time-integrated variables as smooth prognostic state (+ optimal-LAI A0_annual),https://github.com/CliMA/ClimaLand.jl/pull/1797
+ClimaLand,pr,1785,2026-07-02,MERGED,1,0,ClimaCore,Add Base.show/summary methods for noisy REPL types,https://github.com/CliMA/ClimaLand.jl/pull/1785
+ClimaLand,pr,1765,2026-06-12,MERGED,1,0,ClimaCore,Release v1.9.0,https://github.com/CliMA/ClimaLand.jl/pull/1765
+ClimaLand,pr,1759,2026-06-03,MERGED,1,0,ClimaCore,Update Manifests to use ClimaCore 0.14.53,https://github.com/CliMA/ClimaLand.jl/pull/1759
+ClimaLand,pr,1754,2026-05-28,MERGED,1,0,ClimaCore,Modify broadcast to work with ClimaCore bug,https://github.com/CliMA/ClimaLand.jl/pull/1754
+ClimaLand,pr,1704,2026-04-03,MERGED,1,0,ClimaDiagnostics,(1.6.5) up deps and patch release,https://github.com/CliMA/ClimaLand.jl/pull/1704
+ClimaLand,pr,1682,2026-03-23,MERGED,1,0,ClimaUtilities,Add CFTime dep and compat to avoid bug in ClimaUtilities,https://github.com/CliMA/ClimaLand.jl/pull/1682
+ClimaLand,pr,1620,2026-01-30,MERGED,1,0,RootSolvers,add compat to root solvers,https://github.com/CliMA/ClimaLand.jl/pull/1620
+ClimaLand,pr,1562,2025-12-01,MERGED,1,0,ClimaDiagnostics,Update ClimaDiagnostics to v0.3.0,https://github.com/CliMA/ClimaLand.jl/pull/1562
+ClimaLand,pr,1527,2025-11-03,MERGED,1,0,ClimaComms,GPU-compatible lambertw0 implementation for optimal LAI,https://github.com/CliMA/ClimaLand.jl/pull/1527
+ClimaCoupler,issue,1738,2026-02-18,OPEN,1,0,ClimaCore,Improvements for calibration pipeline,https://github.com/CliMA/ClimaCoupler.jl/issues/1738
+ClimaCoupler,pr,2124,2026-09-18,CLOSED,1,0,ClimaCore;ClimaLand,Add _same_horizontal_grid,https://github.com/CliMA/ClimaCoupler.jl/pull/2124
+ClimaCoupler,pr,2110,2026-09-10,MERGED,1,0,ClimaCore,"Replace DataLayouts.AbstractData, removed in ClimaCore v0.16",https://github.com/CliMA/ClimaCoupler.jl/pull/2110
+ClimaCoupler,pr,2022,2026-07-07,MERGED,1,0,ClimaAtmos;RRTMGP;SurfaceFluxes,Temporarily use latest compatible versions of SF / RRTMGP + Up deps,https://github.com/CliMA/ClimaCoupler.jl/pull/2022
+ClimaCoupler,pr,1999,2026-06-25,MERGED,1,0,ClimaAtmos,change resolution of nightly amip,https://github.com/CliMA/ClimaCoupler.jl/pull/1999
+ClimaCoupler,pr,1961,2026-05-30,MERGED,1,0,ClimaLand;ClimaTimeSteppers,Update ClimaLand in manifests,https://github.com/CliMA/ClimaCoupler.jl/pull/1961
+ClimaCoupler,pr,1953,2026-05-27,MERGED,1,0,ClimaAtmos,Prevent dependabot from pushing doc previews,https://github.com/CliMA/ClimaCoupler.jl/pull/1953
+ClimaCoupler,pr,1883,2026-04-22,CLOSED,1,0,ClimaLand,Update CC to work with ClimaLand PR #1709,https://github.com/CliMA/ClimaCoupler.jl/pull/1883
+ClimaCoupler,pr,1864,2026-04-06,MERGED,1,0,ClimaDiagnostics;ClimaLand,up deps,https://github.com/CliMA/ClimaCoupler.jl/pull/1864
+ClimaCoupler,pr,1854,2026-03-31,MERGED,1,0,ClimaAtmos;ClimaCore;ClimaDiagnostics;ClimaLand;ClimaTimeSteppers;ClimaUtilities;RRTMGP;SurfaceFluxes;Thermodynamics,remove experiments/ClimaEarth,https://github.com/CliMA/ClimaCoupler.jl/pull/1854
+ClimaCoupler,pr,1822,2026-03-19,MERGED,1,0,ClimaTimeSteppers,fix exp/ClimaEarth compats,https://github.com/CliMA/ClimaCoupler.jl/pull/1822
+ClimaCoupler,pr,1775,2026-03-05,MERGED,1,0,ClimaAtmos;ClimaCore;ClimaLand,add AMIP and CMIP envs,https://github.com/CliMA/ClimaCoupler.jl/pull/1775
+ClimaCoupler,pr,1769,2026-02-28,MERGED,1,0,ClimaAtmos;ClimaDiagnostics;ClimaLand,update deps,https://github.com/CliMA/ClimaCoupler.jl/pull/1769
+ClimaCoupler,pr,1648,2026-01-08,MERGED,1,0,SurfaceFluxes;Thermodynamics,temporarily remove thermodynamics main in nightly pipeline,https://github.com/CliMA/ClimaCoupler.jl/pull/1648
+ClimaCoupler,pr,1635,2026-01-05,CLOSED,1,0,ClimaLand,Add support for breaking ClimaLand change,https://github.com/CliMA/ClimaCoupler.jl/pull/1635
+ClimaCoupler,pr,1633,2025-12-27,MERGED,1,0,SurfaceFluxes,Comment out SurfaceFluxes main in nightly pipeline,https://github.com/CliMA/ClimaCoupler.jl/pull/1633
+ClimaCoupler,pr,1632,2025-12-22,MERGED,1,0,ClimaAtmos,Add MPI to env during benchmark pipeline init step,https://github.com/CliMA/ClimaCoupler.jl/pull/1632
+ClimaCoupler,pr,1604,2025-12-09,MERGED,1,0,ClimaAtmos;ClimaDiagnostics,Update ClimaDiagnostics in toml and compat ,https://github.com/CliMA/ClimaCoupler.jl/pull/1604

@@ -1,0 +1,79 @@
+repo,number,upstreams,code_changes,n_files,add,dele,open_days,title,url
+ClimaAtmos,4847,CloudMicrophysics,1,17,384,120,0.31,Update to CM 0.41,https://github.com/CliMA/ClimaAtmos.jl/pull/4847
+ClimaAtmos,4844,CloudMicrophysics,0,1,3,3,0.2,Update to CM 0.40.1 N_ice(T),https://github.com/CliMA/ClimaAtmos.jl/pull/4844
+ClimaAtmos,4833,ClimaCore,1,10,54,58,1.37,"Update compat to ClimaCore 0.16, 1.0",https://github.com/CliMA/ClimaAtmos.jl/pull/4833
+ClimaAtmos,4828,ClimaTimeSteppers,0,6,29,35,0.13,Update to ClimaTimeSteppers v1,https://github.com/CliMA/ClimaAtmos.jl/pull/4828
+ClimaAtmos,4825,CloudMicrophysics,0,3,7,4,1.88,Update to CM 0.40,https://github.com/CliMA/ClimaAtmos.jl/pull/4825
+ClimaAtmos,4799,CloudMicrophysics,1,10,114,140,0.72,Update to CloudMicrophysics v0.39,https://github.com/CliMA/ClimaAtmos.jl/pull/4799
+ClimaAtmos,4778,RRTMGP,1,6,16,16,0.15,RRTMGP v0.23 compat updates,https://github.com/CliMA/ClimaAtmos.jl/pull/4778
+ClimaAtmos,4758,ClimaCore,1,9,65,58,0.19,"Index parent arrays by rank, for ClimaCore 0.15 layouts",https://github.com/CliMA/ClimaAtmos.jl/pull/4758
+ClimaAtmos,4734,CloudMicrophysics,1,4,19,20,0.09,Update to CM.jl v0.38,https://github.com/CliMA/ClimaAtmos.jl/pull/4734
+ClimaAtmos,4631,ClimaTimeSteppers,1,16,109,93,4.87,Update CTS,https://github.com/CliMA/ClimaAtmos.jl/pull/4631
+ClimaAtmos,4624,RRTMGP,1,20,493,915,14.47,Adapt to new RRTMGP API,https://github.com/CliMA/ClimaAtmos.jl/pull/4624
+ClimaAtmos,4514,ClimaTimeSteppers,1,3,4,5,0.09,Remove CTS backward-compat type usage,https://github.com/CliMA/ClimaAtmos.jl/pull/4514
+ClimaAtmos,4455,ClimaCore,0,5,17,7,28.06,Update to latest ClimaCore ,https://github.com/CliMA/ClimaAtmos.jl/pull/4455
+ClimaAtmos,4454,ClimaTimeSteppers,1,14,261,447,0.52,Update to CTS v0p9,https://github.com/CliMA/ClimaAtmos.jl/pull/4454
+ClimaAtmos,4424,CloudMicrophysics,0,2,3,3,0.25,Update Atmos to CM.jl v0.34,https://github.com/CliMA/ClimaAtmos.jl/pull/4424
+ClimaAtmos,4397,ClimaParams;SurfaceFluxes,0,1,2,2,0.04,update compat for ClimaParams and SurfaceFluxes,https://github.com/CliMA/ClimaAtmos.jl/pull/4397
+ClimaAtmos,4386,ClimaCoupler,0,1,3,3,0.2,update ClimaCoupler env in downstream test,https://github.com/CliMA/ClimaAtmos.jl/pull/4386
+ClimaAtmos,4385,ClimaTimeSteppers,1,18,106,254,2.46,Remove SciML/DiffEq dependency; update to new CTS API,https://github.com/CliMA/ClimaAtmos.jl/pull/4385
+ClimaAtmos,4354,Thermodynamics,1,5,3,8,0.55,update Thermodynamics,https://github.com/CliMA/ClimaAtmos.jl/pull/4354
+ClimaAtmos,4230,Insolation,1,10,69,115,8.39,Insolation simplifications and update to 1.1,https://github.com/CliMA/ClimaAtmos.jl/pull/4230
+ClimaAtmos,4198,SurfaceFluxes,1,14,98,216,12.28,modify surface conditions and update SurfaceFluxes,https://github.com/CliMA/ClimaAtmos.jl/pull/4198
+ClimaAtmos,4151,ClimaDiagnostics,0,6,1058,690,48.16,Update ClimaDiagnostics in compat,https://github.com/CliMA/ClimaAtmos.jl/pull/4151
+ClimaAtmos,4109,SurfaceFluxes,1,5,15,12,15.09,Update SurfaceFluxes compat entry (support v0.14.1) ,https://github.com/CliMA/ClimaAtmos.jl/pull/4109
+ClimaAtmos,4069,CloudMicrophysics,0,3,4,3,0.17,Update to new release of CloudMicrophysics,https://github.com/CliMA/ClimaAtmos.jl/pull/4069
+ClimaLand,1888,ClimaCore,0,4,444,432,1.79,Update deps for ClimaCore v1.0.1,https://github.com/CliMA/ClimaLand.jl/pull/1888
+ClimaLand,1879,ClimaCore,1,9,573,439,0.15,"Release v1.12.2, update compat to ClimaCore v1",https://github.com/CliMA/ClimaLand.jl/pull/1879
+ClimaLand,1878,ClimaTimeSteppers,0,7,30,20,0.11,Update to CTS v1,https://github.com/CliMA/ClimaLand.jl/pull/1878
+ClimaLand,1872,ClimaCore,1,11,38,53,6.69,Replace deprecated ClimaCore names removed in ClimaCore v0.16,https://github.com/CliMA/ClimaLand.jl/pull/1872
+ClimaLand,1853,Thermodynamics,0,3,3,3,0.46,Allow Thermodynamics 1.3,https://github.com/CliMA/ClimaLand.jl/pull/1853
+ClimaLand,1850,RootSolvers,0,4,11,9,0.77,Update RootSolvers lower compat,https://github.com/CliMA/ClimaLand.jl/pull/1850
+ClimaLand,1847,ClimaAnalysis;ClimaCalibrate,1,4,43,44,0.14,Use ClimaCalibrate v0.4.0 and ClimaAnalysis v0.5.23,https://github.com/CliMA/ClimaLand.jl/pull/1847
+ClimaLand,1804,ClimaTimeSteppers,0,1,1,1,0.14,Add upper bound to ClimaTimeSteppers compat,https://github.com/CliMA/ClimaLand.jl/pull/1804
+ClimaLand,1774,SurfaceFluxes,1,19,565,339,38.84,"Use Newton update to solve for F(T) = 0 in flux balance for snow rather than nested iterative solves; CL 1.11.0, use SF >=1.2.1",https://github.com/CliMA/ClimaLand.jl/pull/1774
+ClimaLand,1759,ClimaCore,1,8,112,161,0.78,Update Manifests to use ClimaCore 0.14.53,https://github.com/CliMA/ClimaLand.jl/pull/1759
+ClimaLand,1757,ClimaTimeSteppers,1,23,182,131,5.14,Use CTS cache_imp! and simplify implicit cache update,https://github.com/CliMA/ClimaLand.jl/pull/1757
+ClimaLand,1742,ClimaCalibrate,1,18,252,164,5.75,Update to ClimaCalibrate v0.3,https://github.com/CliMA/ClimaLand.jl/pull/1742
+ClimaLand,1735,ClimaTimeSteppers,0,7,228,192,0.95,(1.8.0) allow CTS v0.9; up deps,https://github.com/CliMA/ClimaLand.jl/pull/1735
+ClimaLand,1689,Thermodynamics,0,6,6,3,1.86,add Thermodynamics compat to all projects,https://github.com/CliMA/ClimaLand.jl/pull/1689
+ClimaLand,1688,ClimaTimeSteppers;ClimaUtilities,0,3,36,426,3.11,Update compat for CTS and ClimaUtilities,https://github.com/CliMA/ClimaLand.jl/pull/1688
+ClimaLand,1685,ClimaCoupler,0,1,3,3,2.92,update ClimaCoupler env in downstream test,https://github.com/CliMA/ClimaLand.jl/pull/1685
+ClimaLand,1682,ClimaUtilities,0,5,81,19,0.09,Add CFTime dep and compat to avoid bug in ClimaUtilities,https://github.com/CliMA/ClimaLand.jl/pull/1682
+ClimaLand,1679,ClimaTimeSteppers,1,2,3,3,0.82,Removes type restrictions for CTS compatibility,https://github.com/CliMA/ClimaLand.jl/pull/1679
+ClimaLand,1676,ClimaDiagnostics,1,8,272,337,0.86,Clean up pkgversion checks and set ClimaDiagnostics in compat to 0.3,https://github.com/CliMA/ClimaLand.jl/pull/1676
+ClimaLand,1673,ClimaCalibrate,1,15,227,125,16.89,Update calibration pipeline to use latest ClimaCalibrate,https://github.com/CliMA/ClimaLand.jl/pull/1673
+ClimaLand,1668,SurfaceFluxes,0,6,74,60,0.82,(1.6.2) update to SurfaceFluxes v1,https://github.com/CliMA/ClimaLand.jl/pull/1668
+ClimaLand,1664,Thermodynamics,1,6,50,101,1.89,Update Thermodynamics usage,https://github.com/CliMA/ClimaLand.jl/pull/1664
+ClimaLand,1622,RootSolvers,0,6,45,43,0.23,Widen RootSolvers compat,https://github.com/CliMA/ClimaLand.jl/pull/1622
+ClimaLand,1563,SurfaceFluxes,1,4,4,4,1.02,Update SurfaceFluxes compat (0.14.1),https://github.com/CliMA/ClimaLand.jl/pull/1563
+ClimaLand,1562,ClimaDiagnostics,1,15,35,51,2.04,Update ClimaDiagnostics to v0.3.0,https://github.com/CliMA/ClimaLand.jl/pull/1562
+ClimaCoupler,2125,ClimaLand,0,5,44,40,0.06,Pin ClimaLand to v1.12.2 in the nightly; update weekend AMIP Manifests,https://github.com/CliMA/ClimaCoupler.jl/pull/2125
+ClimaCoupler,2119,ClimaCore,0,2,2,2,0.04,"Widen ClimaCore compat to 0.16, 1",https://github.com/CliMA/ClimaCoupler.jl/pull/2119
+ClimaCoupler,2117,ClimaTimeSteppers,0,3,3,3,0.05,Add ClimaTimeSteppers v1 to compat,https://github.com/CliMA/ClimaCoupler.jl/pull/2117
+ClimaCoupler,2110,ClimaCore,1,3,9,9,6.73,"Replace DataLayouts.AbstractData, removed in ClimaCore v0.16",https://github.com/CliMA/ClimaCoupler.jl/pull/2110
+ClimaCoupler,2078,ClimaCore,0,6,255,251,4.58,Update Manifests to use CC 0.15,https://github.com/CliMA/ClimaCoupler.jl/pull/2078
+ClimaCoupler,2076,ClimaCore,0,1,1,1,0.06,Update ClimaCore upper compat,https://github.com/CliMA/ClimaCoupler.jl/pull/2076
+ClimaCoupler,2070,ClimaCalibrate,1,5,49,75,2.94,Use ClimaCalibrate v0.4.0,https://github.com/CliMA/ClimaCoupler.jl/pull/2070
+ClimaCoupler,2066,ClimaAtmos;ClimaLand;SurfaceFluxes,1,8,223,228,0.1,"Update manifests for SF, ClimaLand, and ClimaAtmos",https://github.com/CliMA/ClimaCoupler.jl/pull/2066
+ClimaCoupler,2050,RRTMGP,1,7,91,171,3.99,"Update CMIP env to use Atmos 0.42, RRTMGP 0.22.2",https://github.com/CliMA/ClimaCoupler.jl/pull/2050
+ClimaCoupler,2044,SurfaceFluxes,0,4,100,95,0.07,update Manifest for SF 1.1.0,https://github.com/CliMA/ClimaCoupler.jl/pull/2044
+ClimaCoupler,2036,RRTMGP,1,16,517,139,0.93,Update RRTMGP API (includes gates for CMIP env compat with older version) ,https://github.com/CliMA/ClimaCoupler.jl/pull/2036
+ClimaCoupler,2023,ClimaTimeSteppers,0,4,4,4,1.04,Update Manifest (ClimaTimeSteppers compat bumped to 0.10),https://github.com/CliMA/ClimaCoupler.jl/pull/2023
+ClimaCoupler,2022,RRTMGP;SurfaceFluxes,0,4,88,65,2.05,Temporarily use latest compatible versions of SF / RRTMGP + Up deps,https://github.com/CliMA/ClimaCoupler.jl/pull/2022
+ClimaCoupler,1989,ClimaAtmos,0,6,140,588,0.1,"Update manifests, add ClimaAtmos 0.40",https://github.com/CliMA/ClimaCoupler.jl/pull/1989
+ClimaCoupler,1961,ClimaLand,0,4,12,12,2.7,Update ClimaLand in manifests,https://github.com/CliMA/ClimaCoupler.jl/pull/1961
+ClimaCoupler,1923,ClimaAtmos,0,18,192,172,0.09,Update to ClimaAtmos v0.39.0,https://github.com/CliMA/ClimaCoupler.jl/pull/1923
+ClimaCoupler,1911,ClimaCalibrate,1,15,309,713,1.95,Update calibration pipeline to use ClimaCalibrate v0.3,https://github.com/CliMA/ClimaCoupler.jl/pull/1911
+ClimaCoupler,1896,ClimaTimeSteppers,1,11,852,560,0.85,"up deps; use CTS v0.9, CL v1.8",https://github.com/CliMA/ClimaCoupler.jl/pull/1896
+ClimaCoupler,1832,Thermodynamics,0,3,3,2,0.45,update TD compats,https://github.com/CliMA/ClimaCoupler.jl/pull/1832
+ClimaCoupler,1808,SurfaceFluxes,1,7,189,81,0.26,up deps; use SurfaceFluxes v1,https://github.com/CliMA/ClimaCoupler.jl/pull/1808
+ClimaCoupler,1797,Thermodynamics,0,6,338,211,0.55,up deps; allow Thermodynamics v1,https://github.com/CliMA/ClimaCoupler.jl/pull/1797
+ClimaCoupler,1693,ClimaAtmos;ClimaLand,1,18,295,392,0.83,update to ClimaAtmos v0.35 and ClimaLand v1.5,https://github.com/CliMA/ClimaCoupler.jl/pull/1693
+ClimaCoupler,1665,ClimaAtmos,0,5,2045,344,0.1,update to ClimaAtmos v0.33.1,https://github.com/CliMA/ClimaCoupler.jl/pull/1665
+ClimaCoupler,1657,ClimaLand,1,4,45,53,3.47,update to ClimaLand v1.3.0,https://github.com/CliMA/ClimaCoupler.jl/pull/1657
+ClimaCoupler,1608,ClimaAtmos;ClimaLand,1,11,145,125,2.52,"up deps; use ClimaLand v1.2.1, ClimaAtmos v0.32.0",https://github.com/CliMA/ClimaCoupler.jl/pull/1608
+ClimaCoupler,1604,ClimaDiagnostics,1,6,35,17,56.24,Update ClimaDiagnostics in toml and compat ,https://github.com/CliMA/ClimaCoupler.jl/pull/1604
+ClimaCoupler,1572,SurfaceFluxes,0,1,1,1,4.67,Pin SF to pre-release(0.14.0) commit for nightly AMIP pipeline. ,https://github.com/CliMA/ClimaCoupler.jl/pull/1572
+ClimaCoupler,1532,ClimaLand,1,1,10,8,3.07,Use updated ClimaLand IC API for weatherquest setup.,https://github.com/CliMA/ClimaCoupler.jl/pull/1532
+ClimaCoupler,1510,ClimaLand,1,4,18,44,0.15,use ClimaLand v1,https://github.com/CliMA/ClimaCoupler.jl/pull/1510
