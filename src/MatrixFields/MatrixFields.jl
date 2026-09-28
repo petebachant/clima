@@ -1,0 +1,148 @@
+"""
+    MatrixFields
+
+Module for defining and manipulating `Field`s that represent matrices. It adds
+the [`BandMatrixRow`](@ref) type, which stores the entries of one row of a band
+matrix. A `Field` of `BandMatrixRow`s on a
+`FiniteDifferenceSpace` can be interpreted as a band matrix by vertically
+concatenating the `BandMatrixRow`s. Similarly, a `Field` of `BandMatrixRow`s on
+an `ExtrudedFiniteDifferenceSpace` can be interpreted as a collection of band
+matrices, one for each column of the `Field`. Such `Field`s are called
+`ColumnwiseBandMatrixField`s, and this module adds the following functionality
+for them:
+
+  - Constructors, e.g., `matrix_field = @. BidiagonalMatrixRow(field1, field2)`.
+  - Linear combinations, e.g., `@. 3 * matrix_field1 + matrix_field2 / 3`.
+  - Matrix-vector multiplication, e.g., `@. matrix_field * field`.
+  - Matrix-matrix multiplication, e.g., `@. matrix_field1 * matrix_field2`.
+  - Compatibility with `LinearAlgebra.I`, e.g., `@. matrix_field = (4I,)` or
+    `@. matrix_field - (4I,)`.
+  - Compatibility with generic data types, e.g., the entries of `matrix_field` can
+    be iterators instead of single values, which allows `matrix_field` to
+    represent multiple band matrices at the same time.
+  - Integration with `Operators`, e.g., the `matrix_field` that is applied to
+    the argument of any `FiniteDifferenceOperator` `op` can be obtained using
+    the `FiniteDifferenceOperator` [`operator_matrix`](@ref)`(op)`.
+  - Conversions to native array types, e.g., [`field2arrays`](@ref)`(matrix_field)`
+    converts each column of `matrix_field` into a `BandedMatrix` from
+    `BandedMatrices.jl`.
+  - Custom printing, e.g., `matrix_field` is displayed as the `BandedMatrix` that
+    corresponds to its first column.
+
+This module also supports sparse block matrices of `Field`s through the
+`FieldMatrix` type (see [`FieldNameDict`](@ref)), which is a dictionary that maps
+pairs of [`FieldName`](@ref)s to `ColumnwiseBandMatrixField`s or multiples of
+`LinearAlgebra.I`. This comes with the following functionality:
+
+  - Addition and subtraction, e.g., `@. field_matrix1 + field_matrix2`.
+  - Matrix-vector multiplication, e.g., `@. field_matrix * field_vector`.
+  - Matrix-matrix multiplication, e.g., `@. field_matrix1 * field_matrix2`.
+  - Solving linear equations with [`FieldMatrixSolver`](@ref), a generalization of
+    `ldiv!` that is designed to optimize solver performance.
+"""
+module MatrixFields
+
+import LinearAlgebra: I, UniformScaling, Adjoint
+import Base: inv
+import LinearAlgebra: norm, ldiv!, mul!
+import StaticArrays: SMatrix, SVector
+import BandedMatrices: BandedMatrix, band, _BandedMatrix
+import KrylovKit
+import ClimaComms
+import NVTX
+import Adapt
+using UnrolledUtilities
+
+import ..Utilities: PlusHalf, half, new, recursive_bottom_eltype
+import ..Utilities: @drop_recursion_limits
+import ..Utilities: AutoBroadcaster, is_auto_broadcastable, auto_broadcasted
+import ..Utilities: add_auto_broadcasters, drop_auto_broadcasters
+import ..DataLayouts
+import ..DataLayouts: DataLayout
+import ..Geometry
+import ..Topologies
+import ..Spaces
+import ..Fields
+import ..Operators
+using ..Geometry:
+    mul_with_projection, mul_return_type, basis1, basis2, tensor_type
+
+export DiagonalMatrixRow,
+    BidiagonalMatrixRow,
+    TridiagonalMatrixRow,
+    QuaddiagonalMatrixRow,
+    PentadiagonalMatrixRow
+export FieldVectorKeys, FieldMatrixKeys, FieldVectorView, FieldMatrix
+export FieldMatrixWithSolver
+
+include("band_matrix_row.jl")
+
+const ColumnwiseBandMatrixField{V, S} = Fields.Field{
+    V, S,
+} where {
+    V <: DataLayout{<:BandMatrixRow},
+    S <: Union{Spaces.AbstractSpace, Operators.PlaceholderSpace}, # so that this can exist inside cuda kernels
+}
+
+include("matrix_shape.jl")
+include("matrix_multiplication.jl")
+include("lazy_operators.jl")
+include("operator_matrices.jl")
+include("field2arrays.jl")
+include("field_name.jl")
+include("field_name_set.jl")
+include("field_name_dict.jl")
+include("single_field_solver.jl")
+include("multiple_field_solver.jl")
+include("field_matrix_solver.jl")
+include("field_matrix_iterative_solver.jl")
+include("field_matrix_with_solver.jl")
+
+# Evaluate multiplications in left-associative order. This should technically be
+# right-associative, but flipping the order worsens performance in GPU kernels,
+# where the second argument of each matrix product is cached. Left-associativity
+# makes the first argument grow in bandwidth when multiplying a chain of
+# matrices, whereas right-associativity makes the second argument grow instead.
+Base.broadcasted(::Fields.AbstractFieldStyle, ::typeof(*), arg, args...) =
+    unrolled_reduce((x, y) -> Base.broadcasted(*, x, y), args; init = arg)
+
+Base.broadcasted(style::Fields.AbstractFieldStyle, ::typeof(*), x, y) =
+    check_entry(FieldNamePair, x) && check_entry(FieldName, y) ?
+    Base.broadcasted(MultiplyColumnwiseBandMatrixField(), x, y) :
+    auto_broadcasted(style, *, (x, y))
+
+function Base.broadcasted(
+    ::MultiplyColumnwiseBandMatrixField,
+    x::Fields.PointField,
+    y,
+)
+    @assert eltype(x) <: DiagonalMatrixRow
+    auto_broadcasted(*, (x.entries.:1, y))
+end
+
+function Base.show(io::IO, field::ColumnwiseBandMatrixField)
+    print(io, eltype(field), "-valued Field")
+    if eltype(eltype(field)) <: Number
+        shape = typeof(matrix_shape(field)).name.name
+        if field isa Fields.FiniteDifferenceField
+            println(io, " that corresponds to the $shape matrix")
+        else
+            println(io, " whose first column corresponds to the $shape matrix")
+        end
+        column_field = Fields.column(field, 1, 1, 1)
+        io = IOContext(io, :compact => true, :limit => true)
+        ClimaComms.allowscalar(ClimaComms.device(field)) do
+            Base.print_array(io, column_field2array_view(column_field))
+        end
+    else
+        # When a BandedMatrix with non-number entries is printed, it currently
+        # either prints in an illegible format (e.g., if it has Tensor entries)
+        # or crashes during the evaluation of isassigned (e.g., if it has Tuple
+        # or NamedTuple entries). So, for matrix fields with non-number entries,
+        # we fall back to the default function for printing fields.
+        print(io, ":")
+        Fields._show_compact_field(io, field, "  ", true)
+    end
+end
+
+end

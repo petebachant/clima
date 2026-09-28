@@ -1,0 +1,125 @@
+name: Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+    tags: '*'
+  pull_request:
+    branches:
+      - main
+
+# Needed to allow julia-actions/cache to delete old caches that it has created
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The precompile workload (src/precompile_workload.jl) only cuts interactive
+# first-use latency; CI gains nothing from it and pays its compile time and
+# memory. Under coverage the pkgimage is bypassed, so the workload recompiles
+# under instrumentation and is discarded, so every CI job skips it.
+env:
+  CLIMA_SKIP_PRECOMPILE_WORKLOAD: "true"
+
+jobs:
+  test:
+    # Portability across Julia versions and operating systems, uninstrumented.
+    # The 1.10 ubuntu run is instrumented and sharded in the `coverage` job
+    # below, so it is excluded here rather than run twice.
+    timeout-minutes: ${{ matrix.os == 'macOS-latest' && 120 || 80 }}
+    name: ci ${{ matrix.version }} - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        version:
+          - '1.10'
+          - '1.11'
+        os:
+          - ubuntu-latest
+          # There is a concurrency limit for MacOS runners across the
+          # entire organization.
+          # (see https://docs.github.com/en/actions/reference/limits#job-concurrency-limits-for-github-hosted-runners)
+          # To help with this, MacOS runners are only run when PRs are merged
+          # into the main branch.
+          - ${{ github.event_name == 'push' && 'macos-latest' || '' }}
+        exclude:
+          - os: ''
+          # Covered by the sharded `coverage` job.
+          - version: '1.10'
+            os: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-buildpkg@latest
+      - uses: julia-actions/julia-runtest@latest
+        with:
+          coverage: false
+        env:
+          # Buildkite splits the same suite and runs the tiers excluded here,
+          # which repeat their cases or run end-to-end.
+          TEST_EXCLUDE_TIER: "conv,inference,allocs,smoke"
+          # `slow` marks the multi-minute tests (see test/tabulated_tests.jl).
+          TEST_EXCLUDE_SLOW: "true"
+          # Collected by the "Upload plot artifacts" step; the Makie and Plots
+          # extension tests write their rendered PNGs here (test/output).
+          CI_OUTPUT_DIR: output
+      - name: Upload plot artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: plot-output-${{ matrix.version }}-${{ matrix.os }}
+          path: test/output
+          if-no-files-found: ignore
+
+  coverage:
+    # The 1.10 ubuntu run is instrumented for coverage, which bypasses the
+    # pkgimages and takes ~2.5x as long. It is sharded by subsystem so no single
+    # job's time or memory reaches the runner limit. `operators` is about half
+    # the suite, so it is one shard and every other subsystem is the other; the
+    # two shards together cover the suite. Each uploads its own lcov, which
+    # codecov merges for the commit.
+    timeout-minutes: 80
+    name: coverage - ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: operators
+            filter: "TEST_SUBSYSTEM=operators"
+          - shard: rest
+            filter: "TEST_EXCLUDE_SUBSYSTEM=operators"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-buildpkg@latest
+      - name: Select subsystem shard
+        run: echo "${{ matrix.filter }}" >> "$GITHUB_ENV"
+      - uses: julia-actions/julia-runtest@latest
+        with:
+          coverage: true
+        env:
+          TEST_EXCLUDE_TIER: "conv,inference,allocs,smoke"
+          TEST_EXCLUDE_SLOW: "true"
+      - uses: julia-actions/julia-processcoverage@latest
+      - uses: codecov/codecov-action@v7
+        with:
+          files: lcov.info
+          flags: ${{ matrix.shard }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

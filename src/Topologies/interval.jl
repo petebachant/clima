@@ -1,0 +1,169 @@
+abstract type AbstractIntervalTopology <: AbstractTopology end
+
+"""
+    IntervalTopology(context::ClimaComms.SingletonCommsContext, mesh::Meshes.IntervalMesh)
+    IntervalTopology(device::ClimaComms.AbstractDevice, mesh::Meshes.IntervalMesh)
+
+Sequential topology on a [`Meshes.IntervalMesh`](@ref). Only a
+`SingletonCommsContext` is supported.
+
+# Fields
+
+  - `context`: The `ClimaComms` context on which the topology is defined.
+  - `mesh`: The `IntervalMesh`.
+  - `boundaries`: `NamedTuple` mapping boundary names to boundary tags; empty for a
+    periodic domain.
+"""
+struct IntervalTopology{
+    C <: ClimaComms.AbstractCommsContext,
+    M <: Meshes.IntervalMesh,
+    B,
+} <: AbstractIntervalTopology
+    context::C
+    mesh::M
+    boundaries::B
+end
+
+Adapt.@adapt_structure IntervalTopology
+
+## gpu
+struct DeviceIntervalTopology{B} <: AbstractIntervalTopology
+    boundaries::B
+end
+
+ClimaComms.context(topology::DeviceIntervalTopology) = DeviceSideContext()
+ClimaComms.device(topology::DeviceIntervalTopology) = DeviceSideDevice()
+
+function IntervalTopology(
+    context::ClimaComms.AbstractCommsContext,
+    mesh::Meshes.IntervalMesh,
+)
+    get!(Cache.OBJECT_CACHE, (IntervalTopology, context, mesh)) do
+        _IntervalTopology(context, mesh)
+    end
+end
+
+function _IntervalTopology(
+    context::ClimaComms.AbstractCommsContext,
+    mesh::Meshes.IntervalMesh,
+)
+    # currently only support SingletonCommsContext
+    @assert context isa ClimaComms.SingletonCommsContext
+    if Domains.isperiodic(mesh.domain)
+        boundaries = NamedTuple()
+    elseif mesh.domain.boundary_names[1] == mesh.domain.boundary_names[2]
+        boundaries = NamedTuple{(mesh.domain.boundary_names[1],)}(1)
+    else
+        boundaries = NamedTuple{mesh.domain.boundary_names}((1, 2))
+    end
+    IntervalTopology(context, mesh, boundaries)
+end
+
+IntervalTopology(device::ClimaComms.AbstractDevice, mesh::Meshes.IntervalMesh) =
+    IntervalTopology(ClimaComms.SingletonCommsContext(device), mesh)
+
+isperiodic(topology::AbstractIntervalTopology) = isempty(topology.boundaries)
+
+function Base.show(io::IO, topology::IntervalTopology)
+    println(io, nameof(typeof(topology)))
+    print(io, "  context: ")
+    print_context(io, topology.context)
+    println(io)
+    print(io, "  mesh: ", topology.mesh)
+end
+
+function mesh(topology::AbstractIntervalTopology)
+    getfield(topology, :mesh)
+end
+
+function boundaries(topology::AbstractIntervalTopology)
+    getfield(topology, :boundaries)
+end
+
+function domain(topology::AbstractIntervalTopology)
+    Meshes.domain(mesh(topology))
+end
+
+function nlocalelems(topology::AbstractIntervalTopology)
+    topology_mesh = mesh(topology)
+    length(topology_mesh.faces) - 1
+end
+
+function vertex_coordinates(topology::AbstractIntervalTopology, elem)
+    topology_mesh = mesh(topology)
+    (topology_mesh.faces[elem], topology_mesh.faces[elem + 1])
+end
+
+function opposing_face(topology::AbstractIntervalTopology, elem, face)
+    topology_mesh = mesh(topology)
+    n = length(topology_mesh.faces) - 1
+    if face == 1
+        if elem == 1
+            if isperiodic(topology)
+                opelem = n
+            else
+                return (0, 1, false)
+            end
+        else
+            opelem = elem - 1
+        end
+        opface = 2
+    else
+        if elem == n
+            if isperiodic(topology)
+                opelem = 1
+            else
+                return (0, 2, false)
+            end
+        end
+        opface = 1
+    end
+    return (opelem, opface, false)
+end
+
+function Base.length(fiter::InteriorFaceIterator{<:AbstractIntervalTopology})
+    topology = fiter.topology
+    topology_mesh = mesh(topology)
+    periodic = isempty(topology.boundaries)
+    if periodic
+        length(topology_mesh.faces) - 1
+    else
+        length(topology_mesh.faces) - 2
+    end
+end
+
+function Base.iterate(
+    fiter::InteriorFaceIterator{<:AbstractIntervalTopology},
+    i = 1,
+)
+    topology = fiter.topology
+    topology_mesh = mesh(topology)
+    periodic = isempty(boundaries(topology))
+    n = length(topology_mesh.faces) - 1
+    if i < n
+        return (i + 1, 1, i, 2, false), i + 1
+    elseif i == n && periodic
+        return (1, 1, i, 2, false), i + 1
+    else
+        return nothing
+    end
+end
+
+function local_neighboring_elements(topology::AbstractIntervalTopology, elem)
+    (opelem_1, _, _) = opposing_face(topology, elem, 1)
+    (opelem_2, _, _) = opposing_face(topology, elem, 2)
+    if opelem_1 == 0
+        if opelem_2 == 0
+            return ()
+        else
+            return (opelem_2,)
+        end
+    else
+        if opelem_2 == 0
+            return (opelem_1,)
+        else
+            return (opelem_1, opelem_2)
+        end
+    end
+end
+ghost_neighboring_elements(topology::AbstractIntervalTopology, elem) = ()

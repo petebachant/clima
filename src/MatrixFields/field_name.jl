@@ -1,0 +1,264 @@
+"""
+    FieldName(name_chain...)
+
+Singleton type that represents a chain of `getproperty` calls, which can be used to
+access a property or sub-property of an object `x` using the function
+`get_field(x, name)`. The entire object `x` can also be accessed with the empty
+`FieldName()`.
+
+A `FieldName` behaves like a scalar for broadcasting.
+"""
+struct FieldName{name_chain} end
+FieldName() = FieldName{()}() # This is required for type stability.
+FieldName(name_chain...) = FieldName{name_chain}()
+Base.broadcastable(name::FieldName) = tuple(name)
+
+"""
+    @name(expr)
+
+Construct a [`FieldName`](@ref) from a chain of `getproperty` calls. For example:
+
+  - `name = @name()`, in which case `get_field(x, name)` returns `x`.
+  - `name = @name(a)`, in which case `get_field(x, name)` returns `x.a`.
+  - `name = @name(a.b.c)`, in which case `get_field(x, name)` returns `x.a.b.c`.
+  - `name = @name(a.b.c.:(1).d)`, in which case `get_field(x, name)` returns
+    `x.a.b.c.:(1).d`.
+
+This macro is preferred over the `FieldName` constructor because it checks
+whether `expr` is a syntactically valid chain of `getproperty` calls before
+calling the constructor.
+"""
+macro name()
+    return :(FieldName())
+end
+macro name(expr)
+    return :(FieldName($(name_chain_exprs(expr)...)))
+end
+
+name_chain_exprs(expr) =
+    expr isa Symbol ? (QuoteNode(expr),) :
+    expr isa Union{Integer, QuoteNode} ? (expr,) :
+    Meta.isexpr(expr, :quote) && Meta.isexpr(expr.args[1], :$) ? (esc(expr),) :
+    Meta.isexpr(expr, :.) ?
+    (name_chain_exprs(expr.args[1])..., name_chain_exprs(expr.args[2])...) :
+    error("invalid syntax _.$((expr isa Expr ? string : repr)(expr))")
+
+# Show a FieldName with @name syntax, instead of the default constructor syntax.
+function Base.show(io::IO, ::FieldName{name_chain}) where {name_chain}
+    quoted_names = map(name -> name isa Integer ? ":($name)" : name, name_chain)
+    print(io, "@name($(join(quoted_names, '.')))")
+end
+
+"""
+    extract_first(name::FieldName)
+
+Return the first component of the name chain of `name`, which is either a
+`Symbol` or an `Integer`; e.g., `extract_first(@name(a.b.c)) == :a`.
+"""
+extract_first(::FieldName{name_chain}) where {name_chain} = first(name_chain)
+
+"""
+    drop_first(name::FieldName)
+
+Return the `FieldName` obtained by removing the first component of the name chain
+of `name`; e.g., `drop_first(@name(a.b.c)) == @name(b.c)`.
+"""
+drop_first(::FieldName{name_chain}) where {name_chain} =
+    FieldName(Base.tail(name_chain)...)
+
+"""
+    has_field(x, name::FieldName)
+
+Return whether `get_field(x, name)` is valid, i.e., whether each component of the
+name chain of `name` is one of the `propertynames` of the value selected by the
+preceding components. Every `x` has the empty field `@name()`.
+"""
+has_field(x, ::FieldName{()}) = true
+has_field(x, name::FieldName) =
+    extract_first(name) in propertynames(x) &&
+    has_field(getproperty(x, extract_first(name)), drop_first(name))
+
+"""
+    get_field(x, name::FieldName)
+
+Return the field of `x` selected by `name`, by calling `getproperty` once for
+each component of the name chain; e.g., `get_field(x, @name(a.b))` is `x.a.b`.
+The empty name `@name()` returns `x` itself.
+"""
+get_field(x, ::FieldName{()}) = x
+get_field(x, name::FieldName) =
+    get_field(getproperty(x, extract_first(name)), drop_first(name))
+
+broadcasted_has_field(::Type{X}, ::FieldName{()}) where {X} = true
+broadcasted_has_field(::Type{X}, name::FieldName) where {X} =
+    extract_first(name) in fieldnames(X) &&
+    broadcasted_has_field(fieldtype(X, extract_first(name)), drop_first(name))
+
+broadcasted_get_field(x, ::FieldName{()}) = x
+broadcasted_get_field(x, name::FieldName) =
+    broadcasted_get_field(getfield(x, extract_first(name)), drop_first(name))
+
+"""
+    is_child_name(child_name::FieldName, parent_name::FieldName)
+
+Return whether the name chain of `parent_name` is a prefix of the name chain of
+`child_name`, so that `child_name` refers to `parent_name` or to a field nested
+inside of it. Every name is a child of itself and of the empty name `@name()`.
+"""
+is_child_name(
+    ::FieldName{child_name_chain},
+    ::FieldName{parent_name_chain},
+) where {child_name_chain, parent_name_chain} =
+    length(child_name_chain) >= length(parent_name_chain) &&
+    unrolled_take(child_name_chain, Val(length(parent_name_chain))) ==
+    parent_name_chain
+
+is_overlapping_name(name1, name2) =
+    is_child_name(name1, name2) || is_child_name(name2, name1)
+
+extract_internal_name(
+    child_name::FieldName{child_name_chain},
+    parent_name::FieldName{parent_name_chain},
+) where {child_name_chain, parent_name_chain} =
+    is_child_name(child_name, parent_name) ?
+    FieldName(
+        unrolled_drop(child_name_chain, Val(length(parent_name_chain)))...,
+    ) : error("$child_name is not a child name of $parent_name")
+
+"""
+    append_internal_name(name::FieldName, internal_name::FieldName)
+
+Return the `FieldName` whose name chain is the concatenation of the name chains
+of `name` and `internal_name`; e.g.,
+`append_internal_name(@name(a.b), @name(c)) == @name(a.b.c)`. This is the inverse
+of `extract_internal_name`.
+"""
+append_internal_name(
+    ::FieldName{name_chain},
+    ::FieldName{internal_name_chain},
+) where {name_chain, internal_name_chain} =
+    FieldName(name_chain..., internal_name_chain...)
+
+"""
+    top_level_names(x)
+
+Return a tuple of single-component `FieldName`s, one for each of the
+`propertynames` of `x`; e.g., `(@name(a), @name(b))` for a `NamedTuple` with keys
+`a` and `b`. The result is an empty tuple when `x` has no properties.
+"""
+top_level_names(x) = wrapped_prop_names(Val(propertynames(x)))
+wrapped_prop_names(::Val{()}) = ()
+wrapped_prop_names(::Val{prop_names}) where {prop_names} = (
+    FieldName(first(prop_names)),
+    wrapped_prop_names(Val(Base.tail(prop_names)))...,
+)
+
+"""
+    filtered_names(f, x)
+
+Return a tuple of the `FieldName`s of all fields of `x` (including `x` itself,
+as `@name()`) for which `f(field)` is true, searching the properties of `x`
+recursively. The recursion stops at any field that satisfies `f`, so no returned
+name is a child of another, and fields without properties that do not satisfy
+`f` are omitted.
+"""
+filtered_names(f::F, x) where {F} = filtered_child_names(f, x, @name())
+function filtered_child_names(f::F, x, name) where {F}
+    field = get_field(x, name)
+    f(field) && return (name,)
+    internal_names = top_level_names(field)
+    isempty(internal_names) && return ()
+    tuples_of_child_names = unrolled_map(internal_names) do internal_name
+        filtered_child_names(f, x, append_internal_name(name, internal_name))
+    end
+    return unrolled_flatten(tuples_of_child_names)
+end
+
+################################################################################
+
+"""
+    FieldNameTree(x)
+
+Tree of [`FieldName`](@ref)s that can be used to access `x` with
+`get_field(x, name)`. Check whether a `name` is valid by calling
+`is_valid_name(name, tree)`, and extract the children of `name` by calling
+`child_names(name, tree)`.
+"""
+abstract type FieldNameTree end
+struct FieldNameTreeLeaf{V <: FieldName} <: FieldNameTree
+    name::V
+end
+struct FieldNameTreeNode{V <: FieldName, S <: NTuple{<:Any, FieldNameTree}} <:
+       FieldNameTree
+    name::V
+    subtrees::S
+end
+
+FieldNameTree(x) = subtree_at_name(x, @name())
+function subtree_at_name(x, name)
+    internal_names = top_level_names(get_field(x, name))
+    return if isempty(internal_names)
+        FieldNameTreeLeaf(name)
+    else
+        subsubtrees_at_name = unrolled_map(internal_names) do internal_name
+            subtree_at_name(x, append_internal_name(name, internal_name))
+        end
+        FieldNameTreeNode(name, subsubtrees_at_name)
+    end
+end
+
+is_valid_name(name, tree) =
+    name == tree.name ||
+    tree isa FieldNameTreeNode &&
+    unrolled_any(subtree -> is_valid_name(name, subtree), tree.subtrees)
+
+function child_names(name, tree)
+    is_valid_name(name, tree) || error("$name is not a valid name")
+    subtree = get_subtree_at_name(name, tree)
+    subtree isa FieldNameTreeNode || error("$name does not have child names")
+    return unrolled_map(subsubtree -> subsubtree.name, subtree.subtrees)
+end
+get_subtree_at_name(name, tree) =
+    if name == tree.name
+        tree
+    else
+        subtrees_at_name = unrolled_filter(tree.subtrees) do subtree
+            is_valid_name(name, subtree)
+        end
+        @assert length(subtrees_at_name) == 1
+        get_subtree_at_name(name, subtrees_at_name[1])
+    end
+
+################################################################################
+
+# This is required for type-stability as of Julia 1.9.
+if hasfield(Method, :recursion_relation)
+    dont_limit = (args...) -> true
+    for m in methods(has_field)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(get_field)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(broadcasted_has_field)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(broadcasted_get_field)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(wrapped_prop_names)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(filtered_child_names)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(subtree_at_name)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(is_valid_name)
+        m.recursion_relation = dont_limit
+    end
+    for m in methods(get_subtree_at_name)
+        m.recursion_relation = dont_limit
+    end
+end

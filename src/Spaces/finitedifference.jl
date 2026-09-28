@@ -1,0 +1,159 @@
+"""
+    AbstractFiniteDifferenceSpace <: AbstractSpace
+
+Abstract supertype of one-dimensional, vertically staggered finite difference
+spaces. The concrete subtype is [`Spaces.FiniteDifferenceSpace`](@ref).
+"""
+abstract type AbstractFiniteDifferenceSpace <: AbstractSpace end
+
+"""
+    FiniteDifferenceSpace(grid::Grids.FiniteDifferenceGrid, staggering::Staggering)
+    FiniteDifferenceSpace(topology::Topologies.IntervalTopology, staggering::Staggering)
+
+One-dimensional finite-difference space, located at either
+
+  - cell centers, where `staggering` is [`Grids.CellCenter`](@ref), or
+  - cell faces, where `staggering` is [`Grids.CellFace`](@ref).
+"""
+struct FiniteDifferenceSpace{
+    G <: Grids.AbstractFiniteDifferenceGrid,
+    S <: Staggering,
+} <: AbstractFiniteDifferenceSpace
+    grid::G
+    staggering::S
+end
+FiniteDifferenceSpace(
+    topology::Topologies.IntervalTopology,
+    staggering::Staggering,
+) = FiniteDifferenceSpace(Grids.FiniteDifferenceGrid(topology), staggering)
+
+local_geometry_type(::Type{FiniteDifferenceSpace{G, S}}) where {G, S} =
+    local_geometry_type(G)
+
+"""
+    FaceFiniteDifferenceSpace{G}
+
+Alias of [`Spaces.FiniteDifferenceSpace`](@ref) with [`Grids.CellFace`](@ref)
+staggering: a one-dimensional space located at cell faces. `G` is the finite
+difference grid type.
+"""
+const FaceFiniteDifferenceSpace{G} = FiniteDifferenceSpace{G, CellFace}
+
+"""
+    CenterFiniteDifferenceSpace{G}
+
+Alias of [`Spaces.FiniteDifferenceSpace`](@ref) with [`Grids.CellCenter`](@ref)
+staggering: a one-dimensional space located at cell centers. `G` is the finite
+difference grid type.
+"""
+const CenterFiniteDifferenceSpace{G} = FiniteDifferenceSpace{G, CellCenter}
+
+grid(space::AbstractFiniteDifferenceSpace) = getfield(space, :grid)
+staggering(space::FiniteDifferenceSpace) = getfield(space, :staggering)
+
+space(grid::Grids.AbstractFiniteDifferenceGrid, staggering::Staggering) =
+    FiniteDifferenceSpace(grid, staggering)
+
+horizontal_space(space::FiniteDifferenceSpace) = level(space, 1)
+
+function Base.show(io::IO, space::FiniteDifferenceSpace)
+    indent = get(io, :indent, 0)
+    iio = IOContext(io, :indent => indent + 2)
+    println(
+        io,
+        space isa CenterFiniteDifferenceSpace ? "CenterFiniteDifferenceSpace" :
+        "FaceFiniteDifferenceSpace",
+        ":",
+    )
+    print(iio, " "^(indent + 2), "context: ")
+    Topologies.print_context(iio, ClimaComms.context(space))
+    println(iio)
+    print(iio, " "^(indent + 2), "mesh: ", topology(space).mesh)
+end
+
+FaceFiniteDifferenceSpace(grid::Grids.AbstractFiniteDifferenceGrid) =
+    FiniteDifferenceSpace(grid, CellFace())
+CenterFiniteDifferenceSpace(grid::Grids.AbstractFiniteDifferenceGrid) =
+    FiniteDifferenceSpace(grid, CellCenter())
+
+FaceFiniteDifferenceSpace(space::FiniteDifferenceSpace) =
+    FiniteDifferenceSpace(grid(space), CellFace())
+CenterFiniteDifferenceSpace(space::FiniteDifferenceSpace) =
+    FiniteDifferenceSpace(grid(space), CellCenter())
+
+FaceFiniteDifferenceSpace(topology::Topologies.IntervalTopology) =
+    FiniteDifferenceSpace(Grids.FiniteDifferenceGrid(topology), CellFace())
+CenterFiniteDifferenceSpace(topology::Topologies.IntervalTopology) =
+    FiniteDifferenceSpace(Grids.FiniteDifferenceGrid(topology), CellCenter())
+
+FaceFiniteDifferenceSpace(
+    device::ClimaComms.AbstractDevice,
+    mesh::Meshes.IntervalMesh,
+) = FiniteDifferenceSpace(Grids.FiniteDifferenceGrid(device, mesh), CellFace())
+CenterFiniteDifferenceSpace(
+    device::ClimaComms.AbstractDevice,
+    mesh::Meshes.IntervalMesh,
+) = FiniteDifferenceSpace(
+    Grids.FiniteDifferenceGrid(device, mesh),
+    CellCenter(),
+)
+
+Adapt.adapt_structure(to, space::FiniteDifferenceSpace) =
+    FiniteDifferenceSpace(Adapt.adapt(to, grid(space)), staggering(space))
+
+Base.@propagate_inbounds level(space::FiniteDifferenceSpace, v) = PointSpace(
+    ClimaComms.context(space),
+    level(local_geometry_data(space), integer_level_index(space, v)),
+)
+
+Base.@propagate_inbounds slab(space::FiniteDifferenceSpace, v, h) =
+    isone(h) ? level(space, v) : throw(ArgumentError("Space has only one column"))
+
+column(space::FiniteDifferenceSpace, indices...) =
+    all(isone, indices) ? space : throw(ArgumentError("Space has only one column"))
+
+"""
+    face_space(space::FiniteDifferenceSpace)
+
+Return the face-centered space corresponding to `space`. If `space` is already
+face-centered, return an equal space.
+"""
+function face_space(space::FiniteDifferenceSpace)
+    return FiniteDifferenceSpace(grid(space), CellFace())
+end
+
+"""
+    center_space(space::FiniteDifferenceSpace)
+
+Return the cell-centered space corresponding to `space`. If `space` is already
+cell-centered, return an equal space.
+"""
+function center_space(space::FiniteDifferenceSpace)
+    return FiniteDifferenceSpace(grid(space), CellCenter())
+end
+
+ncolumns(::FiniteDifferenceSpace) = 1
+nlevels(space::FiniteDifferenceSpace) = length(space)
+# TODO: deprecate?
+Base.length(space::FiniteDifferenceSpace) = length(coordinates_data(space))
+
+"""
+    Δz_data(space::AbstractSpace)
+
+Return a `DataLayout` containing the vertical extent `Δz = ∂z/∂ξ³` of each cell of
+`space` [m].
+"""
+function Δz_data(space::AbstractSpace)
+    lg = local_geometry_data(space)
+    return lg.∂x∂ξ.components.data.:9
+end
+
+function left_boundary_name(space::AbstractSpace)
+    boundaries = Topologies.boundaries(vertical_topology(space))
+    propertynames(boundaries)[1]
+end
+
+function right_boundary_name(space::AbstractSpace)
+    boundaries = Topologies.boundaries(vertical_topology(space))
+    propertynames(boundaries)[2]
+end
