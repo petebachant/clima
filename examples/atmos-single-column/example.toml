@@ -1,0 +1,4 @@
+title = "ClimaAtmos single-column simulation"
+summary = "Run 10 minutes of the BOMEX single-column case and read diagnostics with ClimaAnalysis"
+nightly = false
+timeout_minutes = 20

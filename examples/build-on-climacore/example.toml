@@ -1,0 +1,4 @@
+title = "Build your own model on ClimaCore"
+summary = "1D column heat diffusion with ClimaCore operators, integrated by ClimaTimeSteppers"
+nightly = false
+timeout_minutes = 15

@@ -1,0 +1,4 @@
+title = "Coupled slabplanet (atmosphere + land + slab ocean)"
+summary = "Run 5 coupling steps of a coarse global ClimaCoupler slabplanet and check its budgets"
+nightly = true
+timeout_minutes = 30

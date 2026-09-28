@@ -1,0 +1,4 @@
+title = "CliMA physics in your own model"
+summary = "Thermodynamics, 1-moment microphysics and surface fluxes on plain scalars and arrays"
+nightly = false
+timeout_minutes = 15

@@ -1,0 +1,4 @@
+title = "Single-column soil simulation"
+summary = "Run a 2-day ClimaLand soil column (water + heat) and check its budgets close"
+nightly = false
+timeout_minutes = 15

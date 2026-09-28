@@ -1,0 +1,4 @@
+title = "Calibrate a toy model"
+summary = "Recover two parameters of a logistic-growth model with ClimaCalibrate and EKI"
+nightly = false
+timeout_minutes = 10

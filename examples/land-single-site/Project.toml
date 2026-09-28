@@ -1,14 +1,6 @@
 [deps]
-ClimaComms = "3a4d1b5c-c61d-41fd-a00a-5873ba7a1b0d"
-ClimaCore = "d414da3d-4745-48bb-8d80-42e94e092884"
 ClimaLand = "08f4d4ce-cf43-44bb-ad95-9d2d5f413532"
-ClimaParams = "5c42b081-d73a-476f-9059-fd94b934656c"
-ClimaTimeSteppers = "595c0a79-7f3d-439a-bc5a-b232dc3bde79"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [sources]
-ClimaComms = {path = "../../packages/ClimaComms"}
-ClimaCore = {path = "../../packages/ClimaCore"}
 ClimaLand = {path = "../../packages/ClimaLand"}
-ClimaParams = {path = "../../packages/ClimaParams"}
-ClimaTimeSteppers = {path = "../../packages/ClimaTimeSteppers"}
