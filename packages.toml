@@ -8,7 +8,7 @@
 # Oceananigans, ClimaOcean, ClimaSeaIce, EnsembleKalmanProcesses.
 
 [dev-guides]
-path = "dev-guides"
+path = "docs/dev"
 upstream = "https://github.com/CliMA/DeveloperGuides.git"
 branch = "main"
 julia = false
