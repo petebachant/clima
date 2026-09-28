@@ -37,7 +37,7 @@ jobs:
         run: |
           julia tools/mono.jl workspace
           julia tools/mono.jl codeowners
-          git diff --exit-code Project.toml .github/CODEOWNERS .github/labeler.yml
+          git diff --exit-code Project.toml .github/CODEOWNERS .github/triage.json .github/ISSUE_TEMPLATE
       - name: Affected packages
         id: affected
         run: |

@@ -12,9 +12,9 @@ plus a branch ruleset that requires code-owner review.
    has an `owners` list, and `[_repo]` lists the owners of shared
    infrastructure.
 2. **Generated files.** `julia tools/mono.jl codeowners` writes
-   [.github/CODEOWNERS](../.github/CODEOWNERS) and
-   [.github/labeler.yml](../.github/labeler.yml). CI fails if either is
-   out of date. Don't edit them by hand.
+   [.github/CODEOWNERS](../.github/CODEOWNERS), the triage map, and the
+   issue form (see [Team boards](#team-boards-github-projects)). CI fails
+   if any of them is out of date. Don't edit them by hand.
 3. **Who owns what:**
    - `packages/<Pkg>/` belongs to that package's owners.
    - `docs/dev/` belongs to the DeveloperGuides owners.
@@ -25,9 +25,9 @@ plus a branch ruleset that requires code-owner review.
    - `tools/`, `.github/`, `.buildkite/`, `packages.toml`, `Project.toml`,
      and anything unmatched belong to `[_repo]` (`@CliMA/software`).
 4. **Review requests and labels.** GitHub automatically requests review
-   from the owners of every path a PR touches. The labeler adds
-   `pkg: <Pkg>` labels, so people can filter PRs and notifications by
-   package.
+   from the owners of every path a PR touches. Triage adds `pkg: <Pkg>`
+   labels, so people can filter PRs and notifications by package, and puts
+   the PR on the owning teams' boards.
 5. **Enforcement.** Enable it with a ruleset on `main`:
    - require a pull request;
    - **require review from Code Owners**;
@@ -136,10 +136,55 @@ package-shaped set would be:
 A person can be on several teams. Once the teams exist, replace handles in
 `packages.toml` with team names and rerun `mono.jl codeowners`.
 
+## Team boards (GitHub Projects)
+
+Each team gets one org-level GitHub Project, used as its kanban board.
+Issues and PRs land on the right board automatically.
+
+**Package → team.** In `packages.toml`, every package has a `team`, and
+`[_teams]` maps each team to its project number. `mono.jl codeowners`
+generates two things from that:
+- [.github/triage.json](../.github/triage.json): the label → team → project
+  map, plus the path prefixes for each label;
+- [.github/ISSUE_TEMPLATE/issue.yml](../.github/ISSUE_TEMPLATE/issue.yml):
+  an issue form with a required **Package** dropdown. Blank issues are
+  disabled.
+
+**[triage.yml](../.github/workflows/triage.yml) does the rest:**
+- **Issues:** it applies the label chosen in the form.
+- **PRs:** it applies one `pkg:` label per area the changed files touch
+  (examples, experiments, infrastructure, dev guides, or a package).
+- **Routing:** it adds the item to every matching team's board. Adding is
+  idempotent. A PR touching ClimaCore and ClimaAtmos lands on both the
+  `core` and `atmos` boards, which is how both teams see a cross-cutting
+  change.
+- **Relabeling:** relabeling an issue by hand re-runs triage, so moving an
+  issue to another package also puts it on that team's board.
+
+Labeling and routing happen in the same job on purpose. Labels added with
+`GITHUB_TOKEN` don't trigger other workflows, so the usual pattern (a
+labeler workflow plus a separate "add to project on label" workflow) would
+never fire for bot-applied labels.
+
+**Setup (org admin):**
+1. Create one project per team. Use the same template for each (e.g.
+   Status: Triage → Ready → In progress → Review → Done; plus fields for
+   Package and Priority), then put the numbers in `packages.toml`
+   `[_teams]`.
+2. Add a `PROJECTS_TOKEN` secret: a GitHub App or fine-grained PAT with
+   org Projects read/write. Without it, triage only labels.
+3. In each project, turn on the built-in workflows: "Item closed → Done",
+   "Pull request merged → Done", and "Auto-archive items" after N days.
+   Leave "Auto-add to project" off. triage.yml does the adding, with one
+   rule set for all teams instead of per-project filters.
+4. Optionally, one **cross-team roadmap** project that pulls in items
+   labeled `breaking` or `release`, so coordinated releases are visible
+   across teams.
+
+Teams map roughly 1:1 onto CODEOWNERS groups. The owners who review a path
+also triage its board.
+
 ## Also worth setting up
 
-- **Issue forms** with a required "Package" dropdown that applies the
-  `pkg:` label. GitHub has no per-path "watch", so labels are how people
-  follow just their packages.
 - **A pointer for users.** The CODEOWNERS file doubles as "who to ask about
   X". Link it from the README once owners are confirmed.

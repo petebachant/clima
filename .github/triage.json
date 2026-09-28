@@ -1,0 +1,35 @@
+{
+  "teams": {
+    "atmos": {"project": 0, "name": "Atmosphere"},
+    "calibration": {"project": 0, "name": "Calibration"},
+    "core": {"project": 0, "name": "Core infrastructure"},
+    "coupler": {"project": 0, "name": "Coupler & experiments"},
+    "land": {"project": 0, "name": "Land"},
+    "physics": {"project": 0, "name": "Physics parameterizations"},
+    "software": {"project": 0, "name": "Software & infrastructure"}
+  },
+  "areas": [
+    {"label": "pkg: ClimaAnalysis", "team": "core", "paths": ["packages/ClimaAnalysis/"]},
+    {"label": "pkg: ClimaComms", "team": "core", "paths": ["packages/ClimaComms/"]},
+    {"label": "pkg: ClimaInterpolations", "team": "core", "paths": ["packages/ClimaInterpolations/"]},
+    {"label": "pkg: RootSolvers", "team": "core", "paths": ["packages/RootSolvers/"]},
+    {"label": "pkg: ClimaCore", "team": "core", "paths": ["packages/ClimaCore/"]},
+    {"label": "pkg: ClimaTimeSteppers", "team": "core", "paths": ["packages/ClimaTimeSteppers/"]},
+    {"label": "pkg: ClimaUtilities", "team": "core", "paths": ["packages/ClimaUtilities/"]},
+    {"label": "pkg: ClimaDiagnostics", "team": "core", "paths": ["packages/ClimaDiagnostics/"]},
+    {"label": "pkg: ClimaParams", "team": "physics", "paths": ["packages/ClimaParams/"]},
+    {"label": "pkg: Thermodynamics", "team": "physics", "paths": ["packages/Thermodynamics/"]},
+    {"label": "pkg: CloudMicrophysics", "team": "physics", "paths": ["packages/CloudMicrophysics/"]},
+    {"label": "pkg: Insolation", "team": "physics", "paths": ["packages/Insolation/"]},
+    {"label": "pkg: RRTMGP", "team": "physics", "paths": ["packages/RRTMGP/"]},
+    {"label": "pkg: SurfaceFluxes", "team": "physics", "paths": ["packages/SurfaceFluxes/"]},
+    {"label": "pkg: ClimaAtmos", "team": "atmos", "paths": ["packages/ClimaAtmos/"]},
+    {"label": "pkg: ClimaCalibrate", "team": "calibration", "paths": ["packages/ClimaCalibrate/"]},
+    {"label": "pkg: ClimaCoupler", "team": "coupler", "paths": ["packages/ClimaCoupler/"]},
+    {"label": "pkg: ClimaLand", "team": "land", "paths": ["packages/ClimaLand/"]},
+    {"label": "dev guides", "team": "software", "paths": ["docs/dev/"]},
+    {"label": "examples", "team": "software", "paths": ["examples/"]},
+    {"label": "experiments", "team": "coupler", "paths": ["experiments/", ".buildkite/experiments/"]},
+    {"label": "infrastructure", "team": "software", "paths": ["tools/", ".github/", ".buildkite/", "packages.toml", "Project.toml"]}
+  ]
+}

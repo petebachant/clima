@@ -15,12 +15,26 @@
 # Owners of repo-wide infrastructure (tools/, CI, workspace, this file).
 [_repo]
 owners = ["@CliMA/software"]
+team = "software"
+
+# One GitHub Project (kanban board) per team. `project` is the org project
+# number (0 = not created yet; triage then only labels). Issues and PRs are
+# routed by package label; see docs/OWNERSHIP.md.
+[_teams]
+core = {project = 0, name = "Core infrastructure"}
+physics = {project = 0, name = "Physics parameterizations"}
+atmos = {project = 0, name = "Atmosphere"}
+land = {project = 0, name = "Land"}
+coupler = {project = 0, name = "Coupler & experiments"}
+calibration = {project = 0, name = "Calibration"}
+software = {project = 0, name = "Software & infrastructure"}
 
 [dev-guides]
 path = "docs/dev"
 upstream = "https://github.com/CliMA/DeveloperGuides.git"
 branch = "main"
 owners = ["@imreddyTeja", "@tapios"]
+team = "software"
 julia = false
 
 # --- Foundations (no in-repo deps) ---
@@ -29,36 +43,42 @@ path = "packages/ClimaComms"
 upstream = "https://github.com/CliMA/ClimaComms.jl.git"
 branch = "main"
 owners = ["@nefrathenrici", "@imreddyTeja", "@haakon-e"]
+team = "core"
 
 [ClimaParams]
 path = "packages/ClimaParams"
 upstream = "https://github.com/CliMA/ClimaParams.jl.git"
 branch = "main"
 owners = ["@szy21", "@trontrytel", "@nefrathenrici"]
+team = "physics"
 
 [RootSolvers]
 path = "packages/RootSolvers"
 upstream = "https://github.com/CliMA/RootSolvers.jl.git"
 branch = "main"
 owners = ["@imreddyTeja", "@tapios"]
+team = "core"
 
 [ClimaInterpolations]
 path = "packages/ClimaInterpolations"
 upstream = "https://github.com/CliMA/ClimaInterpolations.jl.git"
 branch = "main"
 owners = ["@giordano", "@ph-kev", "@imreddyTeja"]
+team = "core"
 
 [Insolation]
 path = "packages/Insolation"
 upstream = "https://github.com/CliMA/Insolation.jl.git"
 branch = "main"
 owners = ["@tapios", "@ph-kev", "@szy21"]
+team = "physics"
 
 [ClimaAnalysis]
 path = "packages/ClimaAnalysis"
 upstream = "https://github.com/CliMA/ClimaAnalysis.jl.git"
 branch = "main"
 owners = ["@imreddyTeja", "@nefrathenrici", "@ph-kev"]
+team = "core"
 
 # --- Physics parameterizations ---
 [Thermodynamics]
@@ -66,24 +86,28 @@ path = "packages/Thermodynamics"
 upstream = "https://github.com/CliMA/Thermodynamics.jl.git"
 branch = "main"
 owners = ["@szy21", "@tapios"]
+team = "physics"
 
 [SurfaceFluxes]
 path = "packages/SurfaceFluxes"
 upstream = "https://github.com/CliMA/SurfaceFluxes.jl.git"
 branch = "main"
 owners = ["@akshaysridhar", "@tapios", "@szy21"]
+team = "physics"
 
 [CloudMicrophysics]
 path = "packages/CloudMicrophysics"
 upstream = "https://github.com/CliMA/CloudMicrophysics.jl.git"
 branch = "main"
 owners = ["@trontrytel", "@haakon-e", "@tapios"]
+team = "physics"
 
 [RRTMGP]
 path = "packages/RRTMGP"
 upstream = "https://github.com/CliMA/RRTMGP.jl.git"
 branch = "main"
 owners = ["@szy21", "@tapios"]
+team = "physics"
 
 # --- Infrastructure ---
 [ClimaCore]
@@ -91,24 +115,28 @@ path = "packages/ClimaCore"
 upstream = "https://github.com/CliMA/ClimaCore.jl.git"
 branch = "main"
 owners = ["@imreddyTeja", "@dennisYatunin", "@ph-kev"]
+team = "core"
 
 [ClimaTimeSteppers]
 path = "packages/ClimaTimeSteppers"
 upstream = "https://github.com/CliMA/ClimaTimeSteppers.jl.git"
 branch = "main"
 owners = ["@tapios", "@dennisYatunin", "@ph-kev"]
+team = "core"
 
 [ClimaUtilities]
 path = "packages/ClimaUtilities"
 upstream = "https://github.com/CliMA/ClimaUtilities.jl.git"
 branch = "main"
 owners = ["@ph-kev", "@imreddyTeja", "@nefrathenrici"]
+team = "core"
 
 [ClimaDiagnostics]
 path = "packages/ClimaDiagnostics"
 upstream = "https://github.com/CliMA/ClimaDiagnostics.jl.git"
 branch = "main"
 owners = ["@imreddyTeja", "@ph-kev", "@nefrathenrici"]
+team = "core"
 
 # --- Models ---
 [ClimaAtmos]
@@ -116,21 +144,25 @@ path = "packages/ClimaAtmos"
 upstream = "https://github.com/CliMA/ClimaAtmos.jl.git"
 branch = "main"
 owners = ["@szy21", "@tapios"]
+team = "atmos"
 
 [ClimaLand]
 path = "packages/ClimaLand"
 upstream = "https://github.com/CliMA/ClimaLand.jl.git"
 branch = "main"
 owners = ["@kmdeck", "@ph-kev"]
+team = "land"
 
 [ClimaCoupler]
 path = "packages/ClimaCoupler"
 upstream = "https://github.com/CliMA/ClimaCoupler.jl.git"
 branch = "main"
 owners = ["@szy21", "@juliasloan25"]
+team = "coupler"
 
 [ClimaCalibrate]
 path = "packages/ClimaCalibrate"
 upstream = "https://github.com/CliMA/ClimaCalibrate.jl.git"
 branch = "main"
 owners = ["@nefrathenrici", "@ph-kev"]
+team = "calibration"
