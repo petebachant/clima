@@ -1,7 +1,7 @@
 # Monorepo helper. Stdlib only, so it runs before anything is instantiated.
 #
 #   julia tools/mono.jl graph                     # packages in dependency order
-#   julia tools/mono.jl affected [BASE|ALL]       # changed pkgs + everything downstream (JSON)
+#   julia tools/mono.jl affected [BASE|ALL] [--docs]  # changed pkgs + everything downstream (JSON)
 #   julia tools/mono.jl compat [--strict]         # in-repo compat drift report
 #   julia tools/mono.jl test PKG [--registered]   # test PKG against in-repo HEAD of its deps
 #   julia tools/mono.jl bump PKG LEVEL [--release-dependents]
@@ -137,9 +137,10 @@ function cmd_graph(pkgs)
     end
 end
 
-function cmd_affected(pkgs, base = "origin/main")
+function cmd_affected(pkgs, base = "origin/main"; docs = false)
     order = toposort(pkgs)
     affected = downstream_closure(pkgs, changed_packages(pkgs, base))
+    docs && filter!(n -> isfile(joinpath(ROOT, pkgs[n].path, "docs", "make.jl")), affected)
     println(json_matrix(pkgs, filter(in(affected), order)))
 end
 
@@ -340,7 +341,7 @@ function main(args)
     flags = filter(startswith("--"), rest)
     pos = filter(!startswith("--"), rest)
     cmd == "graph" ? cmd_graph(pkgs) :
-    cmd == "affected" ? cmd_affected(pkgs, pos...) :
+    cmd == "affected" ? cmd_affected(pkgs, pos...; docs = "--docs" in flags) :
     cmd == "compat" ? cmd_compat(pkgs, "--strict" in flags) :
     cmd == "test" ? cmd_test(pkgs, pos[1], "--registered" in flags) :
     cmd == "bump" ? cmd_bump(pkgs, pos[1], pos[2], "--release-dependents" in flags) :

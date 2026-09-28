@@ -249,9 +249,7 @@ found the right package:
 
 ## Open questions
 
-- **Docs:** one site (MultiDocumenter aggregation vs one Documenter build)
-  or per-package sites deployed from here? See the Docs section in
-  README once decided.
+- **Docs:** plan in [docs/PLAN.md](docs/PLAN.md): per-package builds merged by MultiDocumenter; GitHub Pages' 1 GB limit means stable + dev only.
 - **Commit the workspace Manifest?** Not committed now, so CI resolves
   fresh like today's library CI. Committing it would make CI reproducible,
   but then something has to bump it on a schedule.
