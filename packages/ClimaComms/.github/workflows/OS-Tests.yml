@@ -1,0 +1,70 @@
+name: OS Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test-os:
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        # Test the full declared compat range: the 1.10 LTS (the minimum
+        # in Project.toml) through the current release.
+        julia-version: ['1.10', '1.11', '1.12']
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+
+    # Setup a filter and only run if src/ test/ folder content changes
+    # or project depedencies
+    - uses: dorny/paths-filter@v4
+      id: filter
+      with:
+        filters: |
+          run_test:
+            - '.github/workflows/OS-Tests.yml'
+            - 'src/**'
+            - 'test/**'
+            - 'Project.toml'
+
+    - name: Set up Julia
+      uses: julia-actions/setup-julia@latest
+      if: steps.filter.outputs.run_test == 'true'
+      with:
+        version: ${{ matrix.julia-version }}
+
+    - name: Cache artifacts
+      uses: actions/cache@v6
+      if: steps.filter.outputs.run_test == 'true'
+      env:
+        cache-name: cache-artifacts
+      with:
+        path: ~/.julia/artifacts
+        key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-test-${{ env.cache-name }}-
+          ${{ runner.os }}-test-
+          ${{ runner.os }}-
+
+    - name: Install Project Packages
+      if: steps.filter.outputs.run_test == 'true'
+      run: |
+        julia --color=yes --project -e 'using Pkg; Pkg.instantiate()'
+        julia --color=yes --project -e 'using Pkg; Pkg.precompile(;strict=true)'
+        julia --color=yes --project -e 'using Pkg; Pkg.status()'
+
+    - name: Run MPI Unit Tests
+      if: steps.filter.outputs.run_test == 'true'
+      run: |
+        julia --color=yes --project -e 'using Pkg; Pkg.test()'
