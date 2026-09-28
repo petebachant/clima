@@ -69,6 +69,15 @@ Once those were widened, all 18 packages plus 12 test environments
 resolved to one 312-package Manifest, and the key packages loaded from it
 (ClimaAtmos, ClimaLand, ClimaCoupler, ClimaCalibrate, …).
 
+Sample test runs, all passing:
+
+| Package | How | Time |
+|:--|:--|--:|
+| ClimaParams (`[targets]` style) | 1.12 workspace, `Pkg.test()` | 8 s |
+| Thermodynamics (`test/Project.toml`, widened JET) | 1.12 workspace, `Pkg.test()` | 88 s |
+| SurfaceFluxes | 1.12 workspace, `Pkg.test()` | 266 s |
+| SurfaceFluxes | 1.10 LTS, `mono.jl test` (devs 4 in-repo deps) | 184 s |
+
 The source layout didn't matter; the dependency *metadata* was
 where the rot was. `mono.jl compat --strict` now fails CI on this class of
 problem.
