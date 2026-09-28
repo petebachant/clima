@@ -1,0 +1,574 @@
+"""
+    SimCoordinator
+
+This module contains functions for coordinating the setup and execution of coupled
+simulations. Key exports:
+
+- `CoupledSimulation(config_file)` / `CoupledSimulation(config_dict)`: construct a
+  fully initialized `CoupledSimulation` from a YAML config file path or dictionary.
+  These are outer constructors for `Interfacer.CoupledSimulation`, defined here because
+  they depend on modules loaded after `Interfacer` (`Input`, `Utilities`, etc.).
+- `setup_and_run(config)`: convenience function that constructs a `CoupledSimulation`
+  and immediately calls `run!` on it.
+- `run!(cs)`: evolve a `CoupledSimulation` through its full time span.
+- `step!(cs)`: advance a `CoupledSimulation` by one coupling time step.
+"""
+module SimCoordinator
+
+import ClimaComms
+import ClimaDiagnostics as CD
+import ClimaUtilities.TimeManager: ITime
+import ClimaCore as CC
+import ClimaParams as CP
+import Thermodynamics.Parameters as TDP
+import Random
+
+import ClimaCoupler
+import ..Interfacer
+import ..ConservationChecker
+import ..FieldExchanger
+import ..FluxCalculator
+import ..TimeManager
+import ..Input
+import ..Utilities
+import ..Checkpointer
+import ..SimOutput
+
+export run!, step!, setup_and_run
+
+"""
+    run!(cs::CoupledSimulation)
+
+Evolve the given simulation, producing plots and other diagnostic information.
+
+Keyword arguments
+==================
+
+`precompile`: If `true`, run the coupled simulations for two steps, so that most functions
+              are precompiled and subsequent timing will be more accurate.
+"""
+function run!(
+    cs::Interfacer.CoupledSimulation;
+    precompile::Bool = cs.tspan[end] > 2 * cs.Δt_cpl + cs.tspan[begin],
+)
+    ## Precompilation of Coupling Loop
+    # Here we run the entire coupled simulation for two timesteps to precompile several
+    # functions for more accurate timing of the overall simulation.
+    precompile && (step!(cs); step!(cs))
+
+    ## Run garbage collection before solving for more accurate memory comparison to ClimaAtmos
+    GC.gc()
+
+    ## Solving and Timing the Full Simulation
+
+    # This is where the full coupling loop is called for the full timespan of the simulation.
+    # We use the `ClimaComms.@elapsed` macro to time the simulation on both CPU and GPU and use this
+    # value to calculate the simulated years per day (SYPD) of the simulation.
+    @info "Starting coupling loop"
+    t_timed_start = cs.t[] # get t just before timing (equal to cs.tspan[begin] if `precompile` is false)
+    walltime = ClimaComms.@elapsed ClimaComms.device(cs) begin
+        while cs.t[] < cs.tspan[end]
+            step!(cs)
+        end
+    end
+    @info "Simulation took $(walltime) seconds"
+
+    save_sypd_walltime_to_disk(cs, walltime, t_timed_start)
+
+    # Close all diagnostics file writers
+    isnothing(cs.diags_handler) ||
+        foreach(diag -> close(diag.output_writer), cs.diags_handler.scheduled_diagnostics)
+    foreach(Interfacer.close_output_writers, cs.model_sims)
+
+    return nothing
+end
+
+"""
+    step!(cs::CoupledSimulation)
+
+Take one coupling step forward in time.
+
+This function runs the component models sequentially, and exchanges combined fields and
+calculates fluxes using the selected turbulent fluxes option. Note, one coupling step might
+require multiple steps in some of the component models.
+"""
+function step!(cs::Interfacer.CoupledSimulation)
+    # Update the current time and step number
+    cs.t[] += cs.Δt_cpl
+    cs.step[] += 1
+
+    # Compute global energy and water conservation checks
+    # (only for slabplanet if tracking conservation is enabled)
+    ConservationChecker.check_conservation!(cs)
+
+    # Step component model simulations sequentially for one coupling timestep (Δt_cpl)
+    FieldExchanger.step_model_sims!(cs)
+
+    # Update the surface fractions for surface models
+    FieldExchanger.update_surface_fractions!(cs)
+
+    # Exchange all non-turbulent flux fields between models, including radiative and precipitation fluxes
+    FieldExchanger.exchange!(cs)
+
+    # Calculate turbulent fluxes in the coupler and update the model simulations with them
+    FluxCalculator.turbulent_fluxes!(cs)
+
+    # Compute any ocean-sea ice fluxes
+    FluxCalculator.ocean_seaice_fluxes!(cs)
+
+    # Maybe call the callbacks
+    TimeManager.callbacks!(cs)
+
+    # Compute and save coupler diagnostics
+    CD.orchestrate_diagnostics(cs)
+    return nothing
+end
+
+"""
+    save_sypd_walltime_to_disk(cs, walltime, t_timed_start = cs.tspan[begin])
+
+Save the computed `sypd`, `walltime_per_coupling_step`, and memory usage to text files 
+in the `artifacts` directory. `t_timed_start` is the simulated time (in seconds) at which 
+the timed portion of the run began (see the `precompile` flag in [run!](@ref)). 
+"""
+function save_sypd_walltime_to_disk(cs, walltime, t_timed_start = cs.tspan[begin])
+    if ClimaComms.iamroot(ClimaComms.context(cs))
+        sypd = TimeManager.simulated_years_per_day(t_timed_start, cs.tspan[end], walltime)
+        walltime_per_step = walltime / ((cs.tspan[end] - t_timed_start) / cs.Δt_cpl)
+        @info "SYPD: $sypd"
+        @info "Walltime per coupling step: $(walltime_per_step)"
+
+        open(joinpath(cs.dir_paths.artifacts_dir, "sypd.txt"), "w") do sypd_filename
+            println(sypd_filename, "$sypd")
+        end
+
+        open(
+            joinpath(cs.dir_paths.artifacts_dir, "walltime_per_step.txt"),
+            "w",
+        ) do walltime_per_step_filename
+            println(walltime_per_step_filename, "$(walltime_per_step)")
+        end
+    end
+    return nothing
+end
+
+"""
+    CoupledSimulation(config_file = joinpath(pkgdir(ClimaCoupler), "config/ci_configs/amip_default.yml"))
+    CoupledSimulation(config_dict)
+
+Set up a `CoupledSimulation` as prescribed by the given input.
+
+This struct is defined in the Interfacer module and contains all information
+about component models, diagnostics, timestepping, output directories, etc
+needed to run a coupled simulation.
+
+If no arguments are provided, the default AMIP configuration is used,
+which is defined in `config/ci_configs/amip_default.yml`.
+"""
+function Interfacer.CoupledSimulation(
+    config_file::AbstractString = joinpath(
+        pkgdir(ClimaCoupler),
+        "config/ci_configs/amip_default.yml",
+    ),
+)
+    config_dict = Input.get_coupler_config_dict(config_file)
+    return Interfacer.CoupledSimulation(config_dict)
+end
+
+function Interfacer.CoupledSimulation(config_dict::AbstractDict)
+    comms_ctx = Utilities.get_comms_context(config_dict)
+
+    (;
+        job_id,
+        sim_mode,
+        random_seed,
+        FT,
+        t_end,
+        t_start,
+        start_date,
+        Δt_cpl,
+        component_dt_dict,
+        saveat,
+        checkpoint_dt,
+        walltime_dt,
+        walltime_debug,
+        atmos_progress_interval,
+        detect_restart_files,
+        restart_dir,
+        restart_t,
+        restart_cache,
+        save_cache,
+        use_land_diagnostics,
+        land_diagnostics_period,
+        land_diagnostics_reduction,
+        land_progress_interval,
+        evolving_ocean,
+        land_model,
+        land_spun_up_ic,
+        lai_source,
+        bucket_albedo_type,
+        energy_check,
+        use_coupler_diagnostics,
+        coupler_diagnostics_period,
+        coupler_diagnostics_reduction,
+        output_dir_root,
+        parameter_files,
+        era5_filepaths,
+        ocean_model,
+        simple_ocean,
+        ocean_grid,
+        use_intersection_grid,
+        sst_adjustment,
+        ocean_progress_interval,
+        ocean_diagnostic_interval,
+        ocean_diagnostic_mode,
+        ice_model,
+        seaice_diagnostic_interval,
+        seaice_diagnostic_mode,
+        seaice_progress_interval,
+        land_fraction_source,
+        binary_area_fraction,
+        domain_type,
+        column_latlon,
+        scm_surface_type,
+    ) = Input.get_coupler_args(config_dict)
+
+    override_file = CP.merge_toml_files(parameter_files; override = true)
+    coupled_param_dict = CP.create_toml_dict(FT; override_file)
+    thermo_params = TDP.ThermodynamicsParameters(coupled_param_dict)
+
+    dir_paths = Utilities.setup_output_dirs(
+        output_dir_root = output_dir_root,
+        comms_ctx = comms_ctx,
+    )
+
+    Random.seed!(random_seed)
+    @info "Random seed set to $(random_seed)"
+
+    tspan = (t_start, t_end)
+    @info "Starting from t_start $(t_start)"
+
+    #=
+    ## Component Model Initialization
+    Each component model is required to have an `init` function that
+    returns a `AbstractComponentSimulation` object (see `Interfacer` docs for more details).
+    =#
+
+    atmos_sim = Interfacer.AtmosSimulation(
+        Val(:climaatmos);
+        config_dict,
+        atmos_output_dir = dir_paths.atmos_output_dir,
+        coupled_param_dict,
+        comms_ctx,
+    )
+
+    #=
+    ### Boundary Space
+    We use a boundary space at the surface for coupling operations (computing fluxes, regridding, etc).
+    For column mode, this is a 1D PointSpace with lat/long coordinates.
+    For global mode, this is the atmosphere's horizontal surface space.
+    =#
+    boundary_space = Utilities.create_boundary_space(
+        FT,
+        domain_type,
+        atmos_sim,
+        comms_ctx;
+        column_latlon,
+    )
+
+    surface_elevation = Interfacer.get_field(boundary_space, atmos_sim, Val(:height_sfc))
+    atmos_bottom_center_height =
+        Interfacer.get_field(boundary_space, atmos_sim, Val(:height_int))
+    atmos_h =
+        Interfacer.get_atmos_height_delta(atmos_bottom_center_height, surface_elevation)
+    initial_T = CC.Fields.zeros(boundary_space)
+    initial_T .= Interfacer.get_field(boundary_space, atmos_sim, Val(:air_temperature))
+
+    land_fraction = Input.get_land_fraction(
+        boundary_space,
+        comms_ctx;
+        land_fraction_source,
+        binary_area_fraction,
+        sim_mode,
+        domain_type,
+        scm_surface_type,
+    )
+
+    #=
+    ### Surface Models
+    Initialize land, ocean, and sea ice component models.
+    =#
+    @info(sim_mode)
+    land_sim = ice_sim = ocean_sim = nothing
+
+    (; sst_path, sic_path, land_ic_path, albedo_path, bucket_initial_condition) =
+        era5_filepaths
+
+    land_sim = Interfacer.LandSimulation(
+        FT,
+        land_model;
+        dt = component_dt_dict["dt_land"],
+        tspan,
+        start_date,
+        output_dir = dir_paths.land_output_dir,
+        area_fraction = land_fraction,
+        surface_space = boundary_space,
+        atmos_h,
+        initial_T,
+        use_land_diagnostics,
+        land_diagnostics_period,
+        land_diagnostics_reduction,
+        coupled_param_dict,
+        albedo_type = bucket_albedo_type,
+        bucket_initial_condition,
+        era5_albedo_file_path = albedo_path,
+        land_spun_up_ic,
+        land_ic_path,
+        lai_source,
+        dt_drivers = ITime(Utilities.time_to_seconds(config_dict["dt_rad"])),
+    )
+
+    ocean_sim = Interfacer.OceanSimulation(
+        FT,
+        ocean_model;
+        dt = component_dt_dict["dt_ocean"],
+        start_date,
+        tspan,
+        coupled_param_dict,
+        thermo_params,
+        comms_ctx,
+        boundary_space,
+        output_dir = dir_paths.ocean_output_dir,
+        simple_ocean,
+        ocean_grid,
+        use_intersection_grid,
+        sst_path,
+        sst_adjustment,
+        saveat,
+        evolving = evolving_ocean,
+        ocean_diagnostic_interval,
+        ocean_diagnostic_mode,
+    )
+
+    ice_sim = Interfacer.SeaIceSimulation(
+        FT,
+        ice_model;
+        dt = component_dt_dict["dt_seaice"],
+        start_date,
+        coupled_param_dict,
+        output_dir = dir_paths.ice_output_dir,
+        ocean = ocean_sim,
+        tspan,
+        saveat,
+        boundary_space,
+        thermo_params,
+        comms_ctx,
+        land_fraction,
+        sic_path,
+        binary_area_fraction,
+        domain_type,
+        seaice_diagnostic_interval,
+        seaice_diagnostic_mode,
+    )
+
+    #=
+    ## Coupler Initialization
+    =#
+    model_sims = (; atmos_sim, ice_sim, land_sim, ocean_sim)
+    model_sims =
+        NamedTuple{filter(key -> !isnothing(model_sims[key]), keys(model_sims))}(model_sims)
+    @info "Component models initialized: $(keys(model_sims))"
+    @info "Component model types: $(nameof.(values(model_sims)))"
+
+    coupler_field_names = Interfacer.default_coupler_fields()
+    foreach(sim -> Interfacer.add_coupler_fields!(coupler_field_names, sim), model_sims)
+
+    energy_check && push!(coupler_field_names, :P_net)
+
+    coupler_fields = Interfacer.init_coupler_fields(FT, coupler_field_names, boundary_space)
+
+    # Allocate a FluxAccumulator per slow explicit surface (one whose timestep is
+    # strictly greater than Δt_cpl). Other surfaces avoid this and receive turbulent
+    # fluxes directly via `update_turbulent_fluxes!` each coupling step.
+    Δt_cpl_secs = Float64(float(Δt_cpl))
+    slow_surface_keys = Tuple(
+        name for (name, sim) in pairs(model_sims) if
+        sim isa Interfacer.AbstractSurfaceSimulation &&
+            !(sim isa Interfacer.AbstractImplicitFluxSimulation) &&
+            !(sim isa Interfacer.AbstractSurfaceStub) &&
+            Interfacer.sim_dt(sim) > Δt_cpl_secs
+    )
+    flux_accumulators = NamedTuple{slow_surface_keys}(
+        Tuple(FluxCalculator.FluxAccumulator(boundary_space) for _ in slow_surface_keys),
+    )
+    isempty(slow_surface_keys) ||
+        @info "Allocated flux accumulators for slow surfaces: $(slow_surface_keys)"
+
+    # set initial area fractions (remain set to 0 if model does not exist)
+    if haskey(model_sims, :land_sim)
+        coupler_fields.land_area_fraction .=
+            Interfacer.get_field(model_sims.land_sim, Val(:area_fraction))
+    end
+    if haskey(model_sims, :ice_sim)
+        coupler_fields.ice_area_fraction .=
+            Interfacer.get_field(model_sims.ice_sim, Val(:area_fraction))
+    end
+    if haskey(model_sims, :ocean_sim)
+        coupler_fields.ocean_area_fraction .=
+            Interfacer.get_field(model_sims.ocean_sim, Val(:area_fraction))
+    end
+
+    ## Conservation checks (only applicable to global slabplanet mode)
+    conservation_checks = nothing
+    if energy_check && domain_type == "global"
+        @assert(
+            sim_mode <: Interfacer.AbstractSlabplanetSimulationMode &&
+            comms_ctx isa ClimaComms.SingletonCommsContext,
+            "Only non-distributed slabplanet allowable for energy_check"
+        )
+        conservation_checks = (;
+            energy = ConservationChecker.EnergyConservationCheck(model_sims),
+            water = ConservationChecker.WaterConservationCheck(model_sims),
+        )
+    elseif energy_check && domain_type == "column"
+        @warn "Conservation checks are disabled for single-column mode."
+    end
+
+    ## Callbacks
+    # TODO: Move callbacks code somewhere else (maybe in TimeManager?) so that it doesn't clutter up the constructor
+
+    # checkpoint
+    # Schedules are seeded with t_start so that a restarted simulation stays on
+    # the same calendar boundaries as the original run (see calendar_dt_schedule).
+    schedule_checkpoint =
+        TimeManager.calendar_dt_schedule(checkpoint_dt, start_date, t_start)
+    checkpoint_cb =
+        TimeManager.Callback(schedule_checkpoint, sim -> Checkpointer.checkpoint_sims(sim))
+
+    # walltime reporting
+    schedule_walltime =
+        TimeManager.walltime_schedule(walltime_dt, walltime_debug, start_date, t_start)
+    if isnothing(schedule_walltime)
+        callbacks = (checkpoint_cb,)
+    else
+        walltime_cb =
+            TimeManager.Callback(schedule_walltime, TimeManager.WalltimeReporter())
+        callbacks = (checkpoint_cb, walltime_cb)
+    end
+
+    # component model progress reporting
+    progress_intervals = (;
+        atmos_sim = atmos_progress_interval,
+        ocean_sim = ocean_progress_interval,
+        land_sim = land_progress_interval,
+        ice_sim = seaice_progress_interval,
+    )
+    for (sim_name, interval) in pairs(progress_intervals)
+        (haskey(model_sims, sim_name) && interval != "never") || continue
+        schedule_progress = TimeManager.calendar_dt_schedule(interval, start_date, t_start)
+        progress_cb = TimeManager.Callback(
+            schedule_progress,
+            let sim_name = sim_name
+                cs -> Interfacer.progress(cs.model_sims[sim_name], cs)
+            end,
+        )
+        callbacks = (callbacks..., progress_cb)
+    end
+
+    ## Coupler diagnostics
+    if use_coupler_diagnostics
+        @info "Using default coupler diagnostics"
+        diags_handler = SimOutput.diagnostics_setup(
+            coupler_fields,
+            dir_paths.coupler_output_dir,
+            start_date,
+            tspan[1],
+            coupler_diagnostics_period,
+            Δt_cpl;
+            reduction = coupler_diagnostics_reduction,
+        )
+    else
+        diags_handler = nothing
+    end
+
+    ## Build the CoupledSimulation struct
+    prev_checkpoint_t = Ref(-1)
+    cs = Interfacer.CoupledSimulation{FT}(
+        start_date,
+        coupler_fields,
+        conservation_checks,
+        [tspan[1], tspan[2]],
+        Δt_cpl,
+        Ref(tspan[1]),
+        Ref(0),
+        prev_checkpoint_t,
+        model_sims,
+        callbacks,
+        dir_paths,
+        thermo_params,
+        diags_handler,
+        save_cache,
+        flux_accumulators,
+    )
+
+    ## Restart component model states if specified
+    if detect_restart_files
+        isnothing(restart_t) &&
+            (restart_t = Checkpointer.t_start_from_checkpoint(dir_paths.checkpoints_dir))
+        isnothing(restart_dir) && (restart_dir = dir_paths.checkpoints_dir)
+    end
+    should_restart = !isnothing(restart_t) && !isnothing(restart_dir)
+    should_restart && Checkpointer.restart!(cs, restart_dir, restart_t, restart_cache)
+
+    FieldExchanger.update_surface_fractions!(cs)
+
+    if !should_restart || !restart_cache
+        ## Initialize Component Model Exchange
+        FieldExchanger.import_static_fields!(cs.fields, cs.model_sims)
+        FieldExchanger.exchange!(cs)
+        FieldExchanger.set_caches!(cs)
+        FluxCalculator.turbulent_fluxes!(cs)
+        FluxCalculator.ocean_seaice_fluxes!(cs)
+
+        # The initial `turbulent_fluxes!` above fills the flux accumulators.
+        # Push the accumulated flux to each slow surface here.
+        FluxCalculator.push_ready_accumulators!(
+            cs.model_sims,
+            cs.flux_accumulators,
+            cs.t[];
+            force = true,
+        )
+    end
+    Utilities.show_memory_usage()
+    return cs
+end
+
+"""
+    setup_and_run(config_dict::AbstractDict)
+    setup_and_run(config_file::AbstractString = joinpath(pkgdir(ClimaCoupler), "config/ci_configs/amip_default.yml"))
+
+Set up and run the coupled model simulation specified by the input config
+file or dict. Returns the `CoupledSimulation` after the run completes.
+
+If no arguments are provided, the default AMIP configuration is used,
+which is defined in `config/ci_configs/amip_default.yml`. This
+is the same behavior as the `CoupledSimulation` constructor.
+"""
+function setup_and_run(
+    config_file::AbstractString = joinpath(
+        pkgdir(ClimaCoupler),
+        "config/ci_configs/amip_default.yml",
+    ),
+)
+    cs = Interfacer.CoupledSimulation(config_file)
+    run!(cs)
+    return cs
+end
+
+function setup_and_run(config_dict::AbstractDict)
+    cs = Interfacer.CoupledSimulation(config_dict)
+    run!(cs)
+    return cs
+end
+
+end # module SimCoordinator

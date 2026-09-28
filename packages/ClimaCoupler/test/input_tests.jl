@@ -1,0 +1,504 @@
+#=
+    Unit tests for ClimaCoupler Input module
+=#
+using Test
+import ArgParse
+import Dates
+import ClimaCoupler: Input, Utilities, Interfacer
+import ClimaCoupler
+import YAML
+
+@testset "test argparse_settings and parse_commandline" begin
+    settings = Input.argparse_settings()
+
+    # Test with empty ARGS (should use defaults)
+    empty!(ARGS)
+
+    parsed = Input.parse_commandline(settings)
+    @test parsed["config_file"] ==
+          joinpath(pkgdir(ClimaCoupler), "config/ci_configs/amip_default.yml")
+    @test parsed["FLOAT_TYPE"] == "Float64"
+    @test parsed["mode_name"] == "amip"  # default value
+
+    # Test with custom arguments
+    # We use try/finally to ensure ARGS is restored even if the test fails,
+    # since ARGS is a global variable that could affect other tests
+    try
+        push!(ARGS, "--mode_name", "slabplanet")
+        push!(ARGS, "--t_end", "1000secs")
+        parsed = Input.parse_commandline(settings)
+        @test parsed["mode_name"] == "slabplanet"
+        @test parsed["t_end"] == "1000secs"
+    finally
+        empty!(ARGS)
+    end
+end
+
+@testset "get_coupler_config_dict" begin
+    # Use a simple test config file
+    config_file = joinpath(pkgdir(ClimaCoupler), "test", "config", "input_test_config.yml")
+
+    # Check that CLI arguments are parsed
+    try
+        push!(ARGS, "--dt_cpl", "600secs")
+        config_dict = Input.get_coupler_config_dict(config_file)
+        @test config_dict["dt_cpl"] == "120secs" # value in the config file
+        @test config_dict["mode_name"] == "amip"
+        @test config_dict["job_id"] == "input_test_config" # default to file name
+
+        # Test that atmos config file is overwritten by coupler config file
+        @test config_dict["atmos_config_file"] == "test/config/input_test_atmos_config.yml"
+        @test config_dict["h_elem"] == 6 # 6 in coupler config, 16 in atmos config
+    finally
+        empty!(ARGS)
+    end
+end
+
+@testset "get_coupler_args" begin
+    # Create a minimal config dict for testing
+    config_dict = Dict(
+        "job_id" => "test_job",
+        "mode_name" => "amip",
+        "use_itime" => true,
+        "unique_seed" => false,
+        "FLOAT_TYPE" => "Float64",
+        "t_end" => "800secs",
+        "t_start" => "0secs",
+        "start_date" => "20000101",
+        "dt_cpl" => "400secs",
+        "dt" => "400secs",
+        "nh_poly" => 2,
+        "h_elem" => 8,
+        "checkpoint_dt" => "90days",
+        "atmos_progress_interval" => "1days",
+        "detect_restart_files" => false,
+        "restart_dir" => nothing,
+        "restart_t" => nothing,
+        "restart_cache" => true,
+        "save_cache" => true,
+        "use_coupler_diagnostics" => true,
+        "coupler_diagnostics_period" => nothing,
+        "coupler_diagnostics_reduction" => "average",
+        "use_land_diagnostics" => true,
+        "land_diagnostics_period" => "1months",
+        "land_diagnostics_reduction" => "average",
+        "land_progress_interval" => "never",
+        "evolving_ocean" => true,
+        "energy_check" => false,
+        "conservation_softfail" => false,
+        "rmse_check" => false,
+        "coupler_output_dir" => "test_output",
+        "land_model" => "bucket",
+        "land_spun_up_ic" => true,
+        "lai_source" => "modis_monthly",
+        "bucket_albedo_type" => "map_static",
+        "bucket_initial_condition" => "",
+        "coupler_toml" => [],
+        "era5_initial_condition_dir" => nothing,
+        "ocean_model" => "prescribed",
+        "ocean_diagnostic_interval" => "1days",
+        "ocean_diagnostic_mode" => "average",
+        "seaice_diagnostic_interval" => "1days",
+        "seaice_diagnostic_mode" => "average",
+        "seaice_progress_interval" => "never",
+        "simple_ocean" => false,
+        "use_intersection_grid" => true,
+        "ocean_grid" => "one_deg_tripolar",
+        "sst_adjustment" => 2.0,
+        "ice_model" => "prescribed",
+        "ocean_progress_interval" => "1days",
+        "land_fraction_source" => "etopo",
+        "binary_area_fraction" => true,
+        "domain_type" => "global",
+        "column_latlon" => [0.0, 0.0],
+        "scm_surface_type" => nothing,
+        "component_dt_dict" => Dict(
+            "dt_atmos" => 400.0,
+            "dt_land" => 400.0,
+            "dt_ocean" => 400.0,
+            "dt_seaice" => 400.0,
+        ),
+        "print_config_dict" => true,
+    )
+
+    args = Input.get_coupler_args(config_dict)
+    # Test that expected fields are present
+    @test haskey(args, :job_id)
+    @test haskey(args, :sim_mode)
+    @test haskey(args, :FT)
+    @test haskey(args, :t_end)
+    @test haskey(args, :t_start)
+    @test haskey(args, :Δt_cpl)
+    @test haskey(args, :component_dt_dict)
+
+    # Test some values
+    @test args.job_id == "test_job"
+    @test args.FT == Float64
+    @test args.sim_mode == ClimaCoupler.Interfacer.AMIPMode
+    @test args.land_model == Val(:bucket)
+    @test args.ocean_model == Val(:prescribed)
+    @test args.ice_model == Val(:prescribed)
+    @test args.land_fraction_source == "etopo"
+    @test args.sst_adjustment == 2.0
+    @test args.ocean_grid == :one_deg_tripolar
+    @test args.domain_type == "global"
+    @test args.column_latlon == (0.0, 0.0)
+    @test args.scm_surface_type === nothing
+
+    # Test that component_dt_dict is preserved
+    @test args.component_dt_dict isa Dict
+    @test haskey(args.component_dt_dict, "dt_atmos")
+    @test !haskey(args.component_dt_dict, "dt")
+
+    # If unspecified, walltime_dt defaults to a tenth of the simulation length, but
+    # never shorter than one coupling step. Here a tenth of 800secs is 80secs, which is
+    # below dt_cpl (400secs), so it is set to dt_cpl.
+    @test args.walltime_dt == "400.0secs"
+    # ... for a longer simulation, the tenth-of-length rule applies (8000secs / 10)
+    config_dict["t_end"] = "8000secs"
+    @test Input.get_coupler_args(config_dict).walltime_dt == "800.0secs"
+    # ... capped at 30 days
+    config_dict["t_end"] = "3650days"
+    @test Input.get_coupler_args(config_dict).walltime_dt == "2.592e6secs"
+    config_dict["t_end"] = "800secs" # undo
+    # If specified, walltime_dt is passed through unchanged
+    config_dict["walltime_dt"] = "never"
+    @test Input.get_coupler_args(config_dict).walltime_dt == "never"
+    delete!(config_dict, "walltime_dt") # undo
+
+    # walltime_debug is off by default and passed through when set
+    @test args.walltime_debug == false
+    config_dict["walltime_debug"] = true
+    @test Input.get_coupler_args(config_dict).walltime_debug == true
+    delete!(config_dict, "walltime_debug") # undo
+end
+
+@testset "get_diag_period" begin
+    secs_per_day = 86400
+
+    # Test for simulation longer than 90 days (monthly means)
+    t_start = 0.0
+    t_end = 100.0 * secs_per_day  # 100 days
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "1months"
+    @test diagnostics_dt == Dates.Month(1)
+
+    # Test for simulation between 30 and 90 days (10-day means)
+    t_end = 50.0 * secs_per_day  # 50 days
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "10days"
+    @test diagnostics_dt == Dates.Day(10)
+
+    # Test for simulation between 1 and 30 days (daily means)
+    t_end = 10.0 * secs_per_day  # 10 days
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "1days"
+    @test diagnostics_dt == Dates.Day(1)
+
+    # Test for simulation shorter than 1 day (hourly means)
+    t_end = 0.5 * secs_per_day  # 12 hours
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "1hours"
+    @test diagnostics_dt == Dates.Hour(1)
+
+    # Test boundary cases
+    # Exactly 90 days should be monthly
+    t_end = 90.0 * secs_per_day
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "1months"
+
+    # Exactly 30 days should be 10-day means
+    t_end = 30.0 * secs_per_day
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "10days"
+
+    # Exactly 1 day should be daily
+    t_end = 1.0 * secs_per_day
+    period, diagnostics_dt = Input.get_diag_period(t_start, t_end)
+    @test period == "1days"
+end
+
+@testset "land_diagnostics_period_to_symbol" begin
+    @test Input.land_diagnostics_period_to_symbol("30mins") == :halfhourly
+    @test Input.land_diagnostics_period_to_symbol("1hours") == :hourly
+    @test Input.land_diagnostics_period_to_symbol("1days") == :daily
+    @test Input.land_diagnostics_period_to_symbol("10days") == :tendaily
+    @test Input.land_diagnostics_period_to_symbol("1months") == :monthly
+    @test_throws ErrorException Input.land_diagnostics_period_to_symbol("2hours")
+    @test_throws ErrorException Input.land_diagnostics_period_to_symbol("hourly")
+end
+
+@testset "parse_component_dts!" begin
+    # Test case 1: All component dt's are specified
+    config_dict = Dict{String, Any}(
+        "dt_cpl" => "400secs",
+        "dt_atmos" => "200secs",
+        "dt_land" => "200secs",
+        "dt_ocean" => "400secs",
+        "dt_seaice" => "400secs",
+        "dt" => "300secs",  # Should be removed
+    )
+    @test_logs (:warn, "Removing dt in favor of individual component dt's") Input.parse_component_dts!(
+        config_dict,
+    )
+
+    @test haskey(config_dict, "component_dt_dict")
+    @test !haskey(config_dict, "dt")  # Should be removed
+    @test config_dict["component_dt_dict"]["dt_atmos"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_land"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_ocean"] == 400.0
+    @test config_dict["component_dt_dict"]["dt_seaice"] == 400.0
+
+    # Test case 2: Only generic dt is specified
+    config_dict = Dict{String, Any}("dt_cpl" => "400secs", "dt" => "200secs")
+    Input.parse_component_dts!(config_dict)
+
+    @test haskey(config_dict, "component_dt_dict")
+    @test haskey(config_dict, "dt")  # Should remain
+    @test config_dict["component_dt_dict"]["dt_atmos"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_land"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_ocean"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_seaice"] == 200.0
+
+    # Test case 3: Some (but not all) component dt's specified - should use generic dt
+    config_dict = Dict{String, Any}(
+        "dt_cpl" => "400secs",
+        "dt" => "200secs",
+        "dt_atmos" => "100secs",  # Should be removed with warning
+        "dt_land" => nothing,
+        "dt_ocean" => nothing,
+        "dt_seaice" => nothing,
+    )
+    @test_logs (
+        :warn,
+        "Removing dt_atmos from config in favor of dt because not all component dt's are specified",
+    ) Input.parse_component_dts!(config_dict)
+
+    @test haskey(config_dict, "component_dt_dict")
+    @test !haskey(config_dict, "dt_atmos")  # Should be removed
+    @test config_dict["component_dt_dict"]["dt_atmos"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_land"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_ocean"] == 200.0
+    @test config_dict["component_dt_dict"]["dt_seaice"] == 200.0
+
+    # Test case 4: Error when dt is missing and not all component dt's are specified
+    config_dict = Dict{String, Any}(
+        "dt_cpl" => "400secs",
+        "dt_atmos" => "200secs",
+        "dt_land" => nothing,
+        "dt_ocean" => nothing,
+        "dt_seaice" => nothing,
+    )
+    @test_throws "dt or (dt_atmos, dt_land, dt_ocean, and dt_seaice) must be specified" Input.parse_component_dts!(
+        config_dict,
+    )
+
+    # Test case 5: Error when component dt is not divisible by coupler dt
+    config_dict = Dict{String, Any}(
+        "dt_cpl" => "400secs",
+        "dt_atmos" => "300secs",  # 400 is not divisible by 300
+        "dt_land" => "200secs",
+        "dt_ocean" => "200secs",
+        "dt_seaice" => "200secs",
+    )
+    @test_throws "Coupler's and each model's time steps must be integer multiples of each other" Input.parse_component_dts!(
+        config_dict,
+    )
+
+    # Test case 6: Warning when dt is removed in favor of component dt's
+    config_dict = Dict{String, Any}(
+        "dt_cpl" => "400secs",
+        "dt" => "200secs",
+        "dt_atmos" => "200secs",
+        "dt_land" => "200secs",
+        "dt_ocean" => "200secs",
+        "dt_seaice" => "200secs",
+    )
+    @test_logs (:warn, "Removing dt in favor of individual component dt's") Input.parse_component_dts!(
+        config_dict,
+    )
+    @test !haskey(config_dict, "dt")
+end
+
+@testset "validate_model_types_for_mode" begin
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.AMIPMode, # sim_mode
+        Val(:slab), # ocean_model
+        Val(:nothing), # ice_model
+        Val(:bucket), # land_model
+    )
+    @test ocean == Val(:prescribed)
+    @test ice == Val(:prescribed)
+    @test land == Val(:bucket)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.SlabplanetAquaMode,
+        Val(:slab),
+        Val(:nothing),
+        Val(:bucket),
+    )
+    @test ocean == Val(:slab)
+    @test ice == Val(:nothing)
+    @test land == Val(:nothing)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.SlabplanetTerraMode,
+        Val(:slab),
+        Val(:prescribed),
+        Val(:integrated),
+    )
+    @test ocean == Val(:nothing)
+    @test ice == Val(:nothing)
+    @test land == Val(:integrated)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.CMIPMode,
+        Val(:prescribed),
+        Val(:prescribed),
+        Val(:bucket),
+    )
+    @test ocean == Val(:oceananigans)
+    @test ice == Val(:clima_seaice)
+    @test land == Val(:bucket)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.SlabplanetTerraMode,
+        Val(:nothing),
+        Val(:nothing),
+        Val(:integrated);
+        domain_type = "column",
+        scm_surface_type = "land",
+    )
+    @test ocean == Val(:nothing)
+    @test ice == Val(:nothing)
+    @test land == Val(:integrated)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.SlabplanetAquaMode,
+        Val(:slab),
+        Val(:nothing),
+        Val(:nothing);
+        domain_type = "column",
+        scm_surface_type = "ocean",
+    )
+    @test ocean == Val(:slab)
+    @test ice == Val(:nothing)
+    @test land == Val(:nothing)
+
+    # Test default scm_surface_type is "ocean"
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.AMIPMode,
+        Val(:prescribed),
+        Val(:prescribed),
+        Val(:bucket);
+        domain_type = "column",
+    )
+    @test ocean == Val(:prescribed)
+    @test ice == Val(:nothing)
+    @test land == Val(:nothing)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.AMIPMode,
+        Val(:prescribed),
+        Val(:prescribed),
+        Val(:bucket);
+        domain_type = "column",
+        scm_surface_type = "land",
+    )
+    @test ocean == Val(:nothing)
+    @test ice == Val(:nothing)
+    @test land == Val(:bucket)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.AMIPMode,
+        Val(:prescribed),
+        Val(:prescribed),
+        Val(:bucket);
+        domain_type = "column",
+        scm_surface_type = "ocean",
+    )
+    @test ocean == Val(:prescribed)
+    @test ice == Val(:nothing)
+    @test land == Val(:nothing)
+
+    ocean, ice, land = Input.validate_model_types_for_mode(
+        Interfacer.AMIPMode,
+        Val(:prescribed),
+        Val(:prescribed),
+        Val(:bucket);
+        domain_type = "column",
+        scm_surface_type = "sea_ice",
+    )
+    @test ocean == Val(:nothing)
+    @test ice == Val(:prescribed)
+    @test land == Val(:nothing)
+
+    @test_throws "Oceananigans ocean model is not supported" Input.validate_model_types_for_mode(
+        Interfacer.CMIPMode,
+        Val(:oceananigans),
+        Val(:prescribed),
+        Val(:bucket);
+        domain_type = "column",
+        scm_surface_type = "ocean",
+    )
+
+    @test_throws "ClimaSeaIce model is not supported" Input.validate_model_types_for_mode(
+        Interfacer.CMIPMode,
+        Val(:prescribed),
+        Val(:clima_seaice),
+        Val(:bucket);
+        domain_type = "column",
+        scm_surface_type = "sea_ice",
+    )
+
+    @test_throws "Unknown scm_surface_type" Input.validate_model_types_for_mode(
+        Interfacer.SlabplanetAquaMode,
+        Val(:slab),
+        Val(:nothing),
+        Val(:nothing);
+        domain_type = "column",
+        scm_surface_type = "invalid_surface",
+    )
+end
+
+@testset "get_era5_filepaths uses HHMM from start_date" begin
+    mktempdir() do dir
+        stamp = "20191231_1200"
+        for prefix in (
+            "sst_processed",
+            "sic_processed",
+            "era5_land_processed",
+            "albedo_processed",
+            "era5_bucket_processed",
+        )
+            touch(joinpath(dir, "$(prefix)_$(stamp).nc"))
+        end
+        start = Dates.DateTime(2019, 12, 31, 12)
+        paths = Input.get_era5_filepaths(Interfacer.SubseasonalMode, dir, start, "")
+        @test paths.sst_path == joinpath(dir, "sst_processed_$(stamp).nc")
+        @test paths.sic_path == joinpath(dir, "sic_processed_$(stamp).nc")
+        @test paths.land_ic_path == joinpath(dir, "era5_land_processed_$(stamp).nc")
+        @test paths.albedo_path == joinpath(dir, "albedo_processed_$(stamp).nc")
+        @test paths.bucket_initial_condition ==
+              joinpath(dir, "era5_bucket_processed_$(stamp).nc")
+
+        # Date-only start_date still resolves to _0000
+        stamp00 = "20200101_0000"
+        for prefix in (
+            "sst_processed",
+            "sic_processed",
+            "era5_land_processed",
+            "albedo_processed",
+            "era5_bucket_processed",
+        )
+            touch(joinpath(dir, "$(prefix)_$(stamp00).nc"))
+        end
+        paths00 = Input.get_era5_filepaths(
+            Interfacer.SubseasonalMode,
+            dir,
+            Dates.DateTime(2020, 1, 1),
+            "",
+        )
+        @test endswith(paths00.sst_path, "sst_processed_$(stamp00).nc")
+    end
+end

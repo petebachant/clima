@@ -1,0 +1,169 @@
+"""
+     make_land_domain(
+         surface_space::CC.Spaces.SpectralElementSpace2D,
+         depth::FT;
+         nelements_vert::Int = 15,
+         dz_tuple::Tuple{FT, FT} = FT.((10.0, 0.05)),
+         ) where {FT}
+
+ Creates the land model domain from the atmosphere's surface space (which is also
+ the coupler boundary space) and information about the number of elements and
+ extent of the vertical domain.
+ """
+function make_land_domain(
+    surface_space::CC.Spaces.SpectralElementSpace2D,
+    depth::FT;
+    nelements_vert::Int = 15,
+    dz_tuple::Tuple{FT, FT} = FT.((10.0, 0.05)),
+) where {FT}
+    mesh = CC.Spaces.topology(surface_space).mesh
+
+    radius = mesh.domain.radius
+    nelements_horz = mesh.ne
+    npolynomial =
+        CC.Spaces.Quadratures.polynomial_degree(CC.Spaces.quadrature_style(surface_space))
+    nelements = (nelements_horz, nelements_vert)
+    vertdomain = CC.Domains.IntervalDomain(
+        CC.Geometry.ZPoint(FT(-depth)),
+        CC.Geometry.ZPoint(FT(0));
+        boundary_names = (:bottom, :top),
+    )
+
+    vertmesh = CC.Meshes.IntervalMesh(
+        vertdomain,
+        CC.Meshes.GeneralizedExponentialStretching{FT}(dz_tuple[1], dz_tuple[2]);
+        nelems = nelements_vert,
+        reverse_mode = true,
+    )
+    vert_center_space =
+        CC.Spaces.CenterFiniteDifferenceSpace(ClimaComms.device(surface_space), vertmesh)
+    subsurface_space =
+        CC.Spaces.ExtrudedFiniteDifferenceSpace(surface_space, vert_center_space)
+    subsurface_face_space = CC.Spaces.face_space(subsurface_space)
+    space = (;
+        surface = surface_space,
+        subsurface = subsurface_space,
+        subsurface_face = subsurface_face_space,
+    )
+
+    fields = CL.Domains.get_additional_coordinate_field_data(subsurface_space)
+
+    return CL.Domains.SphericalShell{FT, typeof(space), typeof(fields)}(
+        radius,
+        depth,
+        dz_tuple,
+        nelements,
+        npolynomial,
+        space,
+        fields,
+    )
+end
+
+"""
+     make_land_domain(
+         surface_space::CC.Spaces.PointSpace,
+         depth::FT;
+         nelements_vert::Int = 15,
+         dz_tuple::Tuple{FT, FT} = FT.((10.0, 0.05)),
+         ) where {FT}
+
+Creates the land model domain from a PointSpace (single-column mode).
+Extracts lat/long from the PointSpace coordinate field and constructs
+a `CL.Domains.Column` with those coordinates.
+
+If `coords` does not have `long` and `lat` fields, the column will be
+constructed without any lat/long information. This is only acceptable
+for bucket model with albedo from function. For integrated land or bucket
+when reading in prescribed albedo, we need to provide lat/long information.
+"""
+function make_land_domain(
+    surface_space::CC.Spaces.PointSpace,
+    depth::FT;
+    nelements_vert::Int = 15,
+    dz_tuple::Tuple{FT, FT} = FT.((10.0, 0.05)),
+) where {FT}
+    coords = CC.Fields.coordinate_field(surface_space)
+    longlat =
+        hasproperty(coords, :long) ?
+        (FT(parent(coords.long)[1]), FT(parent(coords.lat)[1])) : nothing
+    domain = CL.Domains.Column(;
+        zlim = (-depth, FT(0)),
+        nelements = nelements_vert,
+        dz_tuple,
+        longlat,
+    )
+    return domain
+end
+
+"""
+    _coupler_set_ic!(Y, p, t, model::BucketModel, T_sfc, set_ic!)
+
+Helper function to set initial conditions using the provided set_ic! function.
+
+
+The land model expects a reasonable guess for surface temperature to be set before the set_ic! function
+is called, which is why we have this wrapper. This is used to make reasonable guesses for 
+initial conditions for certain prognostic variables. Note that if the state Y is saved and used
+as initial conditions, this would not
+be required. We also use it to set the cache variables
+required to compute radiation in the atmosphere.
+
+Note that when running a restarted simulation, any values set here will be overwritten by
+the saved state and cache values in the restart file.
+"""
+function _coupler_set_ic!(Y, p, t, model::CL.Bucket.BucketModel, T_sfc, set_ic!)
+    p.drivers.T .= T_sfc
+    set_ic!(Y, p, t, model)
+
+    # Set albedo and T_sfc so that the atmosphere can compute radiation.
+    # Note that emissivity is a constant so we don't need to set it here.
+    CL.Bucket.next_albedo!(
+        p.bucket.α_sfc,
+        model.parameters.albedo,
+        model.parameters,
+        Y,
+        p,
+        t,
+    )
+    p.bucket.T_sfc .= CL.Domains.top_center_to_surface(Y.bucket.T)
+end
+"""
+    _coupler_set_ic!(Y, p, t, model::LandModel, T_sfc, surface_elevation, set_ic!)
+
+Helper function to set initial conditions using the provided set_ic! function. 
+We also use it to set the cache variables
+required to compute radiation in the atmosphere.
+
+The land model expects a reasonable guess for air temperature, air pressure, air specific humidity 
+and co2 fraction to be set before the set_ic! function
+is called, which is why we have this wrapper. These are used to make reasonable guesses for 
+initial conditions for certain prognostic variables. If the below guesses do not provided
+realistic enough IC, one could also pass in the initial conditions from the atmosphere.
+Note that if the state Y is saved, these are not required at all.
+
+Note that when running a restarted simulation, any values set here will be overwritten by
+the saved state and cache values in the restart file.
+"""
+function _coupler_set_ic!(Y, p, t, model::CL.LandModel, T_sfc, surface_elevation, set_ic!)
+    FT = eltype(T_sfc)
+    p.drivers.T .= T_sfc
+    thermo_params = LP.thermodynamic_parameters(model.canopy.earth_param_set)
+    R_d = TD.Parameters.R_d(thermo_params)
+    T_surf_ref = TD.Parameters.T_surf_ref(thermo_params)
+    grav = TD.Parameters.grav(thermo_params)
+    MSLP = TD.Parameters.MSLP(thermo_params)
+    scale_height = R_d * T_surf_ref / grav
+    elevation_correction = @. exp(-surface_elevation/scale_height)
+    p.drivers.P .= MSLP .* elevation_correction # standard pressure in Pa with an elevation correction
+    ρ_sfc = @. p.drivers.P/(R_d*p.drivers.T) # Ideal gas law
+    @. p.drivers.q = TD.q_vap_saturation(thermo_params, T_sfc, ρ_sfc)
+    p.drivers.c_co2 .= FT(4.2e-4) # Reasonable value; in the future we may wish to ensure this is consistent with atmos, but this is only used for the initial conditions
+    set_ic!(Y, p, t, model)
+
+    # Set albedo, T_sfc, and emissivity so that the atmosphere can compute radiation.
+    # Note that we normally use SWD, SWU, LWU to compute these, so we just set them to
+    # some reasonable values here. These will be overwritten during the first land step.
+    p.α_sfc .= 0.3
+    p.T_sfc .= Y.canopy.energy.T
+    p.ϵ_sfc .= 1
+end
