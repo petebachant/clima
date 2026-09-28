@@ -77,14 +77,15 @@ function run_column(::Type{FT}) where {FT}
     # --- Broadcast the kernel down the column. A parameter struct acts as a
     # scalar in broadcasts. Wrapping it in `Ref(...)` also works.
     col = column_kernel.(thp, mp, ρ, e_int, q_tot, q_rai)
-    T, q_liq, q_ice = getproperty.(col, :T), getproperty.(col, :q_liq), getproperty.(col, :q_ice)
+    T, q_liq, q_ice =
+        getproperty.(col, :T), getproperty.(col, :q_liq), getproperty.(col, :q_ice)
 
     # --- Bulk surface fluxes over a warm, saturated sea surface, using level 1
     # (10 m) as the "interior" point
     T_sfc = FT(302)
     q_sfc = TD.q_vap_saturation(thp, T_sfc, ρ[1])
     config = SF.SurfaceFluxConfig(SF.ConstantRoughnessParams(toml_dict),
-                                  SF.ConstantGustinessSpec(FT(1)))
+        SF.ConstantGustinessSpec(FT(1)))
     # Arguments are positional: air state, surface state, Φ_sfc, Δz, displacement
     # height d, air and surface winds, roughness_inputs (none here), config.
     fluxes(u) = SF.surface_fluxes(sfp, T[1], q_tot[1], q_liq[1], q_ice[1], ρ[1],
@@ -94,21 +95,25 @@ function run_column(::Type{FT}) where {FT}
     sfc = fluxes.(winds)
 
     return (; z, T_true, q_liq_true, q_ice_true, T, q_liq, q_ice, col, q_tot, sfc, winds,
-              e_sat_liq, e_sat_ice)
+        e_sat_liq, e_sat_ice)
 end
 
 r64 = run_column(Float64)
 r32 = run_column(Float32)
 
-println("  z [m]    T [K]    p [hPa]  q_liq [g/kg]  q_ice [g/kg]  autoconv [1/s]  accr [1/s]  v_rain [m/s]")
+println(
+    "  z [m]    T [K]    p [hPa]  q_liq [g/kg]  q_ice [g/kg]  autoconv [1/s]  accr [1/s]  v_rain [m/s]",
+)
 for (zk, c) in zip(r64.z, r64.col)
-    println(lpad(Int(zk), 7), lpad(round(c.T; digits = 2), 9), lpad(round(c.p / 100; digits = 1), 10),
+    println(lpad(Int(zk), 7), lpad(round(c.T; digits = 2), 9),
+        lpad(round(c.p / 100; digits = 1), 10),
         lpad(round(1e3c.q_liq; digits = 3), 13), lpad(round(1e3c.q_ice; digits = 3), 13),
         lpad(round(c.acnv; sigdigits = 3), 15), lpad(round(c.accr; sigdigits = 3), 12),
         lpad(round(c.v_rain; digits = 2), 13))
 end
 for (u, s) in zip(r64.winds, r64.sfc)
-    println("U = $(u) m/s: SHF = $(round(s.shf; digits = 1)) W/m², LHF = $(round(s.lhf; digits = 1)) W/m², ",
+    println(
+        "U = $(u) m/s: SHF = $(round(s.shf; digits = 1)) W/m², LHF = $(round(s.lhf; digits = 1)) W/m², ",
         "u* = $(round(s.ustar; digits = 3)) m/s, ζ = $(round(s.ζ; digits = 3))")
 end
 
@@ -122,7 +127,9 @@ end
             @test r.e_sat_ice < r.e_sat_liq
             # Saturation adjustment recovers the state we built (round trip)
             @test all(isapprox.(r.T, r.T_true; atol = 0.05))
-            @test all(isapprox.(r.q_liq .+ r.q_ice, r.q_liq_true .+ r.q_ice_true; atol = 2e-5))
+            @test all(
+                isapprox.(r.q_liq .+ r.q_ice, r.q_liq_true .+ r.q_ice_true; atol = 2e-5),
+            )
             # Clear sky below 1 km, cloudy above, ice appears only when cold
             @test all(iszero, (r.q_liq .+ r.q_ice)[r.z .<= 1000])
             @test all(>(0), (r.q_liq .+ r.q_ice)[r.z .> 1000])

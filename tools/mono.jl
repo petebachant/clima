@@ -45,7 +45,8 @@ end
 
 function testcompat_of(dir)
     tp = joinpath(dir, "test", "Project.toml")
-    isfile(tp) ? get(TOML.parsefile(tp), "compat", Dict{String, String}()) : Dict{String, String}()
+    isfile(tp) ? get(TOML.parsefile(tp), "compat", Dict{String, String}()) :
+    Dict{String, String}()
 end
 
 function load_packages()
@@ -128,7 +129,8 @@ end
 
 json_list(xs) = "[" * join(("\"$x\"" for x in xs), ",") * "]"
 json_matrix(pkgs, names) =
-    "[" * join(("{\"package\":\"$n\",\"path\":\"$(pkgs[n].path)\"}" for n in names), ",") * "]"
+    "[" * join(("{\"package\":\"$n\",\"path\":\"$(pkgs[n].path)\"}" for n in names), ",") *
+    "]"
 
 # ---------------------------------------------------------------------------
 
@@ -150,13 +152,14 @@ end
 
 function compat_drift(pkgs)
     drift = Tuple{String, String, String, VersionNumber}[]
-    check(where, d, spec) = spec === nothing || pkgs[d].version in Pkg.Versions.semver_spec(spec) ||
+    check(where, d, spec) =
+        spec === nothing || pkgs[d].version in Pkg.Versions.semver_spec(spec) ||
         push!(drift, (where, d, spec, pkgs[d].version))
     for p in values(pkgs)
         for d in unique!(vcat(p.deps, p.weakdeps))
             spec = get(p.compat, d, nothing)
             spec === nothing ? push!(drift, (p.name, d, "<missing>", pkgs[d].version)) :
-                check(p.name, d, spec)
+            check(p.name, d, spec)
         end
         # Test envs: a stale bound silently tests against an old release.
         for (d, spec) in p.testcompat
@@ -184,8 +187,11 @@ function cmd_test(pkgs, name, registered = false)
     dir = joinpath(ROOT, p.path)
     ups = registered ? String[] : sort!(collect(upstream_closure(pkgs, name)))
     specs = [Pkg.PackageSpec(path = joinpath(ROOT, pkgs[u].path)) for u in ups]
-    println("Testing $name against ", registered ? "registered deps" :
-        "in-repo HEAD of: " * (isempty(ups) ? "(none)" : join(ups, ", ")))
+    println(
+        "Testing $name against ",
+        registered ? "registered deps" :
+        "in-repo HEAD of: " * (isempty(ups) ? "(none)" : join(ups, ", ")),
+    )
     if isfile(joinpath(dir, "test", "Project.toml"))
         # Mirrors the existing CliMA convention: dev the package into its test env.
         env = mktempdir()
@@ -213,7 +219,8 @@ function bump(v::VersionNumber, level)
 end
 
 # Julia semver: 0.x minor and x.0 major bumps are breaking.
-isbreaking(old, new) = old.major == 0 ? new.minor != old.minor || new.major != 0 :
+isbreaking(old, new) =
+    old.major == 0 ? new.minor != old.minor || new.major != 0 :
     new.major != old.major
 
 compat_entry(v) = v.major == 0 ? "$(v.major).$(v.minor)" : "$(v.major)"
@@ -235,7 +242,8 @@ function widen_compat!(path, dep, new)
     (spec === nothing || new in Pkg.Versions.semver_spec(spec)) && return nothing
     widened = "$spec, $(compat_entry(new))"
     edit_project(path) do section, l
-        section == "compat" && occursin(Regex("^\\s*$dep\\s*="), l) ? "$dep = \"$widened\"" : l
+        section == "compat" && occursin(Regex("^\\s*$dep\\s*="), l) ?
+        "$dep = \"$widened\"" : l
     end
     return spec => widened
 end
@@ -266,7 +274,8 @@ function cmd_bump(pkgs, name, level, release_dependents = false)
         # Users only see widened compat once the dependent is released.
         foreach(n -> set_version!(pkgs[n], bump(pkgs[n].version, "patch")), sort!(touched))
     else
-        println("Dependents with widened compat need a release before users can combine them",
+        println(
+            "Dependents with widened compat need a release before users can combine them",
             " with $name $new; pass --release-dependents to patch-bump them.")
     end
 end
@@ -324,7 +333,9 @@ function cmd_buildkite(pkgs, base = "origin/main")
     println("steps:")
     println("  - label: \":julia: instantiate workspace\"")
     println("    key: init")
-    println("    command: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'")
+    println(
+        "    command: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'",
+    )
     println("  - wait")
     for n in order
         path = pkgs[n].path
@@ -363,10 +374,14 @@ function load_examples(pkgs)
         meta = joinpath(dir, name, "example.toml")
         isfile(meta) || continue
         m = TOML.parsefile(meta)
-        deps = keys(get(TOML.parsefile(joinpath(dir, name, "Project.toml")), "deps", Dict()))
-        push!(out, Example(name, "examples/$name", m["title"], m["summary"],
-            get(m, "nightly", false), get(m, "timeout_minutes", 30),
-            sort!(filter(in(keys(pkgs)), collect(deps)))))
+        deps =
+            keys(get(TOML.parsefile(joinpath(dir, name, "Project.toml")), "deps", Dict()))
+        push!(
+            out,
+            Example(name, "examples/$name", m["title"], m["summary"],
+                get(m, "nightly", false), get(m, "timeout_minutes", 30),
+                sort!(filter(in(keys(pkgs)), collect(deps)))),
+        )
     end
     return out
 end
@@ -384,13 +399,25 @@ function cmd_examples(pkgs, base = "origin/main"; pr = false, list = false)
     end
     changed = base == "ALL" ? Set(keys(pkgs)) : changed_packages(pkgs, base)
     affected = downstream_closure(pkgs, changed)
-    files = base == "ALL" ? String[] :
+    files =
+        base == "ALL" ? String[] :
         split(git("diff", "--name-only", "$base...HEAD"), '\n'; keepempty = false)
     hit = filter(ucs) do u
         (pr && u.nightly) && return false
-        base == "ALL" || any(in(affected), u.deps) || any(f -> startswith(f, u.path * "/"), files)
+        base == "ALL" || any(in(affected), u.deps) ||
+            any(f -> startswith(f, u.path * "/"), files)
     end
-    println("[", join(("{\"name\":\"$(u.name)\",\"path\":\"$(u.path)\",\"timeout\":$(u.timeout_minutes)}" for u in hit), ","), "]")
+    println(
+        "[",
+        join(
+            (
+                "{\"name\":\"$(u.name)\",\"path\":\"$(u.path)\",\"timeout\":$(u.timeout_minutes)}"
+                for u in hit
+            ),
+            ",",
+        ),
+        "]",
+    )
 end
 
 # For environments kept out of the workspace (experiments/): make every
@@ -398,7 +425,8 @@ end
 # [sources] path, so nothing silently comes from the registry (Julia >= 1.11).
 function cmd_sources(pkgs, dir)
     path = joinpath(ROOT, dir, "Project.toml")
-    direct = filter(in(keys(pkgs)), collect(keys(get(TOML.parsefile(path), "deps", Dict()))))
+    direct =
+        filter(in(keys(pkgs)), collect(keys(get(TOML.parsefile(path), "deps", Dict()))))
     closure = Set(direct)
     stack = copy(direct)
     while !isempty(stack)
@@ -412,19 +440,22 @@ function cmd_sources(pkgs, dir)
     i = findfirst(==("[sources]"), strip.(lines))
     if i !== nothing  # regenerate [sources] wholesale
         j = findnext(l -> startswith(strip(l), "["), lines, i + 1)
-        lines = vcat(lines[1:i-1], j === nothing ? String[] : lines[j:end])
+        lines = vcat(lines[1:(i - 1)], j === nothing ? String[] : lines[j:end])
     end
     if !isempty(added)
         k = findfirst(==("[deps]"), strip.(lines))
         uuid(n) = TOML.parsefile(joinpath(ROOT, pkgs[n].path, "Project.toml"))["uuid"]
-        splice!(lines, k+1:k, ["$n = \"$(uuid(n))\"" for n in added])
+        splice!(lines, (k + 1):k, ["$n = \"$(uuid(n))\"" for n in added])
     end
     while !isempty(lines) && isempty(strip(lines[end]))
         pop!(lines)
     end
     push!(lines, "", "[sources]")
     for n in names
-        push!(lines, "$n = {path = \"$(relpath(joinpath(ROOT, pkgs[n].path), joinpath(ROOT, dir)))\"}")
+        push!(
+            lines,
+            "$n = {path = \"$(relpath(joinpath(ROOT, pkgs[n].path), joinpath(ROOT, dir)))\"}",
+        )
     end
     write(path, join(lines, '\n') * '\n')
     isempty(added) || println("$dir: added transitive in-repo deps ", join(added, ", "))
@@ -434,7 +465,12 @@ end
 # Owners of an environment (example/experiment): owners of its top-level
 # in-repo packages, i.e. those no other in-repo dep of it depends on.
 function env_owners(pkgs, owners, dir)
-    deps = filter(in(keys(pkgs)), collect(keys(get(TOML.parsefile(joinpath(ROOT, dir, "Project.toml")), "deps", Dict()))))
+    deps = filter(
+        in(keys(pkgs)),
+        collect(
+            keys(get(TOML.parsefile(joinpath(ROOT, dir, "Project.toml")), "deps", Dict())),
+        ),
+    )
     below = Set{String}()
     for d in deps
         stack = copy(pkgs[d].deps)
@@ -452,12 +488,19 @@ end
 function write_triage(pkgs, manifest)
     teams = manifest["_teams"]
     area(label, team, paths) = (; label, team, paths)
-    areas = [area("pkg: $n", manifest[n]["team"], ["$(pkgs[n].path)/"]) for n in toposort(pkgs)]
+    areas =
+        [area("pkg: $n", manifest[n]["team"], ["$(pkgs[n].path)/"]) for n in toposort(pkgs)]
     push!(areas, area("dev guides", manifest["dev-guides"]["team"], ["docs/dev/"]))
     push!(areas, area("examples", "software", ["examples/"]))
-    push!(areas, area("experiments", "coupler", ["experiments/", ".buildkite/experiments/"]))
-    push!(areas, area("infrastructure", manifest["_repo"]["team"],
-        ["tools/", ".github/", ".buildkite/", "packages.toml", "Project.toml"]))
+    push!(
+        areas,
+        area("experiments", "coupler", ["experiments/", ".buildkite/experiments/"]),
+    )
+    push!(
+        areas,
+        area("infrastructure", manifest["_repo"]["team"],
+            ["tools/", ".github/", ".buildkite/", "packages.toml", "Project.toml"]),
+    )
     js(x::AbstractString) = "\"" * x * "\""
     js(x::Integer) = string(x)
     js(xs::Vector) = "[" * join(js.(xs), ", ") * "]"
@@ -466,60 +509,77 @@ function write_triage(pkgs, manifest)
         println(io, "  \"teams\": {")
         tn = sort!(collect(keys(teams)))
         for (i, t) in enumerate(tn)
-            println(io, "    $(js(t)): {\"project\": $(teams[t]["project"]), \"name\": $(js(teams[t]["name"]))}", i < length(tn) ? "," : "")
+            println(
+                io,
+                "    $(js(t)): {\"project\": $(teams[t]["project"]), \"name\": $(js(teams[t]["name"]))}",
+                i < length(tn) ? "," : "",
+            )
         end
         println(io, "  },")
         println(io, "  \"areas\": [")
         for (i, a) in enumerate(areas)
-            println(io, "    {\"label\": $(js(a.label)), \"team\": $(js(a.team)), \"paths\": $(js(a.paths))}", i < length(areas) ? "," : "")
+            println(
+                io,
+                "    {\"label\": $(js(a.label)), \"team\": $(js(a.team)), \"paths\": $(js(a.paths))}",
+                i < length(areas) ? "," : "",
+            )
         end
         println(io, "  ]")
         println(io, "}")
     end
     mkpath(joinpath(ROOT, ".github", "ISSUE_TEMPLATE"))
     open(joinpath(ROOT, ".github", "ISSUE_TEMPLATE", "issue.yml"), "w") do io
-        print(io, """
-        # Generated by `julia tools/mono.jl codeowners`; do not edit.
-        name: Bug report, feature request, or question
-        description: Anything about a CliMA package, example, or experiment
-        body:
-          - type: dropdown
-            id: package
-            attributes:
-              label: Package
-              description: Which part of the repo is this about? This routes it to the owning team.
-              options:
-        """)
+        print(
+            io,
+            """
+  # Generated by `julia tools/mono.jl codeowners`; do not edit.
+  name: Bug report, feature request, or question
+  description: Anything about a CliMA package, example, or experiment
+  body:
+    - type: dropdown
+      id: package
+      attributes:
+        label: Package
+        description: Which part of the repo is this about? This routes it to the owning team.
+        options:
+  """,
+        )
         for a in areas
             println(io, "        - ", js(a.label))
         end
-        print(io, """
-                - "not sure"
-            validations:
-              required: true
-          - type: dropdown
-            id: kind
-            attributes:
-              label: Kind
-              options: ["bug", "feature request", "question", "documentation"]
-            validations:
-              required: true
-          - type: textarea
-            id: description
-            attributes:
-              label: Description
-              description: What happened, what you expected, and how to reproduce it (a minimal script if you can).
-            validations:
-              required: true
-          - type: textarea
-            id: versions
-            attributes:
-              label: Versions
-              description: Output of `using Pkg; Pkg.status()` and `versioninfo()`.
-              render: text
-        """)
+        print(
+            io,
+            """
+          - "not sure"
+      validations:
+        required: true
+    - type: dropdown
+      id: kind
+      attributes:
+        label: Kind
+        options: ["bug", "feature request", "question", "documentation"]
+      validations:
+        required: true
+    - type: textarea
+      id: description
+      attributes:
+        label: Description
+        description: What happened, what you expected, and how to reproduce it (a minimal script if you can).
+      validations:
+        required: true
+    - type: textarea
+      id: versions
+      attributes:
+        label: Versions
+        description: Output of `using Pkg; Pkg.status()` and `versioninfo()`.
+        render: text
+  """,
+        )
     end
-    write(joinpath(ROOT, ".github", "ISSUE_TEMPLATE", "config.yml"), "blank_issues_enabled: false\n")
+    write(
+        joinpath(ROOT, ".github", "ISSUE_TEMPLATE", "config.yml"),
+        "blank_issues_enabled: false\n",
+    )
 end
 
 function cmd_codeowners(pkgs)
@@ -532,7 +592,8 @@ function cmd_codeowners(pkgs)
         push!(rows, "/$(pkgs[n].path)/" => owners[n])
     end
     for (n, e) in manifest  # non-Julia subtrees, e.g. dev guides
-        haskey(e, "path") && !get(e, "julia", true) && push!(rows, "/$(e["path"])/" => owners[n])
+        haskey(e, "path") && !get(e, "julia", true) &&
+            push!(rows, "/$(e["path"])/" => owners[n])
     end
     for area in ("examples", "experiments"), d in sort(readdir(joinpath(ROOT, area)))
         isfile(joinpath(ROOT, area, d, "Project.toml")) || continue
@@ -543,7 +604,10 @@ function cmd_codeowners(pkgs)
     end
     w = maximum(length(first(r)) for r in rows) + 2
     open(joinpath(ROOT, ".github", "CODEOWNERS"), "w") do io
-        println(io, "# Generated by `julia tools/mono.jl codeowners` from packages.toml; do not edit.")
+        println(
+            io,
+            "# Generated by `julia tools/mono.jl codeowners` from packages.toml; do not edit.",
+        )
         println(io, "# The last matching pattern wins. See docs/OWNERSHIP.md.")
         for (pat, os) in rows
             isempty(os) && error("no owners for $pat")
@@ -551,7 +615,9 @@ function cmd_codeowners(pkgs)
         end
     end
     write_triage(pkgs, manifest)
-    println("Wrote .github/CODEOWNERS ($(length(rows)) rules), .github/triage.json, and the issue form")
+    println(
+        "Wrote .github/CODEOWNERS ($(length(rows)) rules), .github/triage.json, and the issue form",
+    )
 end
 
 function main(args)
@@ -570,7 +636,8 @@ function main(args)
     cmd == "buildkite" ? cmd_buildkite(pkgs, pos...) :
     cmd == "codeowners" ? cmd_codeowners(pkgs) :
     cmd == "sources" ? cmd_sources(pkgs, pos[1]) :
-    cmd == "examples" ? cmd_examples(pkgs, pos...; pr = "--pr" in flags, list = "--list" in flags) :
+    cmd == "examples" ?
+    cmd_examples(pkgs, pos...; pr = "--pr" in flags, list = "--list" in flags) :
     error("unknown command $cmd")
 end
 

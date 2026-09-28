@@ -56,10 +56,10 @@ def depth(p,u,memo={}):
     ds+=[1+depth(q,u) for q in anydeps[p] if q!=u and reaches(q,u)]
     memo[(p,u)]=max(ds) if ds else 0; return memo[(p,u)]
 # topo order
-order=[]; 
+order=[];
 def visit(p,st=set()):
     if p in order: return
-    for q in anydeps[p]: 
+    for q in anydeps[p]:
         if q not in st: visit(q,st|{p})
     order.append(p)
 for p in SET: visit(p)

@@ -43,7 +43,8 @@ ClimaCore.Spaces.issubspace(
 # ClimaCoupler runs are driven by a configuration dictionary. We begin from the
 # `slabplanet_default.yml` file shipped with ClimaCoupler; `get_coupler_config_dict`
 # fills in every option not in the file with ClimaCoupler and ClimaAtmos defaults.
-config_file = joinpath(pkgdir(ClimaCoupler), "config", "ci_configs", "slabplanet_default.yml")
+config_file =
+    joinpath(pkgdir(ClimaCoupler), "config", "ci_configs", "slabplanet_default.yml")
 config = Input.get_coupler_config_dict(config_file)
 
 # ## 2. Make it as small and short as possible
@@ -73,12 +74,15 @@ config["print_config_dict"] = false          # quieter logs when the simulation 
 # ## 3. Build and run the coupled simulation
 cs = CoupledSimulation(config)
 (; atmos_sim, land_sim, ocean_sim) = cs.model_sims
-@info "Component models" nameof(typeof(atmos_sim)) nameof(typeof(land_sim)) nameof(typeof(ocean_sim))
+@info "Component models" nameof(typeof(atmos_sim)) nameof(typeof(land_sim)) nameof(
+    typeof(ocean_sim),
+)
 
 # Surface temperature of each surface before we step, on the coupler's
 # boundary (surface) space.
 boundary_space = Interfacer.boundary_space(cs)
-T_ocean_initial = copy(Interfacer.get_field(boundary_space, ocean_sim, Val(:surface_temperature)))
+T_ocean_initial =
+    copy(Interfacer.get_field(boundary_space, ocean_sim, Val(:surface_temperature)))
 
 run!(cs)
 

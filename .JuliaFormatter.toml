@@ -1,0 +1,18 @@
+# One formatting style for the whole monorepo (adopted from ClimaAtmos).
+#
+# JuliaFormatter uses the nearest .JuliaFormatter.toml above each file, so
+# while packages/* are still synced from upstream, each package keeps its own
+# config and this one applies to repo-level code (tools/, examples/,
+# experiments/). At cutover: delete packages/*/.JuliaFormatter.toml, run
+# `prek run --all-files` once, and list that commit in .git-blame-ignore-revs.
+margin = 92
+indent = 4
+always_for_in = true
+whitespace_typedefs = true
+whitespace_ops_in_indices = true
+join_lines_based_on_source = true  # https://domluna.github.io/JuliaFormatter.jl/dev/#join_lines_based_on_source
+format_docstrings = true
+# Markdown formatting can rewrap GitHub alerts and tables in the root docs;
+# ClimaAtmos enables it for its Documenter pages. Revisit at cutover.
+format_markdown = false
+ignore = ["docs/dev", ".github", "packages/*/docs/dev-guides"]

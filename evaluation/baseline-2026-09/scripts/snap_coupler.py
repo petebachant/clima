@@ -11,7 +11,7 @@ for line in filter(None,log):
         t=tomllib.loads(r.stdout)
         d=(set(t.get('deps',{}))|set(t.get('weakdeps',{})))&set(SET)
         for k,v in t.get('compat',{}).items():
-            if k in d: 
+            if k in d:
                 v=",".join(v) if isinstance(v,list) else v
                 # intersection semantics: root first; ClimaEarth only fills missing (it is the env actually used for runs)
                 comp.setdefault(k,v)

@@ -51,7 +51,7 @@ for u in UP:
 w=csv.DictWriter(open("propagation_lag.csv","w"),fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
 json.dump({u:REG[u] for u in REG},open("registry_dates_iso.json","w"))
 def pct(L,p):
-    L=sorted(L); 
+    L=sorted(L);
     if not L: return None
     k=(len(L)-1)*p; f=int(k); c=min(f+1,len(L)-1); return round(L[f]+(L[c]-L[f])*(k-f),2)
 def stats(R):

@@ -75,6 +75,59 @@ reached Coupler in under 2 days.
 Lag also only measures when compat admitted a version, not the adaptation
 work done on branches beforehand.
 
+## Case study: the `issubspace` outage (September 2026)
+
+A real break that became a major outage, and the clearest evidence so far
+for Q2.
+
+**What happened.**
+1. **The change.** ClimaCore PR
+   [#2637](https://github.com/CliMA/ClimaCore.jl/pull/2637) ("Updated
+   scaling plots", merged 2026-09-16) included commit `e2db7268`
+   ("Additional docs updates"). It deleted the `issubspace` methods for
+   spectral-element spaces from `src/Spaces/spectralelement.jl`. The
+   docstring that points to them is still there.
+2. **Why it mattered.** ClimaCoupler's `Interfacer.remap!` relies on those
+   methods to move atmosphere surface fields onto the boundary space.
+   Without them, **every global coupled run** fails with "Cannot remap
+   between distinct spectral-element spaces".
+3. **What CI said.** On that PR, "downstream ClimaCoupler.jl" and
+   "downstream ClimaLand.jl" **failed**. They are advisory, so it merged
+   anyway, and ClimaCore has no `issubspace` unit test.
+4. **What happened next.** ClimaCoupler's nightly AMIP pipeline pinned
+   ClimaLand to a release. Its comment attributes the break to ClimaLand.
+   Two weeks later, upstream ClimaCore `main` still lacks the methods.
+
+**Where the monorepo would have stopped it.**
+- `mono.jl affected` on that PR lists ClimaCore plus all 7 of its
+  dependents, including ClimaCoupler, ClimaLand, and ClimaAtmos.
+- With required checks, the ClimaCoupler test failure blocks the merge.
+  Today that same failure is a red X someone can ignore.
+- The `coupled-slabplanet` example (nightly) and the `experiments/amip`
+  prototype both exercise this path. Writing that example is what
+  rediscovered the bug.
+
+**The fix, done the monorepo way.** It's on branch
+`fix/climacore-issubspace`:
+- One change restores the two ClimaCore methods and adds a regression test
+  for the exact case the coupler needs. The test fails without the fix
+  and passes with it.
+- The same branch fixes a second bug the example found: ClimaCoupler's
+  bucket model leaves `output_writer` unassigned when land diagnostics
+  are off.
+- It removes both workarounds from the example.
+
+That's one PR across two packages and an example, reviewed by both sets of
+owners and tested together. In the multi-repo world, it would be a
+ClimaCore PR, a ClimaCore release, a ClimaCoupler PR, a ClimaCoupler
+release, and an unpin.
+
+**Caveat.** The monorepo doesn't prevent the *mistake*. It makes the
+consequence visible and blocking on the PR that caused it. That only works
+if downstream checks are *required*, and flaky downstream tests would make
+people want them advisory again. Budgeting for test reliability is part of
+the cost of Q2.
+
 ## What the prototype showed on day one
 
 Importing 18 packages and resolving them in **one** Julia workspace, the

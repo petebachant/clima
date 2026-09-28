@@ -1,0 +1,55 @@
+# Pre-commit hooks for the whole monorepo, adopted from ClimaAtmos.
+#
+# Works with `prek` (https://prek.j178.dev, recommended) or `pre-commit`.
+# Install once with `prek install`; hooks then run on staged files at
+# `git commit`. `prek run --all-files` sweeps everything in scope.
+#
+# Scope: while packages/* and docs/dev are synced from their upstream repos
+# (tools/subtree.sh), reformatting them would make every sync conflict, so
+# they are excluded. At cutover, drop them from `exclude`; see
+# .JuliaFormatter.toml.
+exclude: ^(packages/|docs/dev/)|\.github/(CODEOWNERS|triage\.json|ISSUE_TEMPLATE/)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: markdown-link-ambiguity
+        name: Documenter link ambiguity ([units] followed by parentheses)
+        # From ClimaAtmos: `[text] (target)`, even across a newline, parses as
+        # a Documenter link and breaks docs builds. Julia sources (docstrings)
+        # only: repo-level markdown is rendered by GitHub, not Documenter. At
+        # cutover, add markdown under packages/*/docs/src.
+        entry: .dev/check_markdown_link_ambiguity.py
+        language: system
+        types_or: [julia]
+        pass_filenames: true
+
+      - id: julia-formatter
+        name: JuliaFormatter (pinned; matches CI)
+        # Pinned environment in .dev/format so every contributor and CI use
+        # the same JuliaFormatter. See ClimaAtmos's config for why resolve/
+        # update run first.
+        entry: julia --startup-file=no --project=.dev/format -e 'using Pkg; try Pkg.resolve(; io = devnull) catch; Pkg.update(; io = devnull) end; Pkg.instantiate(; io = devnull); using JuliaFormatter; format(ARGS)'
+        language: system
+        types_or: [julia]
+        pass_filenames: true
+        require_serial: true
+
+      - id: generated-files
+        name: Generated files are up to date (workspace, CODEOWNERS, triage)
+        entry: bash -c 'julia tools/mono.jl workspace >/dev/null && julia tools/mono.jl codeowners >/dev/null && git diff --exit-code -- Project.toml .github/CODEOWNERS .github/triage.json .github/ISSUE_TEMPLATE'
+        language: system
+        files: ^(packages\.toml|tools/mono\.jl|examples/.*/Project\.toml|experiments/.*/Project\.toml)$
+        pass_filenames: false
