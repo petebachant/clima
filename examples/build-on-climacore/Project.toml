@@ -1,0 +1,10 @@
+[deps]
+ClimaComms = "3a4d1b5c-c61d-41fd-a00a-5873ba7a1b0d"
+ClimaCore = "d414da3d-4745-48bb-8d80-42e94e092884"
+ClimaTimeSteppers = "595c0a79-7f3d-439a-bc5a-b232dc3bde79"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[sources]
+ClimaComms = {path = "../../packages/ClimaComms"}
+ClimaCore = {path = "../../packages/ClimaCore"}
+ClimaTimeSteppers = {path = "../../packages/ClimaTimeSteppers"}
