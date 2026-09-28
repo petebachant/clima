@@ -1,0 +1,54 @@
+name = "ClimaDiagnostics"
+uuid = "1ecacbb8-0713-4841-9a07-eb5aa8a2d53f"
+version = "0.3.11"
+authors = ["CliMA Contributors <clima-software@caltech.edu>"]
+
+[deps]
+Accessors = "7d9f7c33-5ae7-4f3b-8dc6-eff91059b697"
+ClimaComms = "3a4d1b5c-c61d-41fd-a00a-5873ba7a1b0d"
+ClimaCore = "d414da3d-4745-48bb-8d80-42e94e092884"
+ClimaTimeSteppers = "595c0a79-7f3d-439a-bc5a-b232dc3bde79"
+ClimaUtilities = "b3f4f4ca-9299-4f7f-bd9b-81e1242a7513"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
+NVTX = "5da4648a-3479-48b8-97b9-01cb529c0a1f"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+
+[compat]
+Accessors = "0.1.32"
+Aqua = "0.8.14"
+BenchmarkTools = "1"
+ClimaComms = "0.6.2"
+ClimaCore = "0.14.50, 0.15, 0.16, 1"
+ClimaInterpolations = "0.1.1"
+ClimaTimeSteppers = "0.8.11, 0.9, 0.10, 1"
+ClimaUtilities = "0.1.22"
+Dates = "1"
+Documenter = "1"
+ExplicitImports = "1.12"
+JuliaFormatter = "=2.10.1"
+LazyBroadcast = "1"
+NCDatasets = "0.14"
+NVTX = "0.3, 1"
+OrderedCollections = "1.4"
+Profile = "1"
+ProfileCanvas = "0.1.6"
+SafeTestsets = "0.1"
+Test = "1"
+julia = "1.10"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+ClimaInterpolations = "dd0f122e-fa3b-47f3-bcf0-93bbc60d885e"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+ExplicitImports = "7d51a73a-1435-4ff3-83d9-f097790105c7"
+JuliaFormatter = "98e50ef6-434e-11e9-1051-2b60c6c9e899"
+LazyBroadcast = "9dccce8e-a116-406d-9fcc-a88ed4f510c8"
+Profile = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+ProfileCanvas = "efd6af41-a80b-495e-886c-e51b0c7d77a3"
+SafeTestsets = "1bc83da4-3b8d-516f-aca4-4fe02f6d838f"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Aqua", "BenchmarkTools", "ClimaInterpolations", "Documenter", "ExplicitImports", "JuliaFormatter", "LazyBroadcast", "Profile", "ProfileCanvas", "SafeTestsets", "Test"]
