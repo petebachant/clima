@@ -1,0 +1,202 @@
+#=
+Allocation tests: verify that stepping allocations stay within bounds.
+
+These tests catch allocation regressions. Every method should be
+allocation-free: the implicit methods (IMEX ARK/SSPRK, Rosenbrock) use a
+diagonal mock Jacobian with an allocation-free `ldiv!`, and Multirate runs
+its inner integrator with saving disabled so its substeps do not allocate.
+=#
+using ClimaTimeSteppers, LinearAlgebra, Test
+using ClimaComms
+import ClimaTimeSteppers as CTS
+import ClimaTimeSteppers: ODEProblem, ODEFunction, IncrementingODEFunction, SplitODEProblem
+
+@static isdefined(ClimaComms, :device_type) && ClimaComms.@import_required_backends
+const device = ClimaComms.device()
+const ArrayType = ClimaComms.array_type(device)
+
+# ============================================================================ #
+# Test problems parameterized by float type FT
+# ============================================================================ #
+
+# Diagonal stand-in for the implicit Jacobian/`W` operator. `NewtonsMethod`
+# calls `zero(jac_prototype)` to allocate the cache and `ldiv!(Δx, W, f)` for
+# the linear solve; both are allocation-free here, so the implicit step can
+# reach exactly zero allocations (a dense LU prototype would allocate).
+struct MockDiagonalJacobian{A}
+    diag::A
+end
+Base.zero(x::MockDiagonalJacobian) = MockDiagonalJacobian(zero(x.diag))
+LinearAlgebra.ldiv!(x, A::MockDiagonalJacobian, b) = (x .= b ./ A.diag)
+
+function make_split_prob_for_alloc_test(::Type{FT}) where {FT}
+    n = 3
+    ODEProblem(
+        ClimaODEFunction(;
+            T_exp! = (du, u, p, t) -> (du .= FT(0.1) .* u),
+            T_imp! = ODEFunction(
+                (du, u, p, t) -> (du .= FT(-0.5) .* u);
+                jac_prototype = MockDiagonalJacobian(ArrayType(zeros(FT, n))),
+                Wfact = (W, u, p, dtγ, t) -> begin
+                    W.diag .= FT(-0.5) * dtγ .- FT(1)
+                end,
+            ),
+        ),
+        ArrayType(ones(FT, n)),
+        (FT(0), FT(1)),
+        nothing,
+    )
+end
+
+function make_explicit_prob_for_alloc_test(::Type{FT}) where {FT}
+    ODEProblem(
+        ClimaODEFunction(; T_exp! = (du, u, p, t) -> (du .= FT(-0.5) .* u)),
+        ArrayType(FT[1.0, 2.0, 3.0]),
+        (FT(0), FT(1)),
+        nothing,
+    )
+end
+
+function make_lsrk_prob_for_alloc_test(::Type{FT}) where {FT}
+    ODEProblem(
+        IncrementingODEFunction{true}(
+            (du, u, p, t, α = true, β = false) -> (du .= α .* FT(-0.5) .* u .+ β .* du),
+        ),
+        ArrayType(FT[1.0, 2.0, 3.0]),
+        (FT(0), FT(1)),
+        nothing,
+    )
+end
+
+function make_multirate_prob_for_alloc_test()
+    SplitODEProblem(
+        IncrementingODEFunction{true}(
+            (du, u, p, t, α = true, β = false) -> (du .= α .* (-5.0) .* u .+ β .* du),
+        ),
+        IncrementingODEFunction{true}(
+            (du, u, p, t, α = true, β = false) -> (du .= α .* (-0.5) .* u .+ β .* du),
+        ),
+        ArrayType([1.0, 2.0, 3.0]),
+        (0.0, 1.0),
+        nothing,
+    )
+end
+
+"""
+    test_step_allocations(alg, prob, dt)
+
+Warm up with one step, then measure allocations on second step.
+"""
+function test_step_allocations(alg, prob, dt)
+    extra_kwargs = alg isa Multirate ? (; fast_dt = dt / 10) : (;)
+    integrator = CTS.init(
+        deepcopy(prob),
+        alg;
+        dt,
+        save_everystep = false,
+        extra_kwargs...,
+    )
+    # Warmup step
+    CTS.step!(integrator)
+    # Measure allocations on second step
+    allocs = @allocated CTS.step!(integrator)
+    return allocs
+end
+
+@testset "Step allocations" begin
+
+    for FT in (Float64, Float32)
+        ft_name = FT == Float64 ? "" : " (Float32)"
+        dt = FT(0.01)
+
+        @testset "Explicit RK — zero allocations$ft_name" begin
+            prob = make_explicit_prob_for_alloc_test(FT)
+            for name in (SSP22Heuns(), SSP33ShuOsher(), RK4())
+                alg = ExplicitAlgorithm(name)
+                allocs = test_step_allocations(alg, prob, dt)
+                @test allocs == 0
+            end
+        end
+
+        @testset "LSRK — zero allocations$ft_name" begin
+            prob = make_lsrk_prob_for_alloc_test(FT)
+            for alg in
+                (LSRKEulerMethod(), LSRK54CarpenterKennedy(), LSRK144NiegemannDiehlBusch())
+                allocs = test_step_allocations(alg, prob, dt)
+                @test allocs == 0
+            end
+        end
+
+        @testset "IMEX ARK — zero allocations$ft_name" begin
+            prob = make_split_prob_for_alloc_test(FT)
+            imex_algs = if FT == Float64
+                (ARS111(), ARS232(), ARS343(), ARK437L2SA1(), ARK548L2SA2())
+            else
+                (ARS111(), ARS232())
+            end
+            for name in imex_algs
+                alg = CTS.IMEXAlgorithm(name, NewtonsMethod(; max_iters = 2))
+                allocs = test_step_allocations(alg, prob, dt)
+                @test allocs == 0
+            end
+        end
+
+        if FT == Float64
+            @testset "IMEX SSPRK — zero allocations" begin
+                prob = make_split_prob_for_alloc_test(FT)
+                for name in (SSP222(), SSP333())
+                    alg = CTS.IMEXAlgorithm(name, NewtonsMethod(; max_iters = 2))
+                    allocs = test_step_allocations(alg, prob, dt)
+                    @test allocs == 0
+                end
+            end
+
+            @testset "Rosenbrock — zero allocations" begin
+                prob = make_split_prob_for_alloc_test(FT)
+                alg = CTS.RosenbrockAlgorithm(ClimaTimeSteppers.tableau(SSPKnoth()))
+                allocs = test_step_allocations(alg, prob, dt)
+                @test allocs == 0
+            end
+
+            @testset "Multirate — zero allocations" begin
+                prob = make_multirate_prob_for_alloc_test()
+                for slow_alg in (LSRK54CarpenterKennedy(), MIS3C(), WSRK2())
+                    alg = Multirate(LSRK54CarpenterKennedy(), slow_alg)
+                    allocs = test_step_allocations(alg, prob, 0.1)
+                    @test allocs == 0
+                end
+            end
+        end
+    end
+
+    @testset "Device (GPU) allocations CPU overhead" begin
+        # Ensures that using device arrays (e.g. CuArray) does not introduce CPU
+        # scalar indexing allocations. Measures CPU allocations only.
+        prob_explicit = ODEProblem(
+            ClimaODEFunction(; T_exp! = (du, u, p, t) -> (du .= -0.5 .* u)),
+            ArrayType([1.0, 2.0, 3.0]),
+            (0.0, 1.0),
+            nothing,
+        )
+        for name in (SSP22Heuns(), RK4())
+            alg = ExplicitAlgorithm(name)
+            allocs = test_step_allocations(alg, prob_explicit, 0.01)
+            # 0 allocations is ideal, but we allow up to 100 bytes for small device array wrappers if necessary
+            @test allocs < 100
+        end
+
+        prob_lsrk = ODEProblem(
+            IncrementingODEFunction{true}(
+                (du, u, p, t, α = true, β = false) ->
+                    (du .= α .* (-0.5) .* u .+ β .* du),
+            ),
+            ArrayType([1.0, 2.0, 3.0]),
+            (0.0, 1.0),
+            nothing,
+        )
+        for alg in (LSRKEulerMethod(), LSRK54CarpenterKennedy())
+            allocs = test_step_allocations(alg, prob_lsrk, 0.01)
+            @test allocs < 100
+        end
+    end
+end

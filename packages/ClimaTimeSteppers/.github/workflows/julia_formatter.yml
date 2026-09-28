@@ -1,0 +1,16 @@
+name: JuliaFormatter
+
+on:
+  push:
+    tags: '*'
+  pull_request:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: julia-actions/julia-format@v4
+        with:
+          version: '2'
+          suggestion-label: 'format-suggest'
