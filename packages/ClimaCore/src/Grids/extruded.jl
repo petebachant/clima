@@ -1,0 +1,210 @@
+#####
+##### Hybrid grid
+#####
+
+abstract type HypsographyAdaption end
+
+"""
+    Flat()
+
+No surface hypsography.
+"""
+struct Flat <: HypsographyAdaption end
+
+abstract type AbstractExtrudedFiniteDifferenceGrid <: AbstractGrid end
+
+"""
+    ExtrudedFiniteDifferenceGrid(
+        horizontal_grid::AbstractSpectralElementGrid,
+        vertical_grid::FiniteDifferenceGrid,
+        hypsography::HypsographyAdaption = Flat();
+        deep = false,
+    )
+
+Construct an `ExtrudedFiniteDifferenceGrid` from the horizontal and vertical grids.
+
+If the horizontal grid has a `Geometry.SphericalGlobalGeometry`, the extruded grid
+uses `Geometry.DeepSphericalGlobalGeometry` when `deep = true` and
+`Geometry.ShallowSphericalGlobalGeometry` otherwise.
+"""
+mutable struct ExtrudedFiniteDifferenceGrid{
+    H <: AbstractGrid,
+    V <: FiniteDifferenceGrid,
+    A <: HypsographyAdaption,
+    GG <: Geometry.AbstractGlobalGeometry,
+    CLG,
+    FLG,
+} <: AbstractExtrudedFiniteDifferenceGrid
+    horizontal_grid::H
+    vertical_grid::V
+    hypsography::A
+    global_geometry::GG
+    center_local_geometry::CLG
+    face_local_geometry::FLG
+end
+
+Adapt.@adapt_structure ExtrudedFiniteDifferenceGrid
+
+local_geometry_type(
+    ::Type{ExtrudedFiniteDifferenceGrid{H, V, A, GG, CLG, FLG}},
+) where {H, V, A, GG, CLG, FLG} = eltype(CLG) # calls eltype from DataLayouts
+
+function ExtrudedFiniteDifferenceGrid(
+    horizontal_grid::AbstractSpectralElementGrid,
+    vertical_grid::FiniteDifferenceGrid,
+    hypsography::HypsographyAdaption = Flat();
+    deep = false,
+)
+    if horizontal_grid.global_geometry isa Geometry.SphericalGlobalGeometry
+        radius = horizontal_grid.global_geometry.radius
+        if deep
+            global_geometry = Geometry.DeepSphericalGlobalGeometry(radius)
+        else
+            global_geometry = Geometry.ShallowSphericalGlobalGeometry(radius)
+        end
+    else
+        global_geometry = horizontal_grid.global_geometry
+    end
+    ExtrudedFiniteDifferenceGrid(
+        horizontal_grid,
+        vertical_grid,
+        hypsography,
+        global_geometry,
+    )
+end
+
+# memoized constructor
+function ExtrudedFiniteDifferenceGrid(
+    horizontal_grid::AbstractSpectralElementGrid,
+    vertical_grid::FiniteDifferenceGrid,
+    hypsography::HypsographyAdaption,
+    global_geometry::Geometry.AbstractGlobalGeometry,
+)
+    get!(
+        Cache.OBJECT_CACHE,
+        (
+            ExtrudedFiniteDifferenceGrid,
+            horizontal_grid,
+            vertical_grid,
+            hypsography,
+            global_geometry,
+        ),
+    ) do
+        _ExtrudedFiniteDifferenceGrid(
+            horizontal_grid,
+            vertical_grid,
+            hypsography,
+            global_geometry,
+        )
+    end
+end
+
+# Non-memoized constructor. Extend this method for other hypsography types; callers go
+# through the memoized constructor above.
+function _ExtrudedFiniteDifferenceGrid(
+    horizontal_grid::AbstractSpectralElementGrid,
+    vertical_grid::FiniteDifferenceGrid,
+    hypsography::Flat,
+    global_geometry::Geometry.AbstractGlobalGeometry,
+)
+    center_local_geometry =
+        Geometry.product_geometry.(
+            horizontal_grid.local_geometry,
+            vertical_grid.center_local_geometry,
+            Ref(global_geometry),
+        )
+    face_local_geometry =
+        Geometry.product_geometry.(
+            horizontal_grid.local_geometry,
+            vertical_grid.face_local_geometry,
+            Ref(global_geometry),
+        )
+
+    return ExtrudedFiniteDifferenceGrid(
+        horizontal_grid,
+        vertical_grid,
+        hypsography,
+        global_geometry,
+        center_local_geometry,
+        face_local_geometry,
+    )
+end
+
+topology(grid::ExtrudedFiniteDifferenceGrid) = topology(grid.horizontal_grid)
+
+discretization(grid::ExtrudedFiniteDifferenceGrid) =
+    discretization(grid.horizontal_grid)
+
+ClimaComms.context(grid::ExtrudedFiniteDifferenceGrid) =
+    ClimaComms.context(grid.horizontal_grid)
+ClimaComms.device(grid::ExtrudedFiniteDifferenceGrid) =
+    ClimaComms.device(grid.horizontal_grid)
+
+vertical_topology(grid::ExtrudedFiniteDifferenceGrid) =
+    topology(grid.vertical_grid)
+
+# Since ∂z/∂ξ₃ and r are continuous across element boundaries, we can reuse
+# the horizontal weights instead of calling compute_dss_weights on the
+# extruded local geometry. If we ever need to use extruded weights, this method
+# will need to distinguish between weights on centers and weights on faces.
+dss_weights(grid::AbstractExtrudedFiniteDifferenceGrid, _) =
+    dss_weights(grid.horizontal_grid, nothing)
+
+local_geometry_data(grid::AbstractExtrudedFiniteDifferenceGrid, ::CellCenter) =
+    grid.center_local_geometry
+local_geometry_data(grid::AbstractExtrudedFiniteDifferenceGrid, ::CellFace) =
+    grid.face_local_geometry
+global_geometry(grid::AbstractExtrudedFiniteDifferenceGrid) =
+    grid.global_geometry
+
+hypsography(grid::ExtrudedFiniteDifferenceGrid) = grid.hypsography
+
+quadrature_style(grid::ExtrudedFiniteDifferenceGrid) =
+    quadrature_style(grid.horizontal_grid)
+
+
+## GPU compatibility
+struct DeviceExtrudedFiniteDifferenceGrid{VT, Q, GG, CLG, FLG} <:
+       AbstractExtrudedFiniteDifferenceGrid
+    vertical_topology::VT
+    quadrature_style::Q
+    global_geometry::GG
+    center_local_geometry::CLG
+    face_local_geometry::FLG
+end
+
+ClimaComms.device(::DeviceExtrudedFiniteDifferenceGrid) = DeviceSideDevice()
+ClimaComms.context(::DeviceExtrudedFiniteDifferenceGrid) = DeviceSideContext()
+
+local_geometry_type(
+    ::Type{DeviceExtrudedFiniteDifferenceGrid{VT, Q, GG, CLG, FLG}},
+) where {VT, Q, GG, CLG, FLG} = eltype(CLG) # calls eltype from DataLayouts
+
+quadrature_style(grid::DeviceExtrudedFiniteDifferenceGrid) =
+    grid.quadrature_style
+vertical_topology(grid::DeviceExtrudedFiniteDifferenceGrid) =
+    grid.vertical_topology
+
+## aliases
+
+const ExtrudedSpectralElementGrid2D =
+    ExtrudedFiniteDifferenceGrid{<:SpectralElementGrid1D}
+const ExtrudedSpectralElementGrid3D =
+    ExtrudedFiniteDifferenceGrid{<:SpectralElementGrid2D}
+const ExtrudedRectilinearSpectralElementGrid3D =
+    ExtrudedFiniteDifferenceGrid{<:RectilinearSpectralElementGrid2D}
+const ExtrudedCubedSphereSpectralElementGrid3D =
+    ExtrudedFiniteDifferenceGrid{<:CubedSphereSpectralElementGrid2D}
+const ExtrudedMultiPointGrid = ExtrudedFiniteDifferenceGrid{<:MultiPointGrid}
+
+# The show method for `AbstractGrid` calls `topology(grid)`, which errors for
+# a multi-point horizontal grid, so print the multi-point fields directly
+function Base.show(io::IO, grid::ExtrudedMultiPointGrid)
+    indent = get(io, :indent, 0)
+    iio = IOContext(io, :indent => indent + 2)
+    println(io, nameof(typeof(grid)), ":")
+    print_multipoint_horizontal(iio, grid.horizontal_grid, indent)
+    println(iio)
+    println(iio, " "^(indent + 2), "vertical:")
+    print(iio, " "^(indent + 4), "mesh: ", vertical_topology(grid).mesh)
+end

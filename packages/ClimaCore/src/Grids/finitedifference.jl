@@ -1,0 +1,196 @@
+
+abstract type Staggering end
+
+"""
+    CellCenter()
+
+Cell-center staggering location.
+"""
+struct CellCenter <: Staggering end
+
+"""
+    CellFace()
+
+Cell-face staggering location.
+"""
+struct CellFace <: Staggering end
+
+
+abstract type AbstractFiniteDifferenceGrid <: AbstractGrid end
+
+"""
+    FiniteDifferenceGrid(topology::Topologies.IntervalTopology)
+    FiniteDifferenceGrid(device::ClimaComms.AbstractDevice, mesh::Meshes.IntervalMesh)
+
+Construct a `FiniteDifferenceGrid` from an `IntervalTopology`, or from an
+`IntervalMesh` and a `device`.
+
+The grid stores the topology, the global geometry, and the local geometry at cell
+centers and cell faces.
+"""
+mutable struct FiniteDifferenceGrid{
+    T <: Topologies.AbstractIntervalTopology,
+    GG,
+    CLG,
+    FLG,
+} <: AbstractFiniteDifferenceGrid
+    topology::T
+    global_geometry::GG
+    center_local_geometry::CLG
+    face_local_geometry::FLG
+end
+Adapt.@adapt_structure FiniteDifferenceGrid
+
+function FiniteDifferenceGrid(topology::Topologies.IntervalTopology)
+    get!(Cache.OBJECT_CACHE, (FiniteDifferenceGrid, topology)) do
+        _FiniteDifferenceGrid(topology)
+    end
+end
+
+function _FiniteDifferenceGrid(topology::Topologies.IntervalTopology)
+    global_geometry = Geometry.CartesianGlobalGeometry()
+    ArrayType = ClimaComms.array_type(topology)
+
+    mesh = Topologies.mesh(topology)
+    CT = Topologies.coordinate_type(mesh)
+    FT = Geometry.float_type(CT)
+    Nv_face = length(mesh.faces)
+    Nv_cent = Nv_face - 1
+    # construct on CPU, adapt to GPU
+    center_coordinates = DataLayouts.VIJFH{CT, Nv_cent, 1, 1, 1}(Array{FT})
+    face_coordinates = DataLayouts.VIJFH{CT, Nv_face, 1, 1, 1}(Array{FT})
+    for v in 1:Nv_cent
+        center_coordinates[v] = (mesh.faces[v] + mesh.faces[v + 1]) / 2
+    end
+    for v in 1:Nv_face
+        face_coordinates[v] = mesh.faces[v]
+    end
+    center_local_geometry, face_local_geometry = fd_geometry_data(
+        center_coordinates,
+        face_coordinates,
+        Val(Topologies.isperiodic(topology)),
+    )
+
+    return FiniteDifferenceGrid(
+        topology,
+        global_geometry,
+        Adapt.adapt(ArrayType, center_local_geometry),
+        Adapt.adapt(ArrayType, face_local_geometry),
+    )
+end
+
+# Called by the FiniteDifferenceGrid constructor and by the ExtrudedFiniteDifferenceGrid
+# constructor with hypsography.
+function fd_geometry_data(
+    center_coordinates::DataLayouts.VIJHWithF{Geometry.ZPoint{FT}},
+    face_coordinates::DataLayouts.VIJHWithF{Geometry.ZPoint{FT}},
+    ::Val{periodic},
+) where {FT, periodic}
+    CT = Geometry.ZPoint{FT}
+    AIdx = (3,)
+    ∂x∂ξ_bases = (
+        Geometry.Components{Geometry.Orthonormal, AIdx}(),
+        Geometry.Components{Geometry.Covariant, AIdx}(),
+    )
+    LG = Geometry.LocalGeometryType(CT, FT, AIdx)
+    (Nv, Ni, Nj, Nh) = size(face_coordinates)
+    Nv_face = Nv - periodic
+    Nv_cent = Nv - 1
+    center_local_geometry = similar(center_coordinates, LG)
+    # On periodic grids, the face at the top of the domain coincides with the
+    # face at the bottom, so there is one fewer face than face coordinates.
+    face_local_geometry = DataLayouts.layout_constructor(
+        face_coordinates,
+        LG;
+        Nv = Nv_face,
+    )(
+        typeof(parent(face_coordinates)),
+        Nh,
+    )
+    cent_coord(args...) = Geometry.component(center_coordinates[args...], 1)
+    face_coord(args...) = Geometry.component(face_coordinates[args...], 1)
+    for h in 1:Nh, j in 1:Nj, i in 1:Ni
+        for v in 1:Nv_cent
+            J = face_coord(v + 1, i, j, h) - face_coord(v, i, j, h)
+            WJ = J
+            x = CT(cent_coord(v, i, j, h))
+            ∂x∂ξ = Geometry.Tensor(SMatrix{1, 1}(J), ∂x∂ξ_bases)
+            center_local_geometry[v, i, j, h] = Geometry.LocalGeometry(x, J, WJ, ∂x∂ξ)
+        end
+        for v in 1:Nv_face
+            if periodic && v == 1
+                # periodic boundary face
+                J⁺ = face_coord(2, i, j, h) - face_coord(1, i, j, h)
+                J⁻ = face_coord(Nv, i, j, h) - face_coord(Nv - 1, i, j, h)
+                J = (J⁺ + J⁻) / 2
+                WJ = J
+            elseif !periodic && v == 1
+                # bottom face
+                J = face_coord(2, i, j, h) - face_coord(1, i, j, h)
+                WJ = J / 2
+            elseif v == Nv
+                # top face
+                @assert !periodic
+                J = face_coord(Nv, i, j, h) - face_coord(Nv - 1, i, j, h)
+                WJ = J / 2
+            else
+                J = cent_coord(v, i, j, h) - cent_coord(v - 1, i, j, h)
+                WJ = J
+            end
+            x = CT(face_coord(v, i, j, h))
+            ∂x∂ξ = Geometry.Tensor(SMatrix{1, 1}(J), ∂x∂ξ_bases)
+            face_local_geometry[v, i, j, h] = Geometry.LocalGeometry(x, J, WJ, ∂x∂ξ)
+        end
+    end
+    return (center_local_geometry, face_local_geometry)
+end
+
+fd_geometry_data(
+    center_coordinates::DataLayouts.VIJHWithF{<:Geometry.PPoint},
+    face_coordinates::DataLayouts.VIJHWithF{<:Geometry.PPoint},
+    _,
+) = (
+    map(Geometry.CoordinateOnlyGeometry, center_coordinates),
+    map(Geometry.CoordinateOnlyGeometry, face_coordinates),
+)
+
+FiniteDifferenceGrid(
+    device::ClimaComms.AbstractDevice,
+    mesh::Meshes.IntervalMesh,
+) = FiniteDifferenceGrid(Topologies.IntervalTopology(device, mesh))
+
+# accessors
+topology(grid::FiniteDifferenceGrid) = grid.topology
+vertical_topology(grid::FiniteDifferenceGrid) = grid.topology
+
+local_geometry_type(
+    ::Type{FiniteDifferenceGrid{T, GG, CLG, FLG}},
+) where {T, GG, CLG, FLG} = eltype(CLG) # calls eltype from DataLayouts
+
+local_geometry_data(grid::FiniteDifferenceGrid, ::CellCenter) =
+    grid.center_local_geometry
+local_geometry_data(grid::FiniteDifferenceGrid, ::CellFace) =
+    grid.face_local_geometry
+global_geometry(grid::FiniteDifferenceGrid) = grid.global_geometry
+
+## GPU compatibility
+struct DeviceFiniteDifferenceGrid{T, GG, CLG, FLG} <:
+       AbstractFiniteDifferenceGrid
+    topology::T
+    global_geometry::GG
+    center_local_geometry::CLG
+    face_local_geometry::FLG
+end
+
+local_geometry_type(
+    ::Type{DeviceFiniteDifferenceGrid{T, GG, CLG, FLG}},
+) where {T, GG, CLG, FLG} = eltype(CLG) # calls eltype from DataLayouts
+
+topology(grid::DeviceFiniteDifferenceGrid) = grid.topology
+vertical_topology(grid::DeviceFiniteDifferenceGrid) = grid.topology
+
+local_geometry_data(grid::DeviceFiniteDifferenceGrid, ::CellCenter) =
+    grid.center_local_geometry
+local_geometry_data(grid::DeviceFiniteDifferenceGrid, ::CellFace) =
+    grid.face_local_geometry
+global_geometry(grid::DeviceFiniteDifferenceGrid) = grid.global_geometry

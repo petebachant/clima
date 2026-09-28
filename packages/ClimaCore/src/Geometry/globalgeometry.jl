@@ -1,0 +1,402 @@
+
+"""
+    AbstractGlobalGeometry
+
+Supertype for global geometries, which determine the conversion from local coordinates
+and vector bases to a Cartesian basis.
+
+Subtypes:
+
+  - [`CartesianGlobalGeometry`](@ref): local coordinates align with Cartesian coordinates.
+  - [`SphericalGlobalGeometry`](@ref): local coordinates refer to a sphere of given radius.
+  - `ShallowSphericalGlobalGeometry`, `DeepSphericalGlobalGeometry`: spherical geometries
+    for extruded spheres with the shallow- and deep-atmosphere assumptions.
+"""
+abstract type AbstractGlobalGeometry end
+
+"""
+    CartesianPoint(pt::AbstractPoint, global_geometry::AbstractGlobalGeometry)
+
+Convert the point `pt` from the coordinates of the domain to the single global Cartesian
+frame, returning a `Cartesian*Point`.
+
+With a [`Geometry.CartesianGlobalGeometry`](@ref), `XPoint`, `ZPoint`, `XYPoint`,
+`XZPoint`, and `XYZPoint` map to `Cartesian1Point`, `Cartesian3Point`, `Cartesian12Point`,
+`Cartesian13Point`, and `Cartesian123Point` with the same coordinate values. With an
+`AbstractSphericalGlobalGeometry` of radius `r`, `LatLongPoint` and `LatLongZPoint` map to
+a `Cartesian123Point` at distance `r` (respectively `r + z`) from the centre of the
+sphere, with the `x1` axis through zero latitude and longitude and the `x3` axis through
+the north pole. The inverses on the sphere are
+`LatLongPoint(pt::Cartesian123Point, global_geometry)` and
+`LatLongZPoint(pt::Cartesian123Point, global_geometry)`. Use
+`Cartesian123Point(pt, global_geometry)` to always obtain a 3D point.
+"""
+function CartesianPoint end
+
+Cartesian123Point(pt::AbstractPoint, global_geometry::AbstractGlobalGeometry) =
+    Cartesian123Point(CartesianPoint(pt, global_geometry))
+
+"""
+    CartesianGlobalGeometry()
+
+Global geometry in which the local coordinates align with the Cartesian coordinates, e.g.
+`XYZPoint` aligns with `Cartesian123Point`, and `UVWVector` aligns with the Cartesian
+vector basis.
+"""
+struct CartesianGlobalGeometry <: AbstractGlobalGeometry end
+Base.broadcastable(x::CartesianGlobalGeometry) = tuple(x)
+
+# coordinates
+CartesianPoint(pt::XPoint{FT}, ::CartesianGlobalGeometry) where {FT} =
+    Cartesian1Point{FT}(pt.x)
+CartesianPoint(pt::ZPoint{FT}, ::CartesianGlobalGeometry) where {FT} =
+    Cartesian3Point{FT}(pt.z)
+CartesianPoint(pt::XYPoint{FT}, ::CartesianGlobalGeometry) where {FT} =
+    Cartesian12Point{FT}(pt.x, pt.y)
+CartesianPoint(pt::XZPoint{FT}, ::CartesianGlobalGeometry) where {FT} =
+    Cartesian13Point{FT}(pt.x, pt.z)
+CartesianPoint(pt::XYZPoint{FT}, ::CartesianGlobalGeometry) where {FT} =
+    Cartesian123Point{FT}(pt.x, pt.y, pt.z)
+
+"""
+    AbstractSphericalGlobalGeometry
+
+Supertype for global geometries in which the local coordinates refer to a sphere:
+[`Geometry.SphericalGlobalGeometry`](@ref), `ShallowSphericalGlobalGeometry`, and
+`DeepSphericalGlobalGeometry`. Every subtype stores the radius of the sphere [m], returned
+by `radius`. Positions are `LatLongPoint`s or `LatLongZPoint`s, and `CartesianPoint`,
+`CartesianVector`, and `great_circle_distance` convert to the global Cartesian frame and
+measure distances on the sphere.
+"""
+abstract type AbstractSphericalGlobalGeometry <: AbstractGlobalGeometry end
+Base.broadcastable(x::AbstractSphericalGlobalGeometry) = tuple(x)
+
+"""
+    radius(global_geometry::AbstractSphericalGlobalGeometry)
+
+Return the radius [m] of the sphere that `global_geometry` refers to.
+"""
+radius(global_geometry::AbstractSphericalGlobalGeometry) = global_geometry.radius
+
+"""
+    SphericalGlobalGeometry(radius)
+
+Global geometry in which the local coordinates refer to a sphere of radius `radius` [m].
+The `x1` axis is aligned with the zero longitude line.
+
+The local vector basis has `u` in the zonal direction (east positive), `v` in the
+meridional direction (north positive), and `w` in the radial direction (outward
+positive). At a pole, the basis is the limit along the zero longitude line:
+
+  - at the north pole, this corresponds to `u` being aligned with the `x2`
+    direction, `v` being aligned with the negative `x1` direction, and `w` being
+    aligned with the `x3` direction.
+  - at the south pole, this corresponds to `u` being aligned with the `x2`
+    direction, `v` being aligned with the `x1` direction, and `w` being aligned
+    with the negative `x3` direction.
+"""
+struct SphericalGlobalGeometry{FT} <: AbstractSphericalGlobalGeometry
+    radius::FT
+end
+
+
+"""
+    ShallowSphericalGlobalGeometry(radius)
+
+Like [`SphericalGlobalGeometry`](@ref), but for extruded spheres, with the
+shallow-atmosphere assumption that the circumference is the same at all `z`.
+"""
+struct ShallowSphericalGlobalGeometry{FT} <: AbstractSphericalGlobalGeometry
+    radius::FT
+end
+
+"""
+    DeepSphericalGlobalGeometry(radius)
+
+Like [`SphericalGlobalGeometry`](@ref), but for extruded spheres, with the
+deep-atmosphere assumption that the circumference increases with `z`.
+"""
+struct DeepSphericalGlobalGeometry{FT} <: AbstractSphericalGlobalGeometry
+    radius::FT
+end
+
+# coordinates
+function CartesianPoint(
+    pt::LatLongPoint,
+    global_geom::AbstractSphericalGlobalGeometry,
+)
+    r = global_geom.radius
+    x1 = r * cosd(pt.long) * cosd(pt.lat)
+    x2 = r * sind(pt.long) * cosd(pt.lat)
+    x3 = r * sind(pt.lat)
+    Cartesian123Point(x1, x2, x3)
+end
+function LatLongPoint(pt::Cartesian123Point, ::AbstractSphericalGlobalGeometry)
+    ϕ = atand(pt.x3, hypot(pt.x2, pt.x1))
+    # IEEE754 spec states that atand(±0.0, −0.0) == ±180, however to make the UV
+    # orientation consistent, we define the longitude to be zero at the poles
+    if abs(ϕ) == 90
+        λ = zero(ϕ)
+    else
+        λ = atand(pt.x2, pt.x1)
+    end
+    LatLongPoint(ϕ, λ)
+end
+
+
+function CartesianPoint(
+    pt::LatLongZPoint,
+    global_geom::AbstractSphericalGlobalGeometry,
+)
+    r = global_geom.radius
+    z = pt.z
+    x1 = (r + z) * cosd(pt.long) * cosd(pt.lat)
+    x2 = (r + z) * sind(pt.long) * cosd(pt.lat)
+    x3 = (r + z) * sind(pt.lat)
+    Cartesian123Point(x1, x2, x3)
+end
+function LatLongZPoint(
+    pt::Cartesian123Point,
+    global_geom::AbstractSphericalGlobalGeometry,
+)
+    llpt = LatLongPoint(pt, global_geom)
+    z = hypot(pt.x1, pt.x2, pt.x3) - global_geom.radius
+    LatLongZPoint(llpt.lat, llpt.long, z)
+end
+
+
+function unit_great_circle_distance(pt1::LatLongPoint, pt2::LatLongPoint)
+    ϕ1 = pt1.lat
+    λ1 = pt1.long
+    ϕ2 = pt2.lat
+    λ2 = pt2.long
+    Δλ = λ1 - λ2
+    return atan(
+        hypot(
+            cosd(ϕ2) * sind(Δλ),
+            cosd(ϕ1) * sind(ϕ2) - sind(ϕ1) * cosd(ϕ2) * cosd(Δλ),
+        ),
+        cosd(ϕ1) * cosd(ϕ2) * cosd(Δλ) + sind(ϕ1) * sind(ϕ2),
+    )
+end
+
+
+"""
+    great_circle_distance(pt1::LatLongPoint, pt2::LatLongPoint, global_geom::AbstractSphericalGlobalGeometry)
+
+Compute the great-circle (spherical geodesic) distance between `pt1` and `pt2` on the
+sphere of radius `global_geom.radius` [m].
+"""
+function great_circle_distance(
+    pt1::LatLongPoint, pt2::LatLongPoint, global_geom::AbstractSphericalGlobalGeometry,
+)
+    r = global_geom.radius
+    return r * unit_great_circle_distance(pt1, pt2)
+end
+
+"""
+    great_circle_distance(pt1::LatLongZPoint, pt2::LatLongZPoint, global_geom::ShallowSphericalGlobalGeometry)
+    great_circle_distance(pt1::LatLongZPoint, pt2::LatLongZPoint, global_geom::DeepSphericalGlobalGeometry)
+
+Compute the great-circle (spherical geodesic) distance between `pt1` and `pt2` [m],
+ignoring the difference in `z`. The shallow geometry measures the distance on the sphere
+of radius `global_geom.radius`; the deep geometry on the sphere of radius
+`global_geom.radius + (pt1.z + pt2.z) / 2`.
+"""
+function great_circle_distance(
+    pt1::LatLongZPoint, pt2::LatLongZPoint, global_geom::ShallowSphericalGlobalGeometry,
+)
+    r = global_geom.radius
+    return r * unit_great_circle_distance(
+        LatLongPoint(pt1.lat, pt1.long), LatLongPoint(pt2.lat, pt2.long),
+    )
+end
+
+function great_circle_distance(
+    pt1::LatLongZPoint, pt2::LatLongZPoint, global_geom::DeepSphericalGlobalGeometry,
+)
+    r = global_geom.radius
+    R = r + (pt1.z + pt2.z) / 2
+    return R * unit_great_circle_distance(
+        LatLongPoint(pt1.lat, pt1.long), LatLongPoint(pt2.lat, pt2.long),
+    )
+end
+
+
+"""
+    euclidean_distance(pt1::T, pt2::T)
+
+Compute the Euclidean distance between two points of the same Cartesian type `T`, one of
+`XPoint`, `YPoint`, `ZPoint`, `XYPoint`, `XZPoint`, or `XYZPoint`.
+"""
+function euclidean_distance(
+    pt1::T,
+    pt2::T,
+) where {T <: Union{XPoint, YPoint, ZPoint, XYPoint, XZPoint, XYZPoint}}
+    return hypot((components(pt1) .- components(pt2))...)
+end
+
+function local_to_cartesian(
+    ::AbstractSphericalGlobalGeometry, coord::Union{LatLongPoint, LatLongZPoint},
+)
+    ϕ = coord.lat
+    λ = coord.long
+    sinλ = sind(λ)
+    cosλ = cosd(λ)
+    sinϕ = sind(ϕ)
+    cosϕ = cosd(ϕ)
+    G = @SMatrix [
+        -sinλ -cosλ*sinϕ cosλ*cosϕ
+        cosλ -sinλ*sinϕ sinλ*cosϕ
+        0 cosϕ sinϕ
+    ]
+    Tensor(G, (UVWAxis(), UVWAxis()))
+end
+
+function LocalVector(
+    u::Cartesian123Vector,
+    geom::AbstractSphericalGlobalGeometry,
+    coord::Union{LatLongPoint, LatLongZPoint},
+)
+    G = local_to_cartesian(geom, coord)
+    G' * u
+end
+
+"""
+    CartesianVector(u::UVWVector, global_geometry::AbstractGlobalGeometry, coord::AbstractPoint)
+
+Rotate the vector `u`, given by its components `u` (east), `v` (north), `w` (up) in the
+local orthonormal frame at the position `coord`, into the single global Cartesian frame,
+returning a `Cartesian123Vector`. For an `AbstractSphericalGlobalGeometry`, `coord` is the
+`LatLongPoint` or `LatLongZPoint` at which `u` is defined. For a
+[`Geometry.CartesianGlobalGeometry`](@ref) the local and global frames coincide, so `u` is
+returned unchanged and `coord` is ignored. The inverse is
+`LocalVector(u::Cartesian123Vector, global_geometry, coord)`.
+"""
+function CartesianVector(
+    u::UVWVector,
+    geom::AbstractSphericalGlobalGeometry,
+    coord::Union{LatLongPoint, LatLongZPoint},
+)
+    G = local_to_cartesian(geom, coord)
+    G * u
+end
+
+"""
+    CartesianTensor(T::AbstractTensor{2}, global_geometry::AbstractGlobalGeometry, coord::AbstractPoint)
+
+Similar to `CartesianVector`, but for rank-2 tensors whose second axis uses the local
+orthonormal basis, given by the components `u` (east), `v` (north), and `w` (up). The
+inverse is `LocalTensor(T, global_geometry, coord)`.
+
+Before supplying a tensor to this function, promote its second axis to the full `UVWAxis`.
+For example, when working on a 2D horizontal plane, express the flux `ρu ⊗ u` as
+`ρu ⊗ Geometry.project(UVWAxis(), u)`.
+"""
+function CartesianTensor(
+    T::AbstractTensor{2},
+    geom::AbstractSphericalGlobalGeometry,
+    coord::Union{LatLongPoint, LatLongZPoint},
+)
+    G = local_to_cartesian(geom, coord)
+    T * G'
+end
+
+"""
+    LocalTensor(T::AbstractTensor{2}, global_geometry::AbstractGlobalGeometry, coord::AbstractPoint)
+
+Similar to `LocalVector`, but for rank-2 tensors. Rotates a tensor from the global Cartesian
+frame into the local frame at the position `coord`. This is the inverse of `CartesianTensor`.
+"""
+function LocalTensor(
+    T::AbstractTensor{2},
+    geom::AbstractSphericalGlobalGeometry,
+    coord::Union{LatLongPoint, LatLongZPoint},
+)
+    G = local_to_cartesian(geom, coord)
+    T * G
+end
+
+# Planar identity methods: on a `CartesianGlobalGeometry` the local orthonormal
+# frame *is* the global Cartesian frame, so all four rotations are the
+# identity. Providing them lets the same tensor-divergence code path run
+# unchanged on planes (where the rotation is a no-op) and on the sphere.
+CartesianVector(u::UVWVector, ::CartesianGlobalGeometry, _) = u
+LocalVector(u::UVWVector, ::CartesianGlobalGeometry, _) = u
+CartesianTensor(T::AbstractTensor{2}, ::CartesianGlobalGeometry, _) = T
+LocalTensor(T::AbstractTensor{2}, ::CartesianGlobalGeometry, _) = T
+
+function product_geometry(
+    horizontal_local_geometry::LocalGeometry,
+    vertical_local_geometry::LocalGeometry,
+    global_geometry::AbstractGlobalGeometry,
+    ∇z = nothing,
+)
+    coordinates = product_coordinates(
+        horizontal_local_geometry.coordinates,
+        vertical_local_geometry.coordinates,
+    )
+    J = horizontal_local_geometry.J * vertical_local_geometry.J
+    WJ = horizontal_local_geometry.WJ * vertical_local_geometry.WJ
+    # Reshape h and v ∂x∂ξ back to their native unpadded `I` axes before
+    # combining, so the resulting LG records the correct `I = I_h ∪ I_v`
+    # (rather than `(1,2,3)` inherited from the padded form). The LG
+    # constructor re-pads to the canonical 3×3 storage.
+    ∂x∂ξ_h = _unpadded_metric_tensor(
+        horizontal_local_geometry, horizontal_local_geometry.∂x∂ξ,
+    )
+    ∂x∂ξ_v = _unpadded_metric_tensor(
+        vertical_local_geometry, vertical_local_geometry.∂x∂ξ,
+    )
+    ∂x∂ξ = isnothing(∇z) ? ∂x∂ξ_h + ∂x∂ξ_v : ∂x∂ξ_h + ∂x∂ξ_v + ∇z
+    return LocalGeometry(coordinates, J, WJ, ∂x∂ξ)
+end
+
+# Reshape an identity-padded 3×3 metric tensor back to its native I-sized
+# form (axes `(Orth(I), Cov(I))`), recovering the geometric block from the
+# padded storage so combinations preserve `I`.
+@inline _unpadded_metric_tensor(::LocalGeometry{I}, ∂x∂ξ) where {I} =
+    reshape(∂x∂ξ, (Components{Orthonormal, I}(), Components{Covariant, I}()))
+
+function product_geometry(
+    horizontal_local_geometry::LocalGeometry,
+    vertical_local_geometry::LocalGeometry,
+    global_geometry::DeepSphericalGlobalGeometry,
+    ∇z = nothing,
+)
+    r = global_geometry.radius
+    z = vertical_local_geometry.coordinates.z
+    scale = ((r + z) / r)
+
+    coordinates = product_coordinates(
+        horizontal_local_geometry.coordinates,
+        vertical_local_geometry.coordinates,
+    )
+    J = scale^2 * horizontal_local_geometry.J * vertical_local_geometry.J
+    WJ = scale^2 * horizontal_local_geometry.WJ * vertical_local_geometry.WJ
+    # Reshape to unpadded I-sized blocks before combining (see comment on
+    # the first product_geometry method). Scaling by `scale` then applies
+    # only to the actual horizontal block, not to padded identity.
+    ∂x∂ξ_h =
+        scale * _unpadded_metric_tensor(
+            horizontal_local_geometry, horizontal_local_geometry.∂x∂ξ,
+        )
+    ∂x∂ξ_v = _unpadded_metric_tensor(
+        vertical_local_geometry, vertical_local_geometry.∂x∂ξ,
+    )
+    ∂x∂ξ = isnothing(∇z) ? ∂x∂ξ_h + ∂x∂ξ_v : ∂x∂ξ_h + ∂x∂ξ_v + ∇z
+    return LocalGeometry(coordinates, J, WJ, ∂x∂ξ)
+end
+
+function product_geometry(
+    horizontal_local_geometry::LocalGeometry,
+    vertical_local_geometry::CoordinateOnlyGeometry,
+    global_geometry::AbstractGlobalGeometry,
+    ∇z = nothing,
+)
+    coordinates = product_coordinates(
+        horizontal_local_geometry.coordinates,
+        vertical_local_geometry.coordinates,
+    )
+    return CoordinateOnlyGeometry(coordinates)
+end

@@ -1,0 +1,224 @@
+boundary_names(mesh::AbstractMesh) = boundary_names(domain(mesh))
+coordinate_type(mesh::AbstractMesh) = coordinate_type(domain(mesh))
+
+"""
+    nelements(mesh::AbstractMesh)
+
+Return the number of elements in `mesh`.
+"""
+nelements(mesh::AbstractMesh) = length(elements(mesh))
+
+"""
+    refindex(ϕ, n)
+
+Divide the reference interval `[-1, 1]` into `n` evenly spaced subintervals and
+return the index `i` of the subinterval containing the reference coordinate `ϕ`.
+`refcoord(ϕ, n, i)` gives the position within that subinterval, normalized to
+`[-1, 1]`.
+"""
+function refindex(ϕ, n)
+    ϕn = ϕ * n
+    # we use Julia's range lookup here, which avoids intermediate rounding errors.
+    return min(searchsortedlast((-n):2:n, ϕn), n)
+end
+function refcoord(ϕ, n, i)
+    ϕn = ϕ * n
+    return ϕn - (2 * i - n - 1)
+end
+
+"""
+    Meshes.SharedVertices(mesh, elem, vert)
+
+Iterator over the `(element, vertex)` pairs that share the vertex `vert` of element
+`elem` in `mesh`, starting with `(elem, vert)` itself.
+"""
+struct SharedVertices{M <: AbstractMesh, E}
+    mesh::M
+    elem::E
+    vert::Int
+end
+Base.IteratorSize(::Type{<:SharedVertices}) = Base.SizeUnknown()
+Base.IteratorEltype(::Type{<:SharedVertices}) = Base.HasEltype()
+Base.eltype(::Type{SharedVertices{M, E}}) where {M, E} = Tuple{E, Int}
+
+function Base.iterate(vertiter::SharedVertices)
+    velem = vertiter.elem
+    vvert = vertiter.vert
+    ccw = false
+    # return initial (element, vertex)
+    return (velem, vvert), (velem, vvert, ccw)
+end
+function Base.iterate(vertiter::SharedVertices, (velem, vvert, ccw))
+    # initially we go clockwise (ccw == false), we go to the face == vert
+    # if ccw, then go to face = vert - 1
+    vface = ccw ? mod1(vvert - 1, 4) : vvert
+    if is_boundary_face(vertiter.mesh, velem, vface)
+        if ccw
+            # have already gone both directions: all done
+            return nothing
+        end
+        # try counter-clockwise
+        velem = vertiter.elem
+        vvert = vertiter.vert
+        ccw = true
+        return Base.iterate(vertiter, (velem, vvert, ccw))
+    end
+    opelem, opface, reversed = opposing_face(vertiter.mesh, velem, vface)
+    velem = opelem
+    vvert = ccw ? opface : mod1(opface + 1, 4)
+    if velem == vertiter.elem && vvert == vertiter.vert
+        # we're back at where we started: all done
+        return nothing
+    end
+    return (velem, vvert), (velem, vvert, ccw)
+end
+
+
+"""
+    Meshes.linearindices(elemorder)
+
+Given a data structure `elemorder` with `elemorder[i] = elem` that orders elements,
+return the inverse map `orderindex` such that `orderindex[elem] = i`.
+
+The result is a `LinearIndices` for `CartesianIndices`, a dense `Int` array for a
+vector of `CartesianIndex`, and a `Dict` otherwise.
+"""
+linearindices(elemorder::CartesianIndices) = LinearIndices(elemorder)
+function linearindices(elemorder::AbstractVector{<:CartesianIndex})
+    cmax = maximum(elemorder)
+    L = zeros(Int, cmax.I)
+    for (i, c) in enumerate(elemorder)
+        L[c] = i
+    end
+    return L
+end
+function linearindices(elemorder)
+    orderindex = Dict{eltype(elemorder), Int}()
+    for (i, elem) in enumerate(elemorder)
+        orderindex[elem] = i
+    end
+    return orderindex
+end
+
+"""
+    Meshes.face_connectivity_matrix(mesh, elemorder = elements(mesh))
+
+Construct a `Bool`-valued `SparseMatrixCSC` `M` containing the face connections of
+`mesh`. Elements are indexed according to `elemorder`.
+
+`M[i, i] == true` only if two distinct faces of element `i` are connected.
+"""
+function face_connectivity_matrix(
+    mesh::AbstractMesh,
+    elemorder = elements(mesh),
+    orderindex = linearindices(elemorder),
+)
+    m = n = length(elemorder)
+    I = Int[]
+    J = Int[]
+    for (i, elem) in enumerate(elemorder)
+        for face in 1:4
+            if is_boundary_face(mesh, elem, face)
+                continue
+            end
+            opelem, opface, reversed = opposing_face(mesh, elem, face)
+            j = orderindex[opelem]
+            push!(I, i)
+            push!(J, j)
+        end
+    end
+    V = trues(length(I))
+    return SparseArrays.sparse(I, J, V, m, n)
+end
+
+"""
+    Meshes.vertex_connectivity_matrix(mesh, elemorder = elements(mesh))
+
+Construct a `Bool`-valued `SparseMatrixCSC` `M` containing the vertex connections
+of `mesh`. Elements are indexed according to `elemorder`.
+
+`M[i, i] == true` only if two distinct vertices of element `i` are connected.
+"""
+function vertex_connectivity_matrix(
+    mesh::AbstractMesh,
+    elemorder = elements(mesh),
+    orderindex = linearindices(elemorder),
+)
+    m = n = length(elemorder)
+    I = Int[]
+    J = Int[]
+    for (i, elem) in enumerate(elemorder)
+        for vert in 1:4
+            for (velem, vvert) in SharedVertices(mesh, elem, vert)
+                if velem == elem && vvert == vert
+                    continue
+                end
+                j = orderindex[velem]
+                push!(I, i)
+                push!(J, j)
+            end
+        end
+    end
+    V = trues(length(I))
+    return SparseArrays.sparse(I, J, V, m, n)
+end
+
+"""
+    Meshes.check_vertex_index(vert, nverts)
+
+Throw an `ArgumentError` unless `1 ≤ vert ≤ nverts`.
+
+The `coordinates(mesh, elem, vert)` methods pick a vertex with a chain of
+`vert == ...` comparisons, so without this check an out-of-range `vert` falls
+through to the last branch and silently returns another vertex's coordinates
+rather than erroring.
+"""
+@inline function check_vertex_index(vert::Integer, nverts::Integer)
+    if !(1 <= vert <= nverts)
+        throw(
+            ArgumentError(
+                "vertex index must be in 1:$nverts, got vert = $vert",
+            ),
+        )
+    end
+    return nothing
+end
+
+"""
+    Meshes.coordinates(mesh, elem, vert::Int)
+    Meshes.coordinates(mesh, elem, ξ::SVector)
+
+Return the physical coordinates of a point in an element `elem` of `mesh`. The
+position of the point can either be a vertex number `vert` or the coordinates
+`ξ` in the reference element.
+
+Elements of a 2D mesh are quadrilaterals, so `vert` must be in `1:4`; elements
+of a 1D mesh have two vertices, so `vert` must be in `1:2`.
+"""
+function coordinates(mesh::AbstractMesh2D, elem, vert::Integer)
+    check_vertex_index(vert, 4)
+    FT = Domains.float_type(domain(mesh))
+    ξ1 = (vert == 1 || vert == 4) ? FT(-1) : FT(1)
+    ξ2 = (vert == 1 || vert == 2) ? FT(-1) : FT(1)
+    coordinates(mesh, elem, (ξ1, ξ2))
+end
+
+
+
+"""
+    Meshes.containing_element(mesh::AbstractMesh, coord)
+
+Return the element of `mesh` containing the coordinate `coord`. If the coordinate
+falls on the boundary between two or more elements, one of them is chosen
+arbitrarily.
+"""
+function containing_element end
+
+"""
+    Meshes.reference_coordinates(mesh::AbstractMesh, elem, coord)
+
+Return an `SVector` `ξ` of coordinates in the reference element such that
+`Meshes.coordinates(mesh, elem, ξ) == coord`. Used for interpolation to a specific
+point.
+"""
+function reference_coordinates end

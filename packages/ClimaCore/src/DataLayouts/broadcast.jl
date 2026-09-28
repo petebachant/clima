@@ -1,0 +1,213 @@
+"""
+    DataStyle(D)
+
+`BroadcastStyle` for a [`DataLayout`](@ref) of type `D`, which stores the
+[`layout_type`](@ref) and its corresponding value of `ndims` as type parameters.
+"""
+struct DataStyle{N, D <: DataLayout{<:Any, N}} <: Broadcast.AbstractArrayStyle{N} end
+DataStyle(::Type{D}) where {D} = DataStyle{ndims(D), layout_type(D)}()
+
+Base.ndims(::DataStyle{N}) where {N} = N
+
+Broadcast.BroadcastStyle(::Type{D}) where {D <: DataLayout} = DataStyle(D)
+
+# For styles with equal typenames but different dimensionalities, Base's
+# fallback for AbstractArrayStyle calls typeof(style)(Val(N)). DataStyle needs a
+# layout type D in addition to the dimensionality, so it bypasses the fallback.
+Broadcast.BroadcastStyle(style1::DataStyle, style2::DataStyle) =
+    style1 == style2 || iszero(ndims(style2)) ? style1 :
+    iszero(ndims(style1)) ? style2 : Broadcast.Unknown()
+
+# Pass scalar values in Tuples of length 1 or in 0-dimensional AbstractArrays.
+# Add DefaultArrayStyle{0} and DataStyle{0} methods to avoid ambiguities.
+Broadcast.BroadcastStyle(style::DataStyle, ::Broadcast.Style{Tuple}) = style
+Broadcast.BroadcastStyle(style::DataStyle, ::Broadcast.AbstractArrayStyle{0}) = style
+Broadcast.BroadcastStyle(style::DataStyle, ::Broadcast.DefaultArrayStyle{0}) = style
+Broadcast.BroadcastStyle(style::DataStyle, ::DataStyle{0}) = style
+
+# Enable automatic nested broadcasting over supported types of iterators.
+@inline Broadcast.broadcastable(data::DataLayout) =
+    reinterpret(add_auto_broadcasters(eltype(data)), data)
+@inline Broadcast.broadcasted(style::DataStyle, f::F, args...) where {F} =
+    auto_broadcasted(style, f, args)
+
+"""
+    LazyDataLayout{D}
+
+A [`DataStyle`](@ref) broadcast expression whose [`layout_type`](@ref) is `D`.
+"""
+const LazyDataLayout{D} = Broadcast.Broadcasted{<:DataStyle{<:Any, D}}
+
+# Avoid Base's Broadcast.combine_axes, whose DimensionMismatch error cannot be
+# compiled in GPU kernels because it generates a string during runtime.
+@inline Broadcast._axes(bc::LazyDataLayout, ::Nothing) = unrolled_map(Base.OneTo, size(bc))
+
+combine_sizes(size1, size2) =
+    isempty(size2) ? size1 :
+    isempty(size1) ? size2 :
+    (
+        isone(first(size2)) ? first(size1) : first(size2),
+        combine_sizes(Base.tail(size1), Base.tail(size2))...,
+    )
+
+# Ensure that size(::LazyDataLayout) is statically inferrable when possible.
+Base.size(bc::LazyDataLayout) =
+    has_inferred_size(bc) ? inferred_size(bc) :
+    unrolled_mapreduce(combine_sizes, bc.args) do arg
+        arg isa Tuple ? (length(arg),) : size(arg) # size(::Tuple) is undefined
+    end
+# Make ndims support nested broadcasts whose axes have not been instantiated.
+@inline Base.ndims(::LazyDataLayout{D}) where {D} = ndims(D)
+
+# Allow eltype to return non-concrete types, like an empty Union{}.
+@inline Base.eltype(bc::LazyDataLayout) = unsafe_eltype(bc)
+
+# Remove all AutoBroadcaster wrappers when allocating a new DataLayout.
+@inline Base.similar(bc::LazyDataLayout) =
+    similar(bc, drop_auto_broadcasters(safe_eltype(bc)))
+
+# Route materialized broadcast results through register_similar, so that inside
+# a fused slice loop they live in per-thread registers instead of shared memory,
+# where equal byte sizes alias (see RegisterArray). Other scopes and dynamic
+# sizes take the buffer_similar fallback, matching this method's old behavior.
+@inline Base.similar(bc::LazyDataLayout, ::Type{T}) where {T} =
+    register_similar(bc, T)
+
+"""
+    buffer_similar(data, T)
+    buffer_similar(bc, T)
+
+Allocate a new [`DataLayout`](@ref) through its [`DataScope`](@ref)'s memory
+(see [`scoped_array`](@ref) and [`scoped_static_array`](@ref)), so that every
+thread in the scope can read the result. `Base.similar` on a
+[`LazyDataLayout`](@ref) instead routes through [`register_similar`](@ref),
+whose result may only be read by the writing thread, so any buffer whose values
+cross a thread boundary has to be allocated with this function.
+"""
+@inline buffer_similar(data::DataLayout, ::Type{T}) where {T} =
+    similar_layout(data, T)
+@inline buffer_similar(bc::LazyDataLayout, ::Type{T}) where {T} = similar(
+    layout_type(bc){T, shape_params(bc)..., typeof(DataScope(bc)), parent_type(bc)},
+    size(bc),
+)
+
+# Define a MultiBroadcastFusion type, FusedMultiBroadcast, and a corresponding
+# @fused macro, as outlined in https://github.com/CliMA/MultiBroadcastFusion.jl.
+@make_type FusedMultiBroadcast
+@make_fused fused_direct FusedMultiBroadcast fused_direct
+
+# Adapt does not descend into Base.Pair, so Adapt.@adapt_structure would leave
+# each pair's destination and broadcast unconverted (e.g. as CuArrays instead
+# of CuDeviceArrays in kernel arguments).
+Adapt.adapt_structure(to, fmb::FusedMultiBroadcast) = FusedMultiBroadcast(
+    unrolled_map(fmb.pairs) do pair
+        Pair(Adapt.adapt(to, pair.first), Adapt.adapt(to, pair.second))
+    end,
+)
+
+const MaybeLazyDataLayout = Union{DataLayout, LazyDataLayout}
+const MaybeFusedDataLayoutBroadcast = Union{LazyDataLayout, FusedMultiBroadcast}
+
+@inline is_layout_arg(::MaybeLazyDataLayout) = true
+@inline is_layout_arg(::Any) = false
+
+@inline get_layout_arg_tuple(arg) = is_layout_arg(arg) ? (arg,) : ()
+
+# NOTE: layout_args must keep going through unrolled_flatmap; see the
+# unrolled_flatten note in src/Utilities/Utilities.jl.
+
+"""
+    layout_args(bc)
+
+Return a tuple of every [`DataLayout`](@ref) and [`LazyDataLayout`](@ref) among
+the arguments of a broadcast expression.
+"""
+@inline layout_args(bc::LazyDataLayout) =
+    unrolled_flatmap(get_layout_arg_tuple, bc.args)
+@inline layout_args(bc::FusedMultiBroadcast) =
+    unrolled_flatmap(get_layout_arg_tuple, unrolled_flatten(bc.pairs))
+
+@inline DataScope(bc::MaybeFusedDataLayoutBroadcast) = DataScope(layout_args(bc)...)
+
+@inline layout_type(::LazyDataLayout{D}) where {D} = D
+
+# Only specify the parent array element type, instead of a concrete array type.
+@inline parent_eltype(arg) = eltype(parent_type(arg))
+@inline parent_type(bc::LazyDataLayout) =
+    AbstractArray{promote_type(unrolled_map(parent_eltype, layout_args(bc))...)}
+
+# Allow any combination of f_dim values, taking a maximum to resolve conflicts.
+# Reduce with a nothing-or-integer accumulator instead of collecting the
+# non-nothing values into a tuple, so that no intermediate tuples appear in
+# GPU-compiled code.
+@inline f_dim(bc::LazyDataLayout) =
+    unrolled_reduce(unrolled_map(f_dim, layout_args(bc)); init = nothing) do dim1, dim2
+        isnothing(dim1) ? dim2 : isnothing(dim2) ? dim1 : max(dim1, dim2)
+    end
+
+# Extrude singleton axes like Broadcast.combine_axes when combining vijh_params.
+@inline vijh_params(bc::LazyDataLayout) =
+    unrolled_reduce(unrolled_map(vijh_params, layout_args(bc))) do params1, params2
+        unrolled_map(params1, params2) do N1, N2
+            isnothing(N1) || isnothing(N2) ? nothing :
+            N1 == N2 || isone(N2) ? N1 :
+            isone(N1) ? N2 : Broadcast.throwdm((Base.OneTo(N1),), (Base.OneTo(N2),))
+        end
+    end
+
+# Compute layout-specific shape_params from the generic vijh_params and f_dim.
+@inline shape_params(::LazyDataLayout{DataF}) = (;)
+@inline shape_params(bc::LazyDataLayout{VIJHWithF}) =
+    (; vijh_params(bc)..., F = f_dim(bc))
+@inline shape_params(bc::LazyDataLayout{VIH1}) =
+    (; vijh_params(bc).Nv, vijh_params(bc).Ni, vijh_params(bc).Nh)
+@inline shape_params(bc::LazyDataLayout{IH1JH2}) =
+    (; vijh_params(bc).Ni, vijh_params(bc).Nj, vijh_params(bc).Nh)
+
+@inline inferred_size(bc::LazyDataLayout) =
+    inferred_size(layout_type(bc){<:Any, shape_params(bc)...})
+
+@inline function nelems(bc::LazyDataLayout)
+    (; Nv, Ni, Nj, Nh) = vijh_params(bc)
+    return isnothing(Nh) ? length(bc) ÷ (Nv * Ni * Nj) : Nh
+end
+
+# Forward size queries and primitives to the first layout in a fused broadcast.
+const DATA_LAYOUT_PRIMITIVES =
+    (:layout_type, :parent_type, :f_dim, :shape_params, :inferred_size, :nelems)
+for f in (:ndims, :length, :size, :axes, DATA_LAYOUT_PRIMITIVES...)
+    f_with_module_prefix = f in DATA_LAYOUT_PRIMITIVES ? f : :(Base.$f)
+    @eval @inline $f_with_module_prefix(bc::FusedMultiBroadcast) =
+        unrolled_allequal($f, unrolled_map(first, bc.pairs)) ? $f(first(first(bc.pairs))) :
+        throw(DimensionMismatch($("$f is inconsistent among fused broadcasts")))
+end
+
+"""
+    modify_args(f, bc, f_args...)
+
+Return a copy of a broadcast expression in which each of the [`layout_args`](@ref)
+is replaced with `f(layout_arg, f_args...)`.
+"""
+@propagate_inbounds function modify_args(f::F, bc::LazyDataLayout, f_args...) where {F}
+    modified_args = unrolled_map(bc.args) do arg
+        Base.@_propagate_inbounds_meta
+        arg isa MaybeLazyDataLayout ? f(arg, f_args...) : arg
+    end
+    return Broadcast.Broadcasted(bc.style, bc.f, modified_args)
+end
+@propagate_inbounds function modify_args(f::F, bc::FusedMultiBroadcast, f_args...) where {F}
+    modified_pairs = unrolled_map(bc.pairs) do (dest, bc)
+        Base.@_propagate_inbounds_meta
+        Pair(f(dest, f_args...), bc isa MaybeLazyDataLayout ? f(bc, f_args...) : bc)
+    end
+    return FusedMultiBroadcast(modified_pairs)
+end
+
+@inline reassign(bc::MaybeFusedDataLayoutBroadcast, scope) =
+    modify_args(reassign, bc, scope)
+@propagate_inbounds level_view(bc::MaybeFusedDataLayoutBroadcast, v) =
+    modify_args(level, bc, v)
+@propagate_inbounds slab_view(bc::MaybeFusedDataLayoutBroadcast, v, h) =
+    modify_args(slab, bc, v, h)
+@propagate_inbounds column_view(bc::MaybeFusedDataLayoutBroadcast, i, j, h) =
+    modify_args(column, bc, i, j, h)
