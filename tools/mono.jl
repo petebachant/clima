@@ -21,6 +21,7 @@ struct Package
     weakdeps::Vector{String}
     testdeps::Vector{String}
     compat::Dict{String, String}
+    testcompat::Dict{String, String}  # from test/Project.toml, if any
 end
 
 function testdeps_of(dir, project)
@@ -33,6 +34,11 @@ function testdeps_of(dir, project)
         push!(names, t)
     end
     return names
+end
+
+function testcompat_of(dir)
+    tp = joinpath(dir, "test", "Project.toml")
+    isfile(tp) ? get(TOML.parsefile(tp), "compat", Dict{String, String}()) : Dict{String, String}()
 end
 
 function load_packages()
@@ -53,6 +59,7 @@ function load_packages()
             inrepo(keys(get(p, "weakdeps", Dict()))),
             inrepo(testdeps_of(joinpath(ROOT, path), p)),
             get(p, "compat", Dict{String, String}()),
+            testcompat_of(joinpath(ROOT, path)),
         )
     end
     return pkgs
@@ -134,11 +141,17 @@ end
 
 function compat_drift(pkgs)
     drift = Tuple{String, String, String, VersionNumber}[]
-    for p in values(pkgs), d in unique!(vcat(p.deps, p.weakdeps))
-        spec = get(p.compat, d, nothing)
-        v = pkgs[d].version
-        if spec === nothing || !(v in Pkg.Versions.semver_spec(spec))
-            push!(drift, (p.name, d, something(spec, "<missing>"), v))
+    check(where, d, spec) = spec === nothing || pkgs[d].version in Pkg.Versions.semver_spec(spec) ||
+        push!(drift, (where, d, spec, pkgs[d].version))
+    for p in values(pkgs)
+        for d in unique!(vcat(p.deps, p.weakdeps))
+            spec = get(p.compat, d, nothing)
+            spec === nothing ? push!(drift, (p.name, d, "<missing>", pkgs[d].version)) :
+                check(p.name, d, spec)
+        end
+        # Test envs: a stale bound silently tests against an old release.
+        for (d, spec) in p.testcompat
+            haskey(pkgs, d) && check("$(p.name)/test", d, spec)
         end
     end
     return sort!(drift)
