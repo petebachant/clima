@@ -1,0 +1,224 @@
+using Test
+import Logging
+import ClimaUtilities.OnlineLogging:
+    WallTimeInfo,
+    _update!,
+    report_walltime,
+    _time_and_units_str,
+    _trunc_time,
+    sypd_str_from_ssps
+
+@testset "OnlineLogging Tests" begin
+    # Mock integrator struct for testing
+    Base.@kwdef struct MockIntegrator
+        sol::Any
+        dt::Any
+        t::Any
+        step::Any
+    end
+
+    @testset "WallTimeInfo default args" begin
+        wt = WallTimeInfo()
+        @test wt.n_calls[] == 0
+        @test wt.t_wall_last[] == -1.0
+        @test wt.∑Δt_wall[] == 0.0
+        @test wt.first_update_after_n_calls == 2
+        @test wt.first_update_after_t_simulation == -Inf
+    end
+
+    @testset "_update! with default args" begin
+        # First call
+        wt = WallTimeInfo()
+        integrator = MockIntegrator(;
+            sol = (; prob = (; tspan = (0.0, 10.0))),
+            dt = 1.0,
+            t = 1.0,
+            step = 1,
+        )
+        _update!(wt, integrator)
+        @test wt.n_calls[] == 1
+        @test iszero(wt.∑Δt_wall[])
+        @test wt.t_simulation_last[] == 1.0
+
+        # Second call (should not record measurement)
+        _update!(wt, integrator)
+        # Third call (update compensates for un-timed steps)
+        integrator = MockIntegrator(;
+            sol = (; prob = (; tspan = (0.0, 10.0))),
+            dt = 1.0,
+            t = 3.0,
+            step = 3,
+        )
+        t1 = time()
+        sleep(0.1)
+        _update!(wt, integrator)
+        t2 = time()
+        @test wt.n_calls[] == 3
+        @test wt.∑Δt_wall[] ≈ 1.5 * (t2 - t1) atol = 0.075
+        @test wt.t_simulation_last[] == 3.0
+
+        # Fourth call (normal update)
+        integrator = MockIntegrator(;
+            sol = (; prob = (; tspan = (0.0, 10.0))),
+            dt = 1.0,
+            t = 8.0,
+            step = 8,
+        )
+        t1 = time()
+        sleep(0.2)
+        _update!(wt, integrator)
+        t2 = time()
+        @test wt.n_calls[] == 4
+        @test wt.∑Δt_wall[] ≈ ((1.5 / 2) + 1) * (t2 - t1) atol = 0.075
+        @test wt.t_simulation_last[] == 8.0
+    end
+
+    @testset "_update! with args" begin
+        # First and second call should not record measurement
+        wt_n_calls = WallTimeInfo(; first_update_after_n_calls = 2)
+        wt_t_sim = WallTimeInfo(; first_update_after_t_simulation = 5.0)
+        wt_both = WallTimeInfo(;
+            first_update_after_n_calls = 2,
+            first_update_after_t_simulation = 3.0,
+        )
+        for wt in (wt_n_calls, wt_t_sim, wt_both)
+            integrator = MockIntegrator(;
+                sol = (; prob = (; tspan = (0.0, 10.0))),
+                dt = 1.0,
+                t = 5.0,
+                step = 5,
+            )
+            _update!(wt, integrator)
+            _update!(wt, integrator)
+            @test wt.n_calls[] == 2
+            @test iszero(wt.∑Δt_wall[])
+            # Third call (update compensates for un-timed steps)
+            integrator = MockIntegrator(;
+                sol = (; prob = (; tspan = (0.0, 10.0))),
+                dt = 1.0,
+                t = 6.0,
+                step = 6,
+            )
+            t1 = time()
+            sleep(0.1)
+            _update!(wt, integrator)
+            t2 = time()
+            @test wt.n_calls[] == 3
+            @test wt.∑Δt_wall[] ≈ 6 * (t2 - t1) atol = 0.075
+        end
+    end
+
+
+    @testset "report_walltime" begin
+        wt = WallTimeInfo()
+        integrator = MockIntegrator(;
+            sol = (; prob = (; tspan = (0.0, 10.0))),
+            dt = 0.1,
+            t = 2.0,
+            step = 20,
+        )
+
+        io = IOBuffer()
+        Logging.with_logger(Logging.SimpleLogger(io)) do
+            report_walltime(wt, integrator)
+        end
+        output_string = String(take!(io))
+
+        # Check that the expected information is present in the output
+        @test occursin("Progress", output_string)
+        @test occursin("simulation_time", output_string)
+        @test occursin("n_steps_completed = 20", output_string) # Check for correct step count
+
+        # Reset WallTimeInfo and introduce delays:
+        wt = WallTimeInfo()
+        io = IOBuffer()
+        dt = 3600.0
+        n_steps = 32
+        tf = n_steps * dt
+        delay_s = 0.2
+        reporting_times = (1, 2, 8, 16)
+        Logging.with_logger(Logging.SimpleLogger(io)) do
+            for step in 1:(n_steps / 2.0)
+                integrator = MockIntegrator(;
+                    sol = (; prob = (; tspan = (0.0, tf))),
+                    dt = dt,
+                    t = step * dt,
+                    step = step,
+                )
+                step in reporting_times && report_walltime(wt, integrator)
+                sleep(delay_s)
+            end
+        end
+        output_string = String(take!(io))
+
+        # Check if timings are reported now that they're non-zero
+        @test occursin("wall_time_per_step", output_string)
+        @test occursin("wall_time_total", output_string)
+        @test occursin("wall_time_remaining", output_string)
+        @test occursin("wall_time_spent", output_string)
+        @test occursin("percent_complete", output_string)
+
+        @test occursin("estimated_sypd", output_string)
+        @test occursin("date_now", output_string)
+        @test occursin("estimated_finish_date", output_string)
+        last_rep = split(output_string, "Info:")[end]
+        reported_sypd =
+            parse(Int, match(r"estimated_sypd = (\d*)", last_rep).captures[1])
+        inst_sypd = parse(
+            Int,
+            match(r"instantaneous_sypd = (\d*)", last_rep).captures[1],
+        )
+        time_remaining_s, time_remaining_ms = match(
+            r"wall_time_remaining = (\d*) seconds, (\d*) milliseconds",
+            last_rep,
+        ).captures
+        time_spent_s, time_spent_ms = match(
+            r"wall_time_spent = (\d*) seconds, (\d*) milliseconds",
+            last_rep,
+        ).captures
+        time_total_s, time_total_ms = match(
+            r"wall_time_total = (\d*) seconds, (\d*) milliseconds",
+            last_rep,
+        ).captures
+        s_and_ms_to_s = (s, ms) -> parse(Int, s) + 0.001 * parse(Int, ms)
+        reported_time_spent = s_and_ms_to_s(time_spent_s, time_spent_ms)
+        reported_time_remaining =
+            s_and_ms_to_s(time_remaining_s, time_remaining_ms)
+        reported_time_total = s_and_ms_to_s(time_total_s, time_total_ms)
+        theoretical_time_total = delay_s * n_steps
+        theoretical_sypd = (24 * 3600) / (delay_s * 365 * 24 * 3600.0 / dt)
+        @test isapprox(
+            reported_time_remaining,
+            theoretical_time_total / 2;
+            rtol = 0.1,
+        )
+        @test isapprox(
+            reported_time_spent,
+            theoretical_time_total / 2;
+            rtol = 0.1,
+        )
+        @test isapprox(reported_time_total, theoretical_time_total; rtol = 0.25)
+        @test isapprox(reported_sypd, theoretical_sypd; rtol = 0.25)
+        @test isfinite(inst_sypd) && inst_sypd > 0
+    end
+
+    @testset "_time_and_units_str" begin
+        @test _time_and_units_str(0.0) == "0 seconds"
+        @test _time_and_units_str(1.0) == "1 second"
+        @test _time_and_units_str(60.0) == "1 minute"
+        @test _time_and_units_str(3600.0) == "1 hour"
+        @test _time_and_units_str(3661.0) == "1 hour, 1 minute" # Test truncation
+    end
+
+    @testset "_trunc_time" begin
+        @test _trunc_time("1 hour, 1 minute, 1 second") == "1 hour, 1 minute"
+        @test _trunc_time("1 minute, 1 second") == "1 minute, 1 second"
+        @test _trunc_time("1 second") == "1 second"
+    end
+
+    @testset "sypd_str_from_ssps" begin
+        @test sypd_str_from_ssps(0.0) == "0.0 (sdpd_estimate = 0.0)"
+        @test sypd_str_from_ssps(1.0) == "0.003 (sdpd_estimate = 1.0)"
+        @test sypd_str_from_ssps(365.25) == "1.0"
+    end
+end
