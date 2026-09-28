@@ -1,0 +1,108 @@
+ClimaComms.jl Release Notes
+========================
+
+main
+-------
+
+v0.6.12
+-------
+
+- `MPICommsContext` operations now synchronize the CUDA device across streams, so that CUDA-aware MPI sees device buffers written by kernels on CUDA.jl's non-blocking per-task streams. The new `ClimaComms.device_synchronize(device)` is called in `start` and `finish` and around `reduce`, `reduce!`, `allreduce`, `allreduce!`, and `gather` on array buffers; `reduce!` and `allreduce!` now return `nothing`, as documented [PR 151](https://github.com/CliMA/ClimaComms.jl/pull/151).
+- ci: GitHub Actions now tests Julia 1.10 (LTS) to 1.12.
+- The minimum supported Julia version was raised from 1.9 to 1.10 (the LTS); 1.9 was declared but never tested in CI.
+- Documentation overhaul: new README and logo, restructured docs (getting started, how-to guide, design philosophy), and revised docstrings throughout.
+- `FileLogger` is now exported, replacing the stale export of the removed `MPIFileLogger`.
+- `Base.summary(io, device)` now reports the type of the given device, rather than the device implied by environment variables.
+- Bug fixes from a code audit:
+  - Added the missing `abort` method for `SingletonCommsContext`; it previously threw a `MethodError`.
+  - `Base.summary(io, x)` methods for devices now print to `io` (the `Base` contract) instead of returning a string, so `summary(device)` no longer returns an empty string.
+  - `FileLogger` no longer crashes with an `IOError` when an MPI run reuses a `log_dir` from a previous run; the `output.log` symlink is now created up front and refreshed if stale.
+  - An invalid `coarsen` option for `@threaded`/`threaded` (e.g., `:greedy` on Julia < 1.11, or a typo) now throws an `ArgumentError` instead of a `StackOverflowError`.
+  - `reduce`, `allreduce`, and `gather` on `SingletonCommsContext` now return a copy of the input array instead of the input itself, matching the allocation behavior of the MPI methods.
+- More helpful error messages for missing backends:
+  - `@import_required_backends` now throws an actionable error naming the missing package and how to install it, instead of a bare `import` failure ([issue 88](https://github.com/CliMA/ClimaComms.jl/issues/88)).
+  - A `MethodError` for a `ClimaComms` function called with a `CUDADevice` or `MPICommsContext` now hints that the corresponding backend package needs to be loaded ([issue 107](https://github.com/CliMA/ClimaComms.jl/issues/107)).
+
+v0.6.11
+-------
+
+- ci: update JuliaFormatter job [PR 127](https://github.com/CliMA/ClimaComms.jl/pull/127)
+
+v0.6.10
+-------
+
+- fixed logging interoperability with `GPUCompiler.jl` [PR 119](https://github.com/CliMA/ClimaComms.jl/pull/119)
+
+v0.6.9
+-------
+
+- Added a device-agnostic API for querying available memory [PR 117](https://github.com/CliMA/ClimaComms.jl/pull/117).
+
+v0.6.8
+-------
+
+- Extended `@threaded` to work with multiple iterators and lazy iterators (e.g., `enumerate`, `zip`, and `Iterators.partition`), and modified the `threaded` function to make it equivalent to `@threaded` [PR 115](https://github.com/CliMA/ClimaComms.jl/pull/115).
+
+v0.6.7
+-------
+
+- Extended `@threaded` to work on GPU devices, with block sizes automatically determined by the CUDA occupancy API, and added the ability to control thread coarsening across all devices [PR 111](https://github.com/CliMA/ClimaComms.jl/pull/111).
+
+v0.6.6
+-------
+
+- Replaced `MPIFileLogger` with `FileLogger` and added an `OnlyRootLogger` logger that silences non-root processes [PR 104](https://github.com/CliMA/ClimaComms.jl/pull/104).
+
+v0.6.5
+-------
+
+- Support for adapt was added, so that users can convert between CPU and GPU
+  devices, and contexts containing cpu and gpu devices [PR 103](https://github.com/CliMA/ClimaComms.jl/pull/103).
+
+- New MPI logging tools were added, `MPIFileLogger` and `MPILogger` [PR 100](https://github.com/CliMA/ClimaComms.jl/pull/100).
+
+v0.6.4
+-------
+
+- Add device-flexible `@assert` was added [PR 86](https://github.com/CliMA/ClimaComms.jl/pull/86).
+
+v0.6.3
+-------
+
+- Bugfix: `cuda_sync` was missing in the extension and, as a result, `ClimaComms.@cuda_sync` was not actually synchronizing. We've also removed the abstract fallback, so that we instead method-error if we pass a cuda device when the cuda extension does not exist.
+
+v0.6.2
+-------
+
+- We added a device-agnostic `allowscalar(f, ::AbstractDevice, args...; kwargs...)` to further assist in making CUDA an extension.
+
+v0.6.1
+-------
+
+- Macros have been refactored to hopefully fix some code loading issues.
+
+v0.6.0
+-------
+
+- ![][badge-💥breaking] `ClimaComms` does no longer try to guess the correct
+  compute device: the default is now CPU. To control which device to use,
+  use the `CLIMACOMMS_DEVICE` environment variable.
+- ![][badge-💥breaking] `CUDA` and `MPI` are now extensions in `ClimaComms`. To
+  use `CUDA`/`MPI`, `CUDA.jl`/`MPI.jl` have to be loaded. A convenience macro
+  `ClimaComms.@import_required_backends` checks what device/context could be
+  used and conditionally loads `CUDA.jl`/`MPI.jl`. It is recommended to change
+
+  ```julia
+  import ClimaComms
+  ```
+
+  to
+
+  ```julia
+  import ClimaComms
+  ClimaComms.@import_required_backends
+  ```
+
+  This has to be done before calling `ClimaComms.context()`.
+
+[badge-💥breaking]: https://img.shields.io/badge/💥BREAKING-red.svg
