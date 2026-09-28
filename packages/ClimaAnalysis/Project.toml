@@ -1,0 +1,58 @@
+name = "ClimaAnalysis"
+uuid = "29b5916a-a76c-4e73-9657-3c8fd22e65e6"
+authors = ["Gabriele Bozzola <gbozzola@caltech.edu>", "Kevin Phan <kphan2@caltech.edu>"]
+version = "0.5.24"
+
+[deps]
+Artifacts = "56f22d72-fd6d-98f1-02f0-08ddc0907c33"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Interpolations = "a98d9a8b-a2ab-59e6-89dd-64a1c18fca59"
+NCDatasets = "85f8d34a-cbdd-5861-8df4-14fed0d494ab"
+NaNStatistics = "b946abbf-3ea7-4610-9019-9858bfdeaf2d"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+Reexport = "189a3867-3050-52da-a836-e630ba90ab69"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+
+[weakdeps]
+GeoMakie = "db073c08-6b98-4ee5-b6a4-5efafb3259c6"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+
+[extensions]
+ClimaAnalysisGeoMakieExt = "GeoMakie"
+ClimaAnalysisMakieExt = "Makie"
+
+[compat]
+Aqua = "0.8.14"
+Artifacts = "1"
+CairoMakie = "0.12.5, 0.13, 0.14, 0.15"
+Dates = "1"
+Documenter = "1"
+ExplicitImports = "1.12"
+GeoMakie = "0.7.3"
+Interpolations = "0.14, 0.15, 0.16"
+JuliaFormatter = "=2.10.1"
+Makie = "0.21.5, 0.22, 0.23, 0.24"
+NCDatasets = "0.14"
+NaNStatistics = "=0.6.13, 0.6.13 - 0.6.50, 0.6.53 - 0.6.56, 0.6.58"
+OrderedCollections = "1.3, 2.0"
+Reexport = "1"
+SafeTestsets = "0.1"
+Statistics = "1"
+Test = "1"
+Unitful = "1.12.3"
+julia = "1.10"
+
+[extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+ExplicitImports = "7d51a73a-1435-4ff3-83d9-f097790105c7"
+GeoMakie = "db073c08-6b98-4ee5-b6a4-5efafb3259c6"
+JuliaFormatter = "98e50ef6-434e-11e9-1051-2b60c6c9e899"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+SafeTestsets = "1bc83da4-3b8d-516f-aca4-4fe02f6d838f"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Aqua", "CairoMakie", "Documenter", "ExplicitImports", "GeoMakie", "JuliaFormatter", "Makie", "SafeTestsets", "Test"]
