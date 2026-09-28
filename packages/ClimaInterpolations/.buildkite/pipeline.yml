@@ -1,0 +1,51 @@
+agents:
+  queue: central
+  slurm_mem: 8G
+  modules: climacommon/2026_02_18
+
+env:
+  JULIA_DEPOT_PATH: "${BUILDKITE_BUILD_PATH}/${BUILDKITE_PIPELINE_SLUG}/depot/default"
+  JULIA_MAX_NUM_PRECOMPILE_FILES: 100
+  JULIA_NVTX_CALLBACKS: gc
+  OPENBLAS_NUM_THREADS: 1
+
+steps:
+  - label: "initialize"
+    key: "init_buildkite_env"
+    command:
+      - "echo $$JULIA_DEPOT_PATH"
+
+      - echo "--- Instantiate buildkite"
+      - "julia --project=.buildkite -e 'using Pkg; Pkg.develop(;path=\".\"); Pkg.instantiate(;verbose=true)'"
+      - "julia --project=.buildkite -e 'using Pkg; Pkg.precompile()'"
+      - "julia --project=.buildkite -e 'using CUDA; CUDA.precompile_runtime(); CUDA.versioninfo()'"
+      - "julia --project=.buildkite -e 'using Pkg; Pkg.status()'"
+    agents:
+      slurm_mem: 10G
+      slurm_gpus: 1
+      slurm_cpus_per_task: 2
+    env:
+      JULIA_NUM_PRECOMPILE_TASKS: 12
+
+  - wait
+
+  - group: "Unit: Package-wide"
+    steps:
+
+      - label: "Unit: CPU tests & aqua"
+        key: unit_cpu_tests
+        command: "julia --color=yes --check-bounds=yes --project=.buildkite test/runtests.jl"
+        agents:
+          slurm_mem: 16G
+          slurm_cpus_per_task: 1
+          slurm_time: 00:10:00
+
+      - label: "Unit: CUDA tests"
+        key: unit_cuda_tests
+        command:
+          - "julia --color=yes --check-bounds=yes --project=.buildkite test/runtests_cuda.jl"
+        agents:
+          slurm_gpus: 1
+          slurm_cpus_per_task: 4
+          slurm_mem: 16G
+          slurm_time: 00:10:00
