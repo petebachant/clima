@@ -1,0 +1,52 @@
+using ClimaAnalysis
+using Documenter
+import GeoMakie
+
+DocMeta.setdocmeta!(
+    ClimaAnalysis,
+    :DocTestSetup,
+    :(using ClimaAnalysis;
+    using ClimaAnalysis.Utils;
+    using ClimaAnalysis.Var;
+    using ClimaAnalysis.Atmos;
+    using ClimaAnalysis.Sim);
+    recursive = true,
+)
+
+makedocs(;
+    modules = [
+        ClimaAnalysis,
+        Base.get_extension(ClimaAnalysis, :ClimaAnalysisMakieExt),
+        Base.get_extension(ClimaAnalysis, :ClimaAnalysisGeoMakieExt),
+    ],
+    authors = "Climate Modelling Alliance",
+    sitename = "ClimaAnalysis.jl",
+    format = Documenter.HTML(;
+        prettyurls = !isempty(get(ENV, "CI", "")),
+        collapselevel = 1,
+        size_threshold_ignore = ["api.md"],
+    ),
+    checkdocs = :exports,
+    pages = [
+        "Home" => "index.md",
+        "OutputVars" => "var.md",
+        "Visualizing OutputVars" => "visualize.md",
+        "Reading NetCDF files" => "read_files.md",
+        "RMSEVariables" => "rmse_var.md",
+        "Visualizing RMSEVariables" => "visualize_rmse_var.md",
+        "FlatVar" => "flat.md",
+        "Split-Apply-Combine" => "split_apply_combine.md",
+        "APIs" => "api.md",
+        "How do I?" => "howdoi.md",
+        "Developer Documentation" => "developer.md",
+    ],
+)
+
+deploydocs(;
+    repo = "github.com/CliMA/ClimaAnalysis.jl",
+    # Only push if all the relevant environment variables are defined
+    push_preview = all(
+        !isempty,
+        (get(ENV, "GITHUB_TOKEN", ""), get(ENV, "DOCUMENTER_KEY", "")),
+    ),
+)
