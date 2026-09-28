@@ -1,0 +1,451 @@
+"""
+    MicrophysicsNonEq
+
+Non-equilibrium bulk microphysics scheme for cloud condensate formation.
+
+Implements relaxation-to-equilibrium approach for:
+- Condensation and evaporation of cloud liquid water
+- Deposition and sublimation of cloud ice
+
+See also: `Microphysics1M` for precipitating hydrometeor processes.
+"""
+module MicrophysicsNonEq
+
+import ..Parameters as CMP
+import ..ThermodynamicsInterface as TDI
+import ..Common as CO
+import ..Utilities as UT
+import ..HetIceNucleation as IN
+
+export τ_relax
+export conv_q_vap_to_q_lcl
+export conv_q_vap_to_q_icl
+export τ_vap_to_q_lcl
+export τ_vap_to_q_icl
+export INP_limiter
+export dqcld_dT
+export gamma_helper
+
+"""
+    τ_relax(ice, air_properties, q_icl, ρ)
+    τ_relax(ice, air_properties, frostenberg, q_icl, T, ρ)
+    τ_relax(ice, air_properties, fit, q_icl, T, ρ)
+
+Computes the deposition/sublimation relaxation timescale.
+
+The first method uses the prescribed cloud-ice number concentration
+`N_0` from `CloudIce`; the second derives the ice-crystal
+number from the Frostenberg et al. (2023) INP parameterization
+(see DOI: 10.5194/acp-23-10883-2023); the third uses the prescribed
+temperature fit `N_ice(T)` of [`ice_number_concentration`](@ref).
+
+Arguments:
+  - cloud microphysics and air parameters
+  - q_icl [kg/kg] - cloud ice specific humidity
+  - T [K] - air temperature (Frostenberg and temperature-fit methods only)
+  - ρ [kg/m³] - air density
+"""
+@inline function τ_relax(
+    (; ρᵢ, N_0)::CMP.CloudIce, (; D_vapor)::CMP.AirProperties, q_icl, ρ,
+)
+    return _τ_relax(ρᵢ, D_vapor, N_0, q_icl, ρ)
+end
+@inline function τ_relax(
+    (; ρᵢ)::CMP.CloudIce, (; D_vapor)::CMP.AirProperties,
+    fit::CMP.IceNumberTemperatureFit, q_icl, T, ρ,
+)
+    return _τ_relax(ρᵢ, D_vapor, ice_number_concentration(fit, T), q_icl, ρ)
+end
+
+# Kernel shared by the prescribed and the temperature-dependent ice number:
+# relaxation timescale for a given ice number concentration `N` [1/m³]
+@inline function _τ_relax(ρᵢ, D_vapor, N, q_icl, ρ)
+    FT = UT.promote_typeof(q_icl, N, ρᵢ)
+
+    # Convert N from 1/m³ to 1/kg for the radius computation
+    N_specific = N / ρ
+
+    # Compute the radius assuming spherical particles and
+    # mono-modal distribution (q in kg/kg, N in 1/kg)
+    r = cbrt((3 * q_icl) / (4 * FT(π) * max(N_specific, UT.ϵ_numerics(FT)) * ρᵢ))
+    r0 = FT(1e-6) # TODO - make a parameter
+    r_safe = max(r, r0)
+
+    # Compute the relaxation timescale (D_vapor in m²/s, N in 1/m³, r in m → τ in s)
+    τ = (4 * FT(π) * D_vapor * N * r_safe)^(-1)
+    return τ
+end
+
+"""
+    ice_number_concentration(fit::IceNumberTemperatureFit, T)
+
+Cloud ice number concentration [1/m³] prescribed as a function of temperature
+`T` [K]: `N_ice(T) = min(N_ref exp(a + b ΔT), N_max)` with `ΔT = max(T_freeze - T, 0)`,
+i.e. the fit is held at its freezing-point value above `T_freeze` and capped at
+`N_max` at cold temperatures. With the default parameters (`N_ref = 1000 m⁻³`,
+`a = -2.80`, `b = 0.262 K⁻¹`, `N_max = 1e7 m⁻³`) this gives about 6e1 m⁻³ at 0 °C,
+8e2 at -10 °C, 1e4 at -20 °C, 2e6 at -40 °C and the cap below about -46 °C.
+"""
+@inline function ice_number_concentration(
+    (; N_ref, a, b, N_max, T_freeze)::CMP.IceNumberTemperatureFit, T,
+)
+    ΔT = max(T_freeze - T, zero(T))
+    return min(N_ref * exp(a + b * ΔT), N_max)
+end
+@inline function τ_relax(
+    (; ρᵢ)::CMP.CloudIce, (; D_vapor)::CMP.AirProperties,
+    ip::CMP.Frostenberg2023, q_icl, T, ρ,
+)
+    FT = UT.promote_typeof(q_icl, T, ρᵢ, ρ)
+    # Get the estimated number of INPs in 1/m³
+    N_vol = exp(IN.INP_concentration_mean(ip, T))
+    # Convert to 1/kg for the radius computation
+    N_icl = N_vol / ρ
+
+    # Compute the radius assuming spherical particles and
+    # mono-modal distribution (q in kg/kg, N in 1/kg)
+    safe_N_icl = max(N_icl, UT.ϵ_numerics(FT))
+    r = ifelse(N_icl > UT.ϵ_numerics(FT), cbrt((3 * q_icl) / (4 * FT(π) * safe_N_icl * ρᵢ)), zero(FT))
+    r0 = FT(1e-6) # TODO - make a parameter
+    r_safe = max(r, r0)
+
+    # Compute the relaxation timescale (D_vapor in m²/s, N in 1/m³, r in m → τ in s)
+    τ = (4 * FT(π) * D_vapor * N_vol * r_safe)^(-1)
+    return τ
+end
+
+"""
+    INP_limiter(tendency, tps, T)
+
+Returns `true` when ice deposition should be suppressed:
+positive tendency (deposition) at T > T_freeze (no INPs available).
+"""
+@inline function INP_limiter(tendency, tps, T)
+    return T > TDI.T_freeze(tps) && tendency > zero(tendency)
+end
+
+"""
+    homogeneous_limiter(tendency, T, T_hom)
+
+Returns `true` when liquid condensation should be suppressed:
+positive tendency (condensation) at T < T_hom (all liquid freezes
+homogeneously below this temperature).
+"""
+@inline function homogeneous_limiter(tendency, T, T_hom)
+    return T < T_hom && tendency > zero(tendency)
+end
+
+"""
+    dqcld_dT(qᵥ_sat, L, Rᵥ, T)
+
+Computes the derivative of the saturation specific humidity with respect to
+temperature for a given phase of water.
+
+# Arguments
+- `qᵥ_sat` - saturation specific humidity [kg/kg]
+- `L` - latent heat [J/kg]
+- `Rᵥ` - gas constant for water vapor [J/kg/K]
+- `T` - temperature [K]
+"""
+@inline function dqcld_dT(qᵥ_sat, L, Rᵥ, T)
+    return qᵥ_sat * (L / (Rᵥ * T^2) - 1 / T)
+end
+
+"""
+    gamma_helper(L, cₚ_air, dqcld_dT)
+
+Computes the thermodynamic adjustment factor Γ.
+
+# Arguments
+- `L` - latent heat [J/kg]
+- `cₚ_air` - specific heat capacity of air [J/kg/K]
+- `dqcld_dT` - derivative of saturation specific humidity with respect to temperature [kg/kg/K]
+"""
+@inline function gamma_helper(L, cₚ_air, dqcld_dT)
+    return 1 + (L / cₚ_air) * dqcld_dT
+end
+
+"""
+    conv_q_vap_to_q_lcl(opt::CloudLiquidFormation, mp, tps, micro, thermo)
+    conv_q_vap_to_q_lcl(::Nothing, mp, tps, micro, thermo)
+
+Computes cloud liquid tendency from condensation and evaporation using the formulation from
+Morrison & Grabowski (2008), https://doi.org/10.1175/2007JAS2374.1, and
+Morrison & Milbrandt (2015), https://doi.org/10.1175/JAS-D-14-0065.1.
+
+# Arguments
+- `opt`: `CloudLiquidFormation()` or `nothing` (disabled)
+- `mp`: 1-moment microphysics parameters
+- `tps`: thermodynamics parameters
+- `micro`: microphysics state `(; q_tot, q_lcl, q_icl, q_rai, q_sno)`
+- `thermo`: thermodynamic state `(; ρ, T)`
+
+# Returns
+- Cloud condensate tendency [kg/kg/s]
+"""
+@inline conv_q_vap_to_q_lcl(::Nothing, mp, tps, micro, thermo) = zero(thermo.T)
+@inline conv_q_vap_to_q_lcl(
+    ::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo) =
+    _conv_q_vap_to_q_lcl_const(
+        mp.process_params.cloud_liquid_formation.τ_relax,
+        tps, micro, thermo;
+        T_hom = mp.process_params.cloud_liquid_formation.T_hom)
+
+# Kernel for `conv_q_vap_to_q_lcl` with a constant relaxation timescale `τ`.
+@inline function _conv_q_vap_to_q_lcl_const(τ, tps::TDI.PS, micro, thermo; T_hom = typeof(τ)(-Inf))
+    (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
+    (; ρ, T) = thermo
+
+    Rᵥ = TDI.Rᵥ(tps)
+    Lᵥ = TDI.Lᵥ(tps, T)
+    cₚ_air = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_icl + q_sno)
+    qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno)
+
+    qᵥ_sat_liq = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
+
+    dqsl_dT = dqcld_dT(qᵥ_sat_liq, Lᵥ, Rᵥ, T)
+    Γₗ = gamma_helper(Lᵥ, cₚ_air, dqsl_dT)
+
+    sat_excess = qᵥ - qᵥ_sat_liq
+    timescale = τ * Γₗ
+
+    # compute the tendency; the evaporation branch is bounded so that the relaxation
+    # target q + S τ = q - min(-sat_excess/Γ, q) never removes more liquid than exists
+    # and never more than closes the vapor deficit (Γ accounts for the cooling)
+    tendency = ifelse(
+        sat_excess < 0,
+        -min(-sat_excess, Γₗ * max(0, q_lcl)) / timescale,
+        sat_excess / timescale,
+    )
+    limiter = homogeneous_limiter(tendency, T, T_hom)
+    return ifelse(limiter, zero(tendency), tendency)
+end
+
+"""
+    conv_q_vap_to_q_icl(opt::ConstantTimescale, mp, tps, micro, thermo)
+    conv_q_vap_to_q_icl(opt::PrescribedIceNumber, mp, tps, micro, thermo)
+    conv_q_vap_to_q_icl(opt::TemperatureDependent, mp, tps, micro, thermo)
+    conv_q_vap_to_q_icl(opt::TemperatureDependentIceNumber, mp, tps, micro, thermo)
+    conv_q_vap_to_q_icl(::Nothing, mp, tps, micro, thermo)
+
+Computes cloud ice tendency from deposition and sublimation using the formulation from
+Morrison & Grabowski (2008), https://doi.org/10.1175/2007JAS2374.1, and
+Morrison & Milbrandt (2015), https://doi.org/10.1175/JAS-D-14-0065.1.
+
+# Arguments
+- `opt`: `ConstantTimescale()`, `PrescribedIceNumber()`, `TemperatureDependent()`,
+  `TemperatureDependentIceNumber()`, or `nothing` (disabled)
+- `mp`: 1-moment microphysics parameters
+- `tps`: thermodynamics parameters
+- `micro`: microphysics state `(; q_tot, q_lcl, q_icl, q_rai, q_sno)`
+- `thermo`: thermodynamic state `(; ρ, T)`
+
+# Returns
+- Cloud condensate tendency [kg/kg/s]
+"""
+@inline conv_q_vap_to_q_icl(::Nothing, mp, tps, micro, thermo) = zero(thermo.T)
+@inline conv_q_vap_to_q_icl(
+    ::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo) =
+    _conv_q_vap_to_q_icl_const(
+        mp.process_params.cloud_ice_formation.τ_relax, tps, micro, thermo)
+@inline function conv_q_vap_to_q_icl(
+    ::CMP.PrescribedIceNumber, mp, tps::TDI.PS, micro, thermo)
+    (; q_icl) = micro
+    (; ρ) = thermo
+    τ = τ_relax(mp.cloud.ice, mp.air_properties, q_icl, ρ)
+    return _conv_q_vap_to_q_icl_const(τ, tps, micro, thermo)
+end
+@inline function conv_q_vap_to_q_icl(
+    ::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo)
+    (; q_icl) = micro
+    (; ρ, T) = thermo
+    fit = mp.process_params.cloud_ice_formation
+    τ = τ_relax(mp.cloud.ice, mp.air_properties, fit, q_icl, T, ρ)
+    return _conv_q_vap_to_q_icl_const(τ, tps, micro, thermo)
+end
+
+# Kernel for `conv_q_vap_to_q_icl` with a constant relaxation timescale `τ`
+@inline function _conv_q_vap_to_q_icl_const(τ, tps::TDI.PS, micro, thermo)
+    (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
+    (; ρ, T) = thermo
+
+    Rᵥ = TDI.Rᵥ(tps)
+    Lₛ = TDI.Lₛ(tps, T)
+    cₚ_air = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_icl + q_sno)
+    qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno)
+
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+
+    dqsi_dT = dqcld_dT(qᵥ_sat_ice, Lₛ, Rᵥ, T)
+    Γᵢ = gamma_helper(Lₛ, cₚ_air, dqsi_dT)
+
+    sat_excess = qᵥ - qᵥ_sat_ice
+    timescale = τ * Γᵢ
+
+    # compute the tendency; the sublimation branch is bounded so that the relaxation
+    # target q + S τ = q - min(-sat_excess/Γ, q) never removes more ice than exists
+    # and never more than closes the vapor deficit (Γ accounts for the cooling)
+    tendency = ifelse(
+        sat_excess < 0,
+        -min(-sat_excess, Γᵢ * max(0, q_icl)) / timescale,
+        sat_excess / timescale,
+    )
+    limiter = INP_limiter(tendency, tps, T)
+    return ifelse(limiter, zero(tendency), tendency)
+end
+@inline function conv_q_vap_to_q_icl(
+    ::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
+    (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
+    (; ρ, T) = thermo
+    pp = mp.process_params.cloud_ice_formation
+    τ_sub = pp.τ_relax
+    τ_dep = τ_relax(mp.cloud.ice, mp.air_properties, pp.frostenberg, q_icl, T, ρ)
+
+    Rᵥ = TDI.Rᵥ(tps)
+    Lₛ = TDI.Lₛ(tps, T)
+    cₚ_air = TDI.cpₘ(tps, q_tot, q_lcl + q_rai, q_icl + q_sno)
+    qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno)
+
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+
+    dqsi_dT = dqcld_dT(qᵥ_sat_ice, Lₛ, Rᵥ, T)
+    Γᵢ = gamma_helper(Lₛ, cₚ_air, dqsi_dT)
+
+    sat_excess = qᵥ - qᵥ_sat_ice
+    sublimation_timescale = τ_sub * Γᵢ
+    deposition_timescale = τ_dep * Γᵢ
+
+    # compute the tendency (sublimation bounded as in `_conv_q_vap_to_q_icl_const`)
+    tendency = ifelse(
+        sat_excess < 0,
+        -min(-sat_excess, Γᵢ * max(0, q_icl)) / sublimation_timescale,
+        sat_excess / deposition_timescale,
+    )
+    limiter = INP_limiter(tendency, tps, T)
+    return ifelse(limiter, zero(tendency), tendency)
+end
+
+"""
+    τ_vap_to_q_lcl(opt, mp, tps, micro, thermo)
+
+Return the relaxation timescale τ [s] used by the matching `conv_q_vap_to_q_lcl`
+method for the given state, excluding the thermodynamic factor Γ (which is already
+contained in the returned tendency), or `Inf` when the process is disabled
+(`opt === nothing`).
+
+Together with the tendency `S` this defines the equilibrium condensate
+`q* = q + S τ` toward which the phase change relaxes at rate `1/τ`, so that a
+caller can use the time average of the exact relaxation over a step,
+`Δq = S τ (1 - exp(-Δt/τ))` (Morrison & Milbrandt 2015, Appendix C),
+instead of treating `S` as a constant. This matters when τ is much shorter than
+the step, e.g. for `PrescribedIceNumber` with a large prescribed ice number
+concentration (τ of a few seconds).
+
+# Arguments
+- `opt`: `CloudLiquidFormation()` or `nothing`
+- `mp`: 1-moment microphysics parameters
+- `tps`: thermodynamics parameters
+- `micro`: microphysics state `(; q_tot, q_lcl, q_icl, q_rai, q_sno)`
+- `thermo`: thermodynamic state `(; ρ, T)`
+"""
+@inline τ_vap_to_q_lcl(::Nothing, mp, tps::TDI.PS, micro, thermo) = typeof(thermo.T)(Inf)
+@inline τ_vap_to_q_lcl(::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo) =
+    mp.process_params.cloud_liquid_formation.τ_relax
+
+"""
+    τ_vap_to_q_icl(opt, mp, tps, micro, thermo)
+
+Return the relaxation timescale τ [s] used by the matching `conv_q_vap_to_q_icl`
+method for the given state, excluding the thermodynamic factor Γ, or `Inf` when the
+process is disabled (`opt === nothing`). For `TemperatureDependent` this is the
+sublimation timescale when the air is subsaturated over ice and the Frostenberg
+deposition timescale otherwise, matching the tendency. See [`τ_vap_to_q_lcl`](@ref)
+for how the timescale is used.
+
+# Arguments
+- `opt`: `ConstantTimescale()`, `PrescribedIceNumber()`, `TemperatureDependent()`,
+  `TemperatureDependentIceNumber()`, or `nothing`
+- `mp`: 1-moment microphysics parameters
+- `tps`: thermodynamics parameters
+- `micro`: microphysics state `(; q_tot, q_lcl, q_icl, q_rai, q_sno)`
+- `thermo`: thermodynamic state `(; ρ, T)`
+"""
+@inline τ_vap_to_q_icl(::Nothing, mp, tps::TDI.PS, micro, thermo) = typeof(thermo.T)(Inf)
+@inline τ_vap_to_q_icl(::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo) =
+    mp.process_params.cloud_ice_formation.τ_relax
+@inline τ_vap_to_q_icl(::CMP.PrescribedIceNumber, mp, tps::TDI.PS, micro, thermo) =
+    τ_relax(mp.cloud.ice, mp.air_properties, micro.q_icl, thermo.ρ)
+@inline τ_vap_to_q_icl(::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo) =
+    τ_relax(
+        mp.cloud.ice, mp.air_properties, mp.process_params.cloud_ice_formation,
+        micro.q_icl, thermo.T, thermo.ρ,
+    )
+@inline function τ_vap_to_q_icl(::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
+    (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
+    (; ρ, T) = thermo
+    pp = mp.process_params.cloud_ice_formation
+    qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno)
+    qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+    τ_dep = τ_relax(mp.cloud.ice, mp.air_properties, pp.frostenberg, q_icl, T, ρ)
+    # promote the constant branch to the state type so that `ifelse` is type stable
+    return ifelse(qᵥ - qᵥ_sat_ice < 0, oftype(τ_dep, pp.τ_relax), τ_dep)
+end
+
+### -------------------------- ###
+### 1-moment terminal velocity ###
+### -------------------------- ###
+
+"""
+    terminal_velocity(sediment::CloudLiquid, vel::StokesRegimeVelType, ρₐ, q)
+    terminal_velocity(sediment::CloudIce, vel::Chen2022VelTypeSmallIce, ρₐ, q)
+
+Computes mass-weighted average terminal velocity for cloud droplets or ice crystals
+assuming a monodisperse size distribution.
+
+- **Cloud Liquid**: Uses Stokes Law (v ∝ D²), valid for small droplets (Re < 1).
+- **Cloud Ice**: Uses Chen et al. (2022) parameterization,
+  [DOI: 10.1016/j.atmosres.2022.106171](https://doi.org/10.1016/j.atmosres.2022.106171)
+
+# Arguments
+- `sediment` - cloud liquid or ice parameters struct (provides density and N_0)
+- `vel` - velocity parameters (StokesRegimeVelType for liquid, Chen2022VelTypeSmallIce for ice)
+- `ρₐ` - air density [kg/m³]
+- `q` - cloud liquid water or ice specific content [kg/kg]
+
+# Returns
+- Mass-weighted terminal velocity [m/s]
+"""
+function terminal_velocity(
+    (; ρw, N_0)::CMP.CloudLiquid{FT},
+    vel::CMP.StokesRegimeVelType{FT},
+    ρₐ::FT,
+    q::FT,
+) where {FT}
+    # Stokes law: v(D) = C * D^2, valid for D < ~80 μm (Re < 1)
+    v_term = CO.particle_terminal_velocity(vel, ρₐ)
+    # `clamp_to_nonneg` is domain sanitization for the cbrt below (keeps the discarded
+    # ifelse branch finite); the physical threshold is the `q > ϵ_numerics` gate.
+    safe_q = UT.clamp_to_nonneg(q)
+    # Mean volume diameter from assumed number concentration
+    D = cbrt(FT(6 / π) * ρₐ * safe_q / N_0 / ρw)
+    fall_w = v_term(D)
+    return ifelse(q > UT.ϵ_numerics(FT), fall_w, zero(FT))
+end
+
+function terminal_velocity(
+    (; ρᵢ, N_0)::CMP.CloudIce{FT},
+    vel::CMP.Chen2022VelTypeSmallIce{FT},
+    ρₐ::FT,
+    q::FT,
+) where {FT}
+    v_term = CO.particle_terminal_velocity(vel, ρₐ, ρᵢ)
+    # `clamp_to_nonneg` is domain sanitization for the cbrt below (keeps the discarded
+    # ifelse branch finite); the physical threshold is the `q > ϵ_numerics` gate.
+    safe_q = UT.clamp_to_nonneg(q)
+    # Mean volume diameter from assumed number concentration
+    D = cbrt(FT(6 / π) * ρₐ * safe_q / N_0 / ρᵢ)
+    fall_w = max(FT(0), v_term(D))
+    return ifelse(q > UT.ϵ_numerics(FT), fall_w, zero(FT))
+end
+
+end #module MicrophysicsNonEq.jl
