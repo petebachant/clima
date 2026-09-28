@@ -1,0 +1,1700 @@
+using Test
+import Base
+import Dates
+using Profile
+
+using BenchmarkTools
+import ProfileCanvas
+import NCDatasets
+import ClimaCore
+import ClimaCore.Fields
+import ClimaCore.Spaces
+import ClimaCore.Geometry
+import ClimaCore.CommonSpaces
+import ClimaCore.Meshes
+import ClimaCore.Operators
+import ClimaComms
+
+import ClimaDiagnostics
+import ClimaDiagnostics.Writers
+
+import ClimaInterpolations
+
+import ClimaUtilities.TimeManager: ITime
+
+include("TestTools.jl")
+
+# The temporary directory where we write the file cannot be in /tmp, it has
+# to be on disk
+output_dir = mktempdir(pwd())
+
+@testset "DictWriter" begin
+    writer = Writers.DictWriter()
+
+    # Test with some strings and floats instead of actual Fields and ScheduledDiagnostics
+    Writers.write_field!(writer, 10.0, "mytest", nothing, nothing, 0.0)
+    @test writer.dict["mytest"][0.0] == 10.0
+    Writers.write_field!(writer, 20.0, "mytest", nothing, nothing, 2.0)
+    @test writer.dict["mytest"][2.0] == 20.0
+    Writers.write_field!(writer, 50.0, "mytest2", nothing, nothing, 8.0)
+    @test writer.dict["mytest2"][8.0] == 50.0
+
+    @test issorted(writer.dict["mytest"])
+end
+
+@testset "Target coordinates" begin
+    NUM = 50
+
+    # The order returned from target_coordinates should always be ((lon, lat), vertical) or ((x, y), vertical).
+    # As a result, hcoords_from_horizontal_space should return a matrix of LatLongPoint or XYPoint where each axis of the matrix corresponds to lon and lat or x and y respectively.
+    # Test spherical shell space
+    space = SphericalShellSpace()
+    hpts, vpts = Writers.target_coordinates(
+        space,
+        (NUM, 2NUM, 3NUM),
+        ClimaDiagnostics.Writers.FakePressureLevelsMethod(),
+    )
+    lons, lats = hpts
+    @test lons == range(-180.0, 180.0, NUM)
+    @test lats == range(-90.0, 90.0, 2NUM)
+    # It is a bit difficult to test the results of FakePressureLevelsMethod, so
+    # we just check the length of vpts
+    @test length(vpts) == 3NUM
+
+    horizontal_space = Spaces.horizontal_space(space)
+    hcoords = Writers.hcoords_from_horizontal_space(
+        horizontal_space,
+        Meshes.domain(Spaces.topology(horizontal_space)),
+        hpts,
+    )
+    @test size(hcoords) == (NUM, 2NUM)
+    @test hcoords ==
+          [Geometry.LatLongPoint(lat, lon) for lon in lons, lat in lats]
+
+    hpts, vpts = Writers.target_coordinates(
+        space,
+        (NUM, 2NUM, 3NUM),
+        ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+    lons, lats = hpts
+    @test lons == range(-180.0, 180.0, NUM)
+    @test lats == range(-90.0, 90.0, 2NUM)
+    # LevelsMethod override 3NUM to choose points that correspond to the center of the cells
+    @test length(vpts) == 10
+
+    # Test BoxSpace with lonlat = false
+    xyboxspace = BoxSpace(; ylim = (-Float64(1), Float64(2)))
+    hpts, vpts = Writers.target_coordinates(
+        xyboxspace,
+        (NUM, 2NUM, 3NUM),
+        ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+    xpts, ypts = hpts
+    @test xpts == range(-1, 1, NUM)
+    @test ypts == range(-1, 2, 2NUM)
+    @test length(vpts) == 10
+
+    horizontal_space = Spaces.horizontal_space(xyboxspace)
+    hcoords = Writers.hcoords_from_horizontal_space(
+        horizontal_space,
+        Meshes.domain(Spaces.topology(horizontal_space)),
+        hpts,
+    )
+    @test size(hcoords) == (NUM, 2NUM)
+    @test hcoords == [Geometry.XYPoint(x, y) for x in xpts, y in ypts]
+
+    # Test BoxSpace with lonlat = true
+    longlatboxspace =
+        BoxSpace(; lonlat = true, ylim = (-Float64(1), Float64(2)))
+    hpts, vpts = Writers.target_coordinates(
+        longlatboxspace,
+        (NUM, 2NUM, 3NUM),
+        ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+    lons, lats = hpts
+    @test lons == range(-1, 2, NUM)
+    @test lats == range(-1, 1, 2NUM)
+    @test length(vpts) == 10
+
+    horizontal_space = Spaces.horizontal_space(longlatboxspace)
+    hcoords = Writers.hcoords_from_horizontal_space(
+        horizontal_space,
+        Meshes.domain(Spaces.topology(horizontal_space)),
+        hpts,
+    )
+    @test size(hcoords) == (NUM, 2NUM)
+    @test hcoords ==
+          [Geometry.LatLongPoint(lat, lon) for lon in lons, lat in lats]
+
+    # Test column spaces
+    colcenterspace = ColumnCenterFiniteDifferenceSpace()
+    vpts = Writers.target_coordinates(
+        colcenterspace,
+        (NUM,),
+        ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+    @test length(vpts) == 10
+
+    colfacespace = ColumnFaceFiniteDifferenceSpace()
+    vpts = Writers.target_coordinates(
+        colfacespace,
+        (NUM,),
+        ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+    @test length(vpts) == 10
+
+    # Test horizontal space
+    horizontal_space = ClimaCore.Spaces.level(space, 1)
+    hpts = Writers.target_coordinates(horizontal_space, (NUM, 2NUM))
+    lons, lats = hpts
+    @test lons == range(-180, 180, NUM)
+    @test lats == range(-90, 90, 2NUM)
+
+    hcoords = Writers.hcoords_from_horizontal_space(
+        horizontal_space,
+        Meshes.domain(Spaces.topology(horizontal_space)),
+        hpts,
+    )
+    @test size(hcoords) == (NUM, 2NUM)
+    @test hcoords ==
+          [Geometry.LatLongPoint(lat, lon) for lon in lons, lat in lats]
+end
+
+@testset "NetCDFWriter" begin
+    @testset "default_num_points" begin
+        @test Writers.default_num_points(
+            CommonSpaces.ExtrudedCubedSphereSpace(;
+                z_elem = 10,
+                z_min = 0,
+                z_max = 1,
+                radius = 10,
+                h_elem = 10,
+                n_quad_points = 4,
+                staggering = CommonSpaces.CellCenter(),
+            ),
+        ) == (120, 60, 10)
+
+        @test Writers.default_num_points(
+            CommonSpaces.SliceXZSpace(;
+                z_elem = 10,
+                x_min = 0,
+                x_max = 1,
+                z_min = 0,
+                z_max = 1,
+                periodic_x = false,
+                n_quad_points = 4,
+                x_elem = 4,
+                staggering = CommonSpaces.CellCenter(),
+            ),
+        ) == (12, 10)
+        @test Writers.default_num_points(
+            CommonSpaces.Box3DSpace(;
+                z_elem = 10,
+                x_min = 0,
+                x_max = 1,
+                y_min = 0,
+                y_max = 1,
+                z_min = 0,
+                z_max = 10,
+                periodic_x = false,
+                periodic_y = false,
+                n_quad_points = 4,
+                x_elem = 3,
+                y_elem = 4,
+                staggering = CommonSpaces.CellCenter(),
+            ),
+        ) == (9, 12, 10)
+    end
+
+    space = SphericalShellSpace()
+    field = Fields.coordinate_field(space).z
+
+    # Number of interpolation points
+    NUM = 50
+
+    writer = Writers.NetCDFWriter(
+        space,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+        sync_schedule = ClimaDiagnostics.Schedules.DivisorSchedule(2),
+        z_sampling_method = ClimaDiagnostics.Writers.FakePressureLevelsMethod(),
+    )
+
+    writer_no_vert_interpolation = Writers.NetCDFWriter(
+        space,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+        z_sampling_method = ClimaDiagnostics.Writers.LevelsMethod(),
+    )
+
+    # Check Base.show
+    @test occursin("0 files open", "$writer")
+
+    u = (; field)
+    # FIXME: We are hardcoding the start date
+    p = (; start_date = Dates.DateTime(1453, 5, 29))
+    t = 10.0
+
+    function compute!(out, u, p, t)
+        if isnothing(out)
+            return u.field
+        else
+            out .= u.field
+        end
+    end
+
+    diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name",
+        output_long_name = "My Long Name",
+        output_writer = writer,
+    )
+    Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+
+    @test writer.unsynced_datasets ==
+          Set((writer.open_files[joinpath(output_dir, "my_short_name.nc")],))
+
+    Writers.sync(writer)
+    @test writer.unsynced_datasets == Set{NCDatasets.NCDataset}()
+
+    NCDatasets.NCDataset(joinpath(output_dir, "my_short_name.nc")) do nc
+        @test nc["ABC"].attrib["short_name"] == "ABC"
+        @test nc["ABC"].attrib["long_name"] == "My Long Name"
+        @test nc["ABC"].attrib["units"] == ""
+        @test nc["ABC"].attrib["start_date"] ==
+              string(Dates.DateTime(1453, 5, 29))
+        @test size(nc["ABC"]) == (2, NUM, 2NUM, 3NUM)
+        @test nc["time"][1] == 10.0
+        @test nc["date"][1] == Dates.DateTime(1453, 5, 29) + Dates.Second(10.0)
+        @test nc["time"].attrib["standard_name"] == "time"
+        @test nc["time"].attrib["long_name"] == "Time"
+        @test nc["time"].attrib["axis"] == "T"
+        @test nc["lon"].attrib["standard_name"] == "longitude"
+        @test nc["lon"].attrib["long_name"] == "Longitude"
+        @test nc["lon"].attrib["axis"] == "X"
+        @test nc["lat"].attrib["standard_name"] == "latitude"
+        @test nc["lat"].attrib["long_name"] == "Latitude"
+        @test nc["lat"].attrib["axis"] == "Y"
+
+        # Test dimensions
+        hpts, vpts = Writers.target_coordinates(
+            space,
+            (NUM, 2NUM, 3NUM),
+            ClimaDiagnostics.Writers.FakePressureLevelsMethod(),
+        )
+        lon, lat = hpts
+        @test nc["lon"][:] == lon
+        @test nc["lat"][:] == lat
+        @test nc["z"][:] == vpts
+
+        # Test bounds
+        @test nc["time_bnds"][:, 1] == [0.0; 10.0]
+        @test nc["date_bnds"][:, 1] == [
+            Dates.DateTime(1453, 5, 29)
+            Dates.DateTime(1453, 5, 29) + Dates.Second(10.0)
+        ]
+    end
+
+    # Disable vertical interpolation
+    diagnostic_novert = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC_novert",
+        ),
+        output_short_name = "my_short_name_novert",
+        output_long_name = "My Long Name",
+        output_writer = writer_no_vert_interpolation,
+    )
+    Writers.interpolate_field!(
+        writer_no_vert_interpolation,
+        field,
+        diagnostic_novert,
+        u,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        writer_no_vert_interpolation,
+        field,
+        diagnostic_novert,
+        u,
+        p,
+        t,
+    )
+    # Write a second time
+    Writers.write_field!(
+        writer_no_vert_interpolation,
+        field,
+        diagnostic_novert,
+        u,
+        p,
+        t,
+    )
+
+    NCDatasets.NCDataset(joinpath(output_dir, "my_short_name_novert.nc")) do nc
+        # Test dimensions
+        hpts, vpts = Writers.target_coordinates(
+            space,
+            (NUM, 2NUM, 3NUM),
+            ClimaDiagnostics.Writers.LevelsMethod(),
+        )
+        lon, lat = hpts
+        @test nc["lon"][:] == lon
+        @test nc["lat"][:] == lat
+        @test nc["z"][:] == vpts
+    end
+
+    # Test with hypsography
+    space_with_hypsography = SphericalShellSpace(; use_hypsography = true)
+    field_hypsography = Fields.coordinate_field(space_with_hypsography).z
+
+    hypsography_writer = Writers.NetCDFWriter(
+        space_with_hypsography,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+    )
+
+    hypsography_diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name_hypsography",
+        output_long_name = "My Long Name",
+        output_writer = hypsography_writer,
+    )
+
+    space_with_hypsography_u = (; field_hypsography)
+    Writers.interpolate_field!(
+        hypsography_writer,
+        field_hypsography,
+        hypsography_diagnostic,
+        space_with_hypsography_u,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        hypsography_writer,
+        field_hypsography,
+        hypsography_diagnostic,
+        space_with_hypsography_u,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        hypsography_writer,
+        field_hypsography,
+        hypsography_diagnostic,
+        space_with_hypsography_u,
+        p,
+        t,
+    )
+
+    NCDatasets.NCDataset(
+        joinpath(output_dir, "my_short_name_hypsography.nc"),
+    ) do nc
+        hpts, vpts = Writers.target_coordinates(
+            space_with_hypsography,
+            (NUM, 2NUM, 3NUM),
+            ClimaDiagnostics.Writers.LevelsMethod(),
+        )
+        lon, lat = hpts
+        @test nc["lon"][:] == lon
+        @test nc["lat"][:] == lat
+        @test nc["z_reference"][:] == vpts
+        @test size(nc["z_physical"]) == (NUM, 2NUM, length(vpts))
+    end
+
+    # Check boxes
+    xyboxspace = BoxSpace(; ylim = (-Float64(1), Float64(2)))
+    xyboxfield = Fields.coordinate_field(xyboxspace).z
+
+    xyboxwriter = Writers.NetCDFWriter(
+        xyboxspace,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+    )
+    xyboxdiagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name_xybox",
+        output_long_name = "My Long Name",
+        output_writer = xyboxwriter,
+    )
+    xyboxu = (; xyboxfield)
+    Writers.interpolate_field!(
+        xyboxwriter,
+        xyboxfield,
+        xyboxdiagnostic,
+        xyboxu,
+        p,
+        t,
+    )
+    Writers.write_field!(xyboxwriter, xyboxfield, xyboxdiagnostic, xyboxu, p, t)
+    Writers.write_field!(xyboxwriter, xyboxfield, xyboxdiagnostic, xyboxu, p, t)
+
+    NCDatasets.NCDataset(joinpath(output_dir, "my_short_name_xybox.nc")) do nc
+        # Test dimensions
+        hpts, vpts = Writers.target_coordinates(
+            xyboxspace,
+            (NUM, 2NUM, 3NUM),
+            ClimaDiagnostics.Writers.LevelsMethod(),
+        )
+        lon, lat = hpts
+        @test nc["x"][:] == lon
+        @test nc["y"][:] == lat
+        @test nc["z"][:] == vpts
+    end
+
+    longlatboxspace =
+        BoxSpace(; lonlat = true, ylim = (-Float64(1), Float64(2)))
+    longlatboxfield = Fields.coordinate_field(longlatboxspace).z
+
+    longlatboxwriter = Writers.NetCDFWriter(
+        longlatboxspace,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+    )
+    longlatboxdiagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name_longlatbox",
+        output_long_name = "My Long Name",
+        output_writer = longlatboxwriter,
+    )
+    longlatboxu = (; longlatboxfield)
+    Writers.interpolate_field!(
+        longlatboxwriter,
+        longlatboxfield,
+        longlatboxdiagnostic,
+        longlatboxu,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        longlatboxwriter,
+        longlatboxfield,
+        longlatboxdiagnostic,
+        longlatboxu,
+        p,
+        t,
+    )
+    # Write a second time, to check consistency
+    Writers.write_field!(
+        longlatboxwriter,
+        longlatboxfield,
+        longlatboxdiagnostic,
+        longlatboxu,
+        p,
+        t,
+    )
+
+    NCDatasets.NCDataset(
+        joinpath(output_dir, "my_short_name_longlatbox.nc"),
+    ) do nc
+        # Test dimensions
+        hpts, vpts = Writers.target_coordinates(
+            longlatboxspace,
+            (NUM, 2NUM, 3NUM),
+            longlatboxwriter.z_sampling_method,
+        )
+
+        lon, lat = hpts
+        @test nc["lon"][:] == lon
+        @test nc["lat"][:] == lat
+        @test nc["z"][:] == vpts
+    end
+
+    # Check columns
+    if pkgversion(ClimaCore) >= v"0.14.23"
+        # Center space
+        for (i, colspace) in enumerate((
+            ColumnCenterFiniteDifferenceSpace(),
+            ColumnFaceFiniteDifferenceSpace(),
+        ))
+            colfield = Fields.coordinate_field(colspace).z
+
+            colwriter =
+                Writers.NetCDFWriter(colspace, output_dir; num_points = (NUM,))
+            coldiagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+                variable = ClimaDiagnostics.DiagnosticVariable(;
+                    compute!,
+                    short_name = "ABC",
+                ),
+                output_short_name = "my_short_name_c$(i)",
+                output_long_name = "My Long Name",
+                output_writer = colwriter,
+            )
+            colu = (; colfield)
+            Writers.interpolate_field!(
+                colwriter,
+                colfield,
+                coldiagnostic,
+                colu,
+                p,
+                t,
+            )
+            Writers.write_field!(colwriter, colfield, coldiagnostic, colu, p, t)
+            # Write a second time, to check consistency
+            Writers.write_field!(colwriter, colfield, coldiagnostic, colu, p, t)
+            NCDatasets.NCDataset(
+                joinpath(output_dir, "my_short_name_c$(i).nc"),
+            ) do nc
+                # Test dimensions
+                vpts = Writers.target_coordinates(
+                    colspace,
+                    (NUM,),
+                    colwriter.z_sampling_method,
+                )
+
+                @test nc["z"][:] == vpts
+            end
+        end
+    end
+
+    # Test 1D column field with 3D-initialized writer
+    # This tests the fix for "Incompatible z dimension already exists" error
+    colspace_for_3d_writer = ColumnCenterFiniteDifferenceSpace()
+    colfield_for_3d_writer = Fields.coordinate_field(colspace_for_3d_writer).z
+    colu_for_3d_writer = (; colfield_for_3d_writer)
+
+    # Reuse the existing 3D writer
+    col_from_3d_diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute! = (out, u, p, t) -> begin
+                if isnothing(out)
+                    return u.colfield_for_3d_writer
+                else
+                    out .= u.colfield_for_3d_writer
+                end
+            end,
+            short_name = "ABC_col_from_3d",
+        ),
+        output_short_name = "my_short_name_col_from_3d",
+        output_long_name = "Column from 3D writer",
+        output_writer = writer,
+    )
+    Writers.interpolate_field!(
+        writer,
+        colfield_for_3d_writer,
+        col_from_3d_diagnostic,
+        colu_for_3d_writer,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        writer,
+        colfield_for_3d_writer,
+        col_from_3d_diagnostic,
+        colu_for_3d_writer,
+        p,
+        t,
+    )
+    # Write a second time to check consistency
+    Writers.write_field!(
+        writer,
+        colfield_for_3d_writer,
+        col_from_3d_diagnostic,
+        colu_for_3d_writer,
+        p,
+        t,
+    )
+    NCDatasets.NCDataset(
+        joinpath(output_dir, "my_short_name_col_from_3d.nc"),
+    ) do nc
+        # The z dimension should match the writer's vertical interpolation grid (3*NUM = 150)
+        @test size(nc["ABC_col_from_3d"]) == (2, 3NUM)
+    end
+
+    ###############
+    # Point Space #
+    ###############
+    point_val = 3.14
+    point_space =
+        Spaces.PointSpace(ClimaComms.context(), Geometry.ZPoint(point_val))
+    point_field = Fields.coordinate_field(point_space)
+    point_writer = Writers.NetCDFWriter(point_space, output_dir)
+
+    point_u = (; field = point_field)
+
+    point_diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name_point",
+        output_long_name = "My Long Name Point",
+        output_writer = point_writer,
+    )
+    point_writer.preallocated_output_arrays[point_diagnostic] = [point_val]
+    # No interpolation needed for point space
+    Writers.write_field!(
+        point_writer,
+        point_field,
+        point_diagnostic,
+        point_u,
+        p,
+        t,
+    )
+    # Write a second time
+    Writers.write_field!(
+        point_writer,
+        point_field,
+        point_diagnostic,
+        point_u,
+        p,
+        t,
+    )
+    close(point_writer)
+
+    NCDatasets.NCDataset(joinpath(output_dir, "my_short_name_point.nc")) do nc
+        @test nc["ABC"][:] == [point_val, point_val]
+    end
+
+    ###################
+    # Horizontal Space#
+    ###################
+
+    horizontal_space = ClimaCore.Spaces.level(space, 1)
+    horizontal_field = Fields.coordinate_field(horizontal_space).z
+    horizontal_writer = Writers.NetCDFWriter(
+        horizontal_space,
+        output_dir;
+        num_points = (NUM, 2NUM),
+    )
+    horizontal_u = (; field = horizontal_field)
+
+    horizontal_diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name_horizontal",
+        output_long_name = "My Long Name Point Horizontal",
+        output_writer = horizontal_writer,
+    )
+
+    Writers.interpolate_field!(
+        horizontal_writer,
+        horizontal_field,
+        horizontal_diagnostic,
+        horizontal_u,
+        p,
+        t,
+    )
+    Writers.write_field!(
+        horizontal_writer,
+        horizontal_field,
+        horizontal_diagnostic,
+        horizontal_u,
+        p,
+        t,
+    )
+    # Write a second time
+    Writers.write_field!(
+        horizontal_writer,
+        horizontal_field,
+        horizontal_diagnostic,
+        horizontal_u,
+        p,
+        t,
+    )
+    close(horizontal_writer)
+    NCDatasets.NCDataset(
+        joinpath(output_dir, "my_short_name_horizontal.nc"),
+    ) do nc
+        @test size(nc["ABC"]) == (2, NUM, 2NUM)
+
+        lon, lat = Writers.target_coordinates(horizontal_space, (NUM, 2NUM))
+        @test nc["lon"][:] == lon
+        @test nc["lat"][:] == lat
+    end
+
+    ###############
+    # Performance #
+    ###############
+
+    # Profile interpolate
+    Profile.@profile Writers.interpolate_field!(
+        writer,
+        field,
+        diagnostic,
+        u,
+        p,
+        t,
+    )
+    ProfileCanvas.html_file("flame_interpolate_netcdf.html", Profile.fetch())
+    Profile.clear()
+
+    # Profile write
+    Profile.@profile Writers.write_field!(writer, field, diagnostic, u, p, t)
+    ProfileCanvas.html_file("flame_write_netcdf.html", Profile.fetch())
+
+    # Benchmark write
+    timing_write_field = @benchmark Writers.write_field!(
+        $writer,
+        $field,
+        $diagnostic,
+        $u,
+        $p,
+        $t,
+    )
+
+    # Compare against pure NCDatasets
+    function add_nc(nc, outarray, p)
+        v = nc["my_short_name"]
+        temporal_size, spatial_size... = size(v)
+        time_index = temporal_size + 1
+        t = 10.0 * time_index
+        nc["time"][time_index] = t
+        nc["date"][time_index] = string(p.start_date + Dates.Second(round(t)))
+        v[time_index, :, :, :] = outarray
+    end
+
+    output_path = joinpath(output_dir, "clean_netcdf.nc")
+    nc = NCDatasets.NCDataset(output_path, "c")
+    NCDatasets.defDim(nc, "time", Inf)
+    NCDatasets.defVar(nc, "time", Float64, ("time",))
+    NCDatasets.defVar(nc, "date", String, ("time",))
+    NCDatasets.defDim(nc, "x", NUM)
+    NCDatasets.defDim(nc, "y", 2NUM)
+    NCDatasets.defDim(nc, "z", 3NUM)
+    v = NCDatasets.defVar(
+        nc,
+        "my_short_name",
+        Float64,
+        ("time", "x", "y", "z"),
+        deflatelevel = writer.compression_level,
+    )
+    outarray = Array(writer.remappers["ABC"]._interpolated_values)
+    v[1, :, :, :] = outarray
+
+    timing_ncdataset = @benchmark $add_nc($nc, $outarray, $p)
+
+    println("Our writer")
+    show(stdout, MIME"text/plain"(), timing_write_field)
+    println()
+    println("NCDatasets")
+    show(stdout, MIME"text/plain"(), timing_ncdataset)
+    println()
+end
+
+@testset "NetCDFWriter write field time test" begin
+    space = SphericalShellSpace(FT = Float32)
+    field = Fields.coordinate_field(space).z
+
+    # Number of interpolation points
+    NUM = 50
+
+    writer = Writers.NetCDFWriter(
+        space,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+        sync_schedule = ClimaDiagnostics.Schedules.DivisorSchedule(2),
+        z_sampling_method = ClimaDiagnostics.Writers.FakePressureLevelsMethod(),
+    )
+
+    u = (; field)
+    # FIXME: We are hardcoding the start date
+    p = (; start_date = Dates.DateTime(2010, 1))
+    # `ITime` should save the times as `Float64`
+    # Float32(1000 * 20995200.0) |> Dates.Millisecond is not equal to
+    # 20_995_200_000 milliseconds, but it is true for Float64
+    t = ITime(
+        20_995_200,
+        period = Dates.Second(1),
+        epoch = Dates.DateTime(2010, 1),
+    )
+
+    function compute!(out, u, p, t)
+        if isnothing(out)
+            return u.field
+        else
+            out .= u.field
+        end
+    end
+
+    diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "timetest",
+        output_long_name = "My Long Name",
+        output_writer = writer,
+    )
+    Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+
+    # This is div(2^53, 1000), since 2^53 + 1 is the first integer that cannot be
+    # represented exactly as a Float64 due to rounding error
+    # Divide by 1000 because time conversion function will go through
+    # milliseconds (e.g. see the conversion from seconds to dates in
+    # write_field!)
+    t = ITime(
+        div(2^53, 1000),
+        period = Dates.Second(1),
+        epoch = Dates.DateTime(2010, 1),
+    )
+    Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+
+    NCDatasets.NCDataset(joinpath(output_dir, "timetest.nc")) do nc
+        times = nc["time"][:]
+        @test eltype(times) == Float64
+        @test Dates.Second(Dates.Millisecond(round(1000 * times[1]))) ==
+              Dates.Second(20_995_200)
+
+        @test Dates.Second(Dates.Millisecond(round(1000 * times[2]))) ==
+              Dates.Second(div(2^53, 1000))
+    end
+end
+
+@testset "NetCDFWriter time reductions behavior" begin
+    space = SphericalShellSpace(FT = Float32)
+    field = Fields.coordinate_field(space).z
+
+    NUM = 10
+
+    start_date = Dates.DateTime(2010, 1, 1)
+
+    function compute!(out, u, p, t)
+        if isnothing(out)
+            return u.field
+        else
+            out .= u.field
+        end
+    end
+
+    u = (; field)
+    p = (; start_date = start_date)
+
+    @testset "Instantaneous diagnostics" begin
+        writer = Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            start_date = start_date,
+        )
+
+        diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+            variable = ClimaDiagnostics.DiagnosticVariable(;
+                compute!,
+                short_name = "INST",
+            ),
+            output_short_name = "instant_test",
+            output_long_name = "Instantaneous Test",
+            output_writer = writer,
+        )
+
+        t1 = 10.0
+        t2 = 20.0
+        t3 = 30.0
+        for t in [t1, t2, t3]
+            Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+            Writers.write_field!(writer, field, diagnostic, u, p, t)
+        end
+
+        NCDatasets.NCDataset(joinpath(output_dir, "instant_test.nc")) do nc
+            @test nc["time"] == [t1, t2, t3]
+
+            dates = [
+                start_date + Dates.Millisecond(round(1000 * t1)),
+                start_date + Dates.Millisecond(round(1000 * t2)),
+                start_date + Dates.Millisecond(round(1000 * t3)),
+            ]
+            @test nc["date"] == dates
+
+            @test nc["time_bnds"][:, 1] == [0.0; t1]
+            @test nc["time_bnds"][:, 2] == [t1; t2]
+            @test nc["time_bnds"][:, 3] == [t2; t3]
+
+            @test nc["date_bnds"][:, 1] ==
+                  [start_date, start_date + Dates.Second(t1)]
+            @test nc["date_bnds"][:, 2] ==
+                  [start_date + Dates.Second(t1), start_date + Dates.Second(t2)]
+            @test nc["date_bnds"][:, 3] ==
+                  [start_date + Dates.Second(t2), start_date + Dates.Second(t3)]
+        end
+
+        close(writer)
+    end
+
+    @testset "Reduced diagnostics (average)" begin
+        writer = Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            start_date = start_date,
+        )
+
+        diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+            variable = ClimaDiagnostics.DiagnosticVariable(;
+                compute!,
+                short_name = "REDUCED",
+            ),
+            output_short_name = "reduced_test",
+            output_long_name = "Reduced Test",
+            output_writer = writer,
+            reduction_time_func = (+),
+        )
+
+        t1 = 10.0
+        t2 = 20.0
+        t3 = 30.0
+        for t in [t1, t2, t3]
+            Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+            Writers.write_field!(writer, field, diagnostic, u, p, t)
+        end
+
+        NCDatasets.NCDataset(joinpath(output_dir, "reduced_test.nc")) do nc
+            @test nc["time"] == [0.0, t1, t2]
+
+            @test nc["date"][1] == start_date
+            @test nc["date"][2] == start_date + Dates.Second(t1)
+            @test nc["date"][3] == start_date + Dates.Second(t2)
+
+            @test nc["time_bnds"][:, 1] == [0.0; t1]
+            @test nc["time_bnds"][:, 2] == [t1; t2]
+            @test nc["time_bnds"][:, 3] == [t2; t3]
+
+            @test nc["date_bnds"][:, 1] ==
+                  [start_date, start_date + Dates.Second(t1)]
+            @test nc["date_bnds"][:, 2] ==
+                  [start_date + Dates.Second(t1), start_date + Dates.Second(t2)]
+            @test nc["date_bnds"][:, 3] ==
+                  [start_date + Dates.Second(t2), start_date + Dates.Second(t3)]
+        end
+
+        close(writer)
+    end
+
+    @testset "Calendar-based reductions (monthly)" begin
+        writer = Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            start_date = start_date,
+        )
+
+        # Test monthly to verify variable-length periods work correctly
+        # (Jan=31 days, Feb=28 days). This covers the general case since
+        # the code doesn't distinguish between different calendar periods.
+        diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+            variable = ClimaDiagnostics.DiagnosticVariable(;
+                compute!,
+                short_name = "monthly",
+            ),
+            output_writer = writer,
+            reduction_time_func = (+),
+            output_schedule_func = ClimaDiagnostics.Schedules.EveryCalendarDtSchedule(
+                Dates.Month(1);
+                start_date,
+            ),
+        )
+
+        times = [31, 59] .* 86400.0  # End of Jan and Feb in seconds
+        for t in times
+            Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+            Writers.write_field!(writer, field, diagnostic, u, p, t)
+        end
+
+        NCDatasets.NCDataset(joinpath(output_dir, "monthly_1M_+.nc")) do nc
+            @test nc["date"][:] ==
+                  [Dates.DateTime(2010, 1, 1), Dates.DateTime(2010, 2, 1)]
+            @test nc["date_bnds"][1, :] ==
+                  [Dates.DateTime(2010, 1, 1), Dates.DateTime(2010, 2, 1)]
+            @test nc["date_bnds"][2, :] ==
+                  [Dates.DateTime(2010, 2, 1), Dates.DateTime(2010, 3, 1)]
+            @test nc["time_bnds"][1, :] == [0.0, first(times)]
+            @test nc["time_bnds"][2, :] == times
+        end
+
+        close(writer)
+    end
+end
+
+@testset "NetCDFWriter different horizontal points" begin
+    NUM = 10
+
+    start_date = Dates.DateTime(2010, 1, 1)
+
+    function compute!(out, u, p, t)
+        if isnothing(out)
+            return u.field
+        else
+            out .= u.field
+        end
+    end
+
+    p = (; start_date = start_date)
+
+    sphericalspace = SphericalShellSpace(FT = Float32)
+    longlatboxspace =
+        BoxSpace(; lonlat = true, ylim = (-Float64(1), Float64(2)))
+    for (i, space) in enumerate((sphericalspace, longlatboxspace))
+        field = deepcopy(Fields.coordinate_field(space).z)
+        vec(parent(field)) .+= 1:length(parent(field))
+
+        u = (; field)
+
+        writer = Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            start_date = start_date,
+        )
+        hpts, vpts = Writers.target_coordinates(
+            space,
+            (NUM, 2NUM, 3NUM),
+            ClimaDiagnostics.Writers.FakePressureLevelsMethod(),
+        )
+        lon, lat = hpts
+        writer_diff_pts = Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            start_date = start_date,
+            horizontal_pts = (vcat(lon, lon), vcat(lat, lat)),
+        )
+
+        diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+            variable = ClimaDiagnostics.DiagnosticVariable(;
+                compute!,
+                short_name = "ABC",
+            ),
+            output_short_name = "default_pts_$i",
+            output_long_name = "Different horizontal points test",
+            output_writer = writer,
+        )
+        diagnostic_diff_pts = ClimaDiagnostics.ScheduledDiagnostic(;
+            variable = ClimaDiagnostics.DiagnosticVariable(;
+                compute!,
+                short_name = "ABC",
+            ),
+            output_short_name = "diff_pts_$i",
+            output_long_name = "Different horizontal points test",
+            output_writer = writer_diff_pts,
+        )
+
+        t = 42.0
+        combinations =
+            ((writer, diagnostic), (writer_diff_pts, diagnostic_diff_pts))
+        for (writ, diag) in combinations
+            Writers.interpolate_field!(writ, field, diag, u, p, t)
+            Writers.write_field!(writ, field, diag, u, p, t)
+            Writers.write_field!(writ, field, diag, u, p, t)
+        end
+
+        NCDatasets.NCDataset(
+            joinpath(output_dir, "diff_pts_$i.nc"),
+        ) do nc_diff_pts
+            @test nc_diff_pts["lon"][:] == vcat(lon, lon)
+            @test nc_diff_pts["lat"][:] == vcat(lat, lat)
+            @test size(nc_diff_pts["ABC"]) == (2, 2 .* length.(hpts)..., 10)
+            @test nc_diff_pts["ABC"][:, 1:length(lon), 1:length(lat), :] ==
+                  nc_diff_pts["ABC"][
+                :,
+                (length(lon) + 1):end,
+                (length(lat) + 1):end,
+                :,
+            ]
+            NCDatasets.NCDataset(
+                joinpath(output_dir, "default_pts_$i.nc"),
+            ) do nc_default_pts
+                @test nc_diff_pts["ABC"][:, 1:length(lon), 1:length(lat), :] ==
+                      nc_default_pts["ABC"][:, :, :, :]
+                @test nc_diff_pts["lon"][1:length(lon)] ==
+                      nc_default_pts["lon"][:]
+                @test nc_diff_pts["lat"][1:length(lat)] ==
+                      nc_default_pts["lat"][:]
+            end
+        end
+
+        close(writer)
+        close(writer_diff_pts)
+    end
+
+    # Test with only a horizontal space
+    horizontal_space = ClimaCore.Spaces.level(sphericalspace, 1)
+    horizontal_field = Fields.coordinate_field(horizontal_space).z
+
+    lon, lat = Writers.target_coordinates(horizontal_space, (NUM, 2NUM))
+
+    # Pick every other point
+    horizontal_writer = Writers.NetCDFWriter(
+        horizontal_space,
+        output_dir;
+        num_points = (NUM, 2NUM),
+    )
+    horizontal_writer_diff_pts = Writers.NetCDFWriter(
+        horizontal_space,
+        output_dir;
+        num_points = (NUM, 2NUM),
+        horizontal_pts = (lon[1:2:end], lat[1:2:end]),
+    )
+    horizontal_u = (; field = horizontal_field)
+
+    horizontal_diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "default_pts_horizontal",
+        output_long_name = "Horizontal points with horizontal space test",
+        output_writer = horizontal_writer,
+    )
+    horizontal_diagnostic_diff_pts = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "diff_pts_horizontal",
+        output_long_name = "Different horizontal points with horizontal space test",
+        output_writer = horizontal_writer_diff_pts,
+    )
+
+    t = 42.0
+    combinations = (
+        (horizontal_writer_diff_pts, horizontal_diagnostic_diff_pts),
+        (horizontal_writer, horizontal_diagnostic),
+    )
+
+    for (writer, diagnostics) in combinations
+        Writers.interpolate_field!(
+            writer,
+            horizontal_field,
+            diagnostics,
+            horizontal_u,
+            p,
+            t,
+        )
+        Writers.write_field!(
+            writer,
+            horizontal_field,
+            diagnostics,
+            horizontal_u,
+            p,
+            t,
+        )
+        # Write a second time
+        Writers.write_field!(
+            writer,
+            horizontal_field,
+            diagnostics,
+            horizontal_u,
+            p,
+            t,
+        )
+    end
+
+    close(horizontal_writer)
+    close(horizontal_writer_diff_pts)
+
+    NCDatasets.NCDataset(
+        joinpath(output_dir, "diff_pts_horizontal.nc"),
+    ) do nc_diff_pts
+        @test nc_diff_pts["lon"][:] == lon[1:2:end]
+        @test nc_diff_pts["lat"][:] == lat[1:2:end]
+        @test size(nc_diff_pts["ABC"]) == (2, NUM / 2, NUM)
+        NCDatasets.NCDataset(
+            joinpath(output_dir, "default_pts_horizontal.nc"),
+        ) do nc_default_pts
+            @test Array(nc_diff_pts["ABC"]) ==
+                  nc_default_pts["ABC"][:, 1:2:end, 1:2:end]
+        end
+    end
+end
+
+
+@testset "NetCDFWriter with global attributes" begin
+    t = 0.0
+    NUM = 10
+
+    start_date = Dates.DateTime(2010, 1, 1)
+
+    function compute!(out, u, p, t)
+        if isnothing(out)
+            return u.field
+        else
+            out .= u.field
+        end
+    end
+
+    p = (; start_date = start_date)
+
+    space = SphericalShellSpace(FT = Float32)
+
+    field = Fields.coordinate_field(space).z
+    u = (; field)
+
+    writer = Writers.NetCDFWriter(
+        space,
+        output_dir;
+        num_points = (NUM, 2NUM, 3NUM),
+        start_date = start_date,
+        global_attribs = Dict("global" => "attribs"),
+    )
+
+    diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute!,
+            short_name = "ABC",
+        ),
+        output_short_name = "global_attrib_test",
+        output_long_name = "Add global attributes test",
+        output_writer = writer,
+    )
+
+    Writers.interpolate_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+    Writers.write_field!(writer, field, diagnostic, u, p, t)
+
+    NCDatasets.NCDataset(joinpath(output_dir, "global_attrib_test.nc")) do nc
+        @test nc.attrib["global"] == "attribs"
+    end
+end
+
+@testset "NetCDFWriter: get start date" begin
+    space = BoxSpace()
+    writer1 = Writers.NetCDFWriter(
+        space,
+        output_dir,
+        start_date = Dates.DateTime(2010, 11, 12),
+    )
+    start_date1 = Writers.get_start_date(writer1, nothing)
+    @test start_date1 == Dates.DateTime(2010, 11, 12)
+    start_date2 = Writers.get_start_date(
+        writer1,
+        (; start_date = Dates.DateTime(2012, 10, 11)),
+    )
+    @test start_date2 == Dates.DateTime(2010, 11, 12)
+
+    writer2 = Writers.NetCDFWriter(space, output_dir)
+    start_date3 = Writers.get_start_date(
+        writer2,
+        (; start_date = Dates.DateTime(2012, 10, 11)),
+    )
+    @test start_date3 == Dates.DateTime(2012, 10, 11)
+end
+
+@testset "NetCDFWriter: initialize variable" begin
+    space = BoxSpace()
+    writer = Writers.NetCDFWriter(space, output_dir)
+    diagnostic = ClimaDiagnostics.ScheduledDiagnostic(;
+        variable = ClimaDiagnostics.DiagnosticVariable(;
+            compute! = identity,
+            short_name = "ABC",
+        ),
+        output_short_name = "my_short_name",
+        output_long_name = "My Long Name",
+        output_writer = writer,
+    )
+    NCDatasets.Dataset(joinpath(output_dir, "init_test.nc"), "c") do nc
+        NCDatasets.defDim(nc, "time", Inf)
+        NCDatasets.defDim(nc, "latitude", 1)
+        v, temporal_size = Writers.get_var_and_t_index!(
+            nc,
+            Float32,
+            writer,
+            [1],
+            diagnostic,
+            ("latitude",),
+            Dates.DateTime(2010),
+        )
+        var = diagnostic.variable
+        @test temporal_size == 0
+        @test v.attrib["short_name"] == var.short_name
+        @test v.attrib["long_name"] == "My Long Name"
+        @test v.attrib["units"] == var.units
+        @test v.attrib["comments"] == var.comments
+        @test v.attrib["start_date"] == string(Dates.DateTime(2010))
+
+        var, temporal_size = Writers.get_var_and_t_index!(
+            nc,
+            Float32,
+            writer,
+            [2],
+            diagnostic,
+            ("latitude",),
+            Dates.DateTime(2010),
+        )
+        # No time values are added, since last call to get_var_and_t_index!
+        @test temporal_size == 0
+
+        @test_throws ErrorException Writers.get_var_and_t_index!(
+            nc,
+            Float32,
+            writer,
+            [1, 2],
+            diagnostic,
+            ("latitude",),
+            Dates.DateTime(2010),
+        )
+    end
+end
+
+@testset "NetCDFWriter: append temporal values" begin
+    function make_fake_nc()
+        # These values will be overwritten
+        return Dict(
+            "time" => [-1.0, -1.0],
+            "date" => [Dates.DateTime(2009), Dates.DateTime(2009)],
+            "time_bnds" => [[-1.0, -1.0] [-2.0, -2.0]],
+            "date_bnds" => [
+                [Dates.DateTime(2009), Dates.DateTime(2009)] [
+                    Dates.DateTime(2009),
+                    Dates.DateTime(2009),
+                ]
+            ],
+        )
+    end
+
+    start_date = Dates.DateTime(2010)
+    t_and_init_time_pairs = (
+        (0.0, 0.0),
+        (ITime(0.0, epoch = start_date), ITime(0.0, epoch = start_date)),
+    )
+    for (t, init_time) in t_and_init_time_pairs
+        nc = make_fake_nc()
+        t_idx = 1
+        isa_time_reduction = false
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t,
+            start_date,
+            init_time,
+            t_idx,
+        )
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t + oneunit(t),
+            start_date,
+            init_time,
+            t_idx + 1,
+        )
+
+        @test nc["time"] == [0.0, 1.0]
+        @test nc["date"] == [
+            Dates.DateTime("2010-01-01T00:00:00"),
+            Dates.DateTime("2010-01-01T00:00:01"),
+        ]
+        @test nc["time_bnds"] == [[0.0, 0.0] [0.0, 1.0]]
+        @test nc["date_bnds"] == [
+            [
+                Dates.DateTime("2010-01-01T00:00:00"),
+                Dates.DateTime("2010-01-01T00:00:00"),
+            ] [
+                Dates.DateTime("2010-01-01T00:00:00"),
+                Dates.DateTime("2010-01-01T00:00:01"),
+            ]
+        ]
+    end
+
+    start_date = Dates.DateTime(2010)
+    t_and_init_time_pairs = (
+        (0.0, 0.0),
+        (ITime(0.0, epoch = start_date), ITime(0.0, epoch = start_date)),
+    )
+    for (t, init_time) in t_and_init_time_pairs
+        nc = make_fake_nc()
+        t_idx = 1
+        isa_time_reduction = true
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t + oneunit(t),
+            start_date,
+            0.0,
+            t_idx,
+        )
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t + 2 * oneunit(t),
+            start_date,
+            0.0,
+            t_idx + 1,
+        )
+
+        @test nc["time"] == [0.0, 1.0]
+        @test nc["date"] == [
+            Dates.DateTime("2010-01-01T00:00:00"),
+            Dates.DateTime("2010-01-01T00:00:01"),
+        ]
+        @test nc["time_bnds"] == [[0.0, 1.0] [1.0, 2.0]]
+        @test nc["date_bnds"] == [
+            [
+                Dates.DateTime("2010-01-01T00:00:00"),
+                Dates.DateTime("2010-01-01T00:00:01"),
+            ] [
+                Dates.DateTime("2010-01-01T00:00:01"),
+                Dates.DateTime("2010-01-01T00:00:02"),
+            ]
+        ]
+    end
+
+    # Test with init_time not equal to 0
+    start_date = Dates.DateTime(2010)
+    t_and_init_time_pairs = (
+        (1.0, 1.0),
+        (ITime(1.0, epoch = start_date), ITime(1.0, epoch = start_date)),
+        (1.0, ITime(1.0, epoch = start_date)),
+        (ITime(1.0, epoch = start_date), 1.0),
+    )
+    for (t, init_time) in t_and_init_time_pairs
+        nc = make_fake_nc()
+        t_idx = 1
+        isa_time_reduction = false
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t,
+            start_date,
+            init_time,
+            t_idx,
+        )
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t + oneunit(t),
+            start_date,
+            init_time,
+            t_idx + 1,
+        )
+        @test nc["time"] == [1.0, 2.0]
+        @test nc["date"] == [
+            Dates.DateTime("2010-01-01T00:00:01"),
+            Dates.DateTime("2010-01-01T00:00:02"),
+        ]
+        @test nc["time_bnds"] == [[1.0, 1.0] [1.0, 2.0]]
+        @test nc["date_bnds"] == [
+            [
+                Dates.DateTime("2010-01-01T00:00:01"),
+                Dates.DateTime("2010-01-01T00:00:01"),
+            ] [
+                Dates.DateTime("2010-01-01T00:00:01"),
+                Dates.DateTime("2010-01-01T00:00:02"),
+            ]
+        ]
+    end
+
+    start_date = Dates.DateTime(2010)
+    t_and_init_time_pairs = (
+        (2.0, 1.0),
+        (ITime(2.0, epoch = start_date), ITime(1.0, epoch = start_date)),
+        (ITime(2.0, epoch = start_date), 1.0),
+        (2.0, ITime(1.0, epoch = start_date)),
+    )
+
+    for (t, init_time) in t_and_init_time_pairs
+        nc = make_fake_nc()
+        t_idx = 1
+        isa_time_reduction = true
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t,
+            start_date,
+            init_time,
+            t_idx,
+        )
+        Writers.append_temporal_values!(
+            nc,
+            isa_time_reduction,
+            t + oneunit(t),
+            start_date,
+            init_time,
+            t_idx + 1,
+        )
+        @test nc["time"] == [1.0, 2.0]
+        @test nc["date"] == [
+            Dates.DateTime("2010-01-01T00:00:01"),
+            Dates.DateTime("2010-01-01T00:00:02"),
+        ]
+        @test nc["time_bnds"] == [[1.0, 2.0] [2.0, 3.0]]
+        @test nc["date_bnds"] == [
+            [
+                Dates.DateTime("2010-01-01T00:00:01"),
+                Dates.DateTime("2010-01-01T00:00:02"),
+            ] [
+                Dates.DateTime("2010-01-01T00:00:02"),
+                Dates.DateTime("2010-01-01T00:00:03"),
+            ]
+        ]
+    end
+end
+
+@testset "Pressure coordinates" begin
+    spherical_shell_space = SphericalShellSpace(FT = Float32)
+    col_space = ColumnCenterFiniteDifferenceSpace(FT = Float32)
+    spaces_test_list = [(spherical_shell_space, "shell"), (col_space, "col")]
+
+    # Number of interpolation points
+    for (space, space_name) in spaces_test_list
+        NUM = 50
+
+        start_date = Dates.DateTime(2010, 1, 1)
+
+        function compute_field!(out, u, p, t)
+            if isnothing(out)
+                return u.field
+            else
+                out .= u.field
+                return nothing
+            end
+        end
+
+        # Test with face space
+        function compute_field_face!(out, u, p, t)
+            intp_c2f = Operators.InterpolateC2F(
+                bottom = Operators.Extrapolate(),
+                top = Operators.Extrapolate(),
+            )
+            if isnothing(out)
+                return intp_c2f.(u.field)
+            else
+                @. out = intp_c2f(u.field)
+                return nothing
+            end
+        end
+
+        u = ClimaCore.Fields.FieldVector(; field = ones(space))
+        p = (; start_date = start_date)
+        t = 0
+        z_sampling_method = ClimaDiagnostics.Writers.RealPressureLevelsMethod(
+            u.field,
+            t,
+            pressure_attribs = (; YO = "HI"),
+            pressure_intp_kwargs = (;
+                extrapolate = ClimaInterpolations.Interpolation1D.LinearExtrapolation()
+            ),
+        )
+
+        @test_throws ErrorException Writers.NetCDFWriter(
+            space,
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            sync_schedule = ClimaDiagnostics.Schedules.DivisorSchedule(2),
+            z_sampling_method,
+        )
+        writer = Writers.NetCDFWriter(
+            Writers.pressure_space(z_sampling_method),
+            output_dir;
+            num_points = (NUM, 2NUM, 3NUM),
+            sync_schedule = ClimaDiagnostics.Schedules.DivisorSchedule(2),
+            z_sampling_method,
+        )
+
+        center_var = ClimaDiagnostics.DiagnosticVariable(;
+            compute! = compute_field!,
+            short_name = "center",
+            long_name = "CENTER",
+        )
+        center_diag = ClimaDiagnostics.ScheduledDiagnostic(
+            variable = center_var,
+            output_writer = writer,
+            output_short_name = "center_$(space_name)_inst",
+        )
+
+        face_var = ClimaDiagnostics.DiagnosticVariable(;
+            compute! = compute_field_face!,
+            short_name = "face",
+            long_name = "FACE",
+        )
+        face_diag = ClimaDiagnostics.ScheduledDiagnostic(
+            variable = face_var,
+            output_writer = writer,
+            output_short_name = "face_$(space_name)_inst",
+        )
+
+        t1 = 10.0
+        t2 = 20.0
+        t3 = 30.0
+        for t in [t1, t2, t3]
+            for diag in (center_diag, face_diag)
+                intp_field = ClimaDiagnostics.compute_field(
+                    diag,
+                    u,
+                    p,
+                    t,
+                    z_sampling_method,
+                )
+                Writers.interpolate_field!(writer, intp_field, diag, u, p, t)
+                Writers.write_field!(writer, intp_field, diag, u, p, t)
+            end
+        end
+
+        for filename in (
+            "center_$(space_name)_inst_pressure.nc",
+            "face_$(space_name)_inst_pressure.nc",
+        )
+            varname = first(split(filename, "_"))
+            NCDatasets.Dataset(joinpath(output_dir, filename)) do nc
+                if space_name == "shell"
+                    @test NCDatasets.dimnames(nc) ==
+                          ["time", "lon", "lat", "pressure_level", "nv"]
+                    # Order is time, lon, lat, and pressure_level
+                    @test size(nc[varname]) == (3, 50, 100, 37)
+                else
+                    @test NCDatasets.dimnames(nc) ==
+                          ["time", "pressure_level", "nv"]
+                    # Order is time and pressure_level
+                    @test size(nc[varname]) == (3, 37)
+                end
+                @test nc["time"] == [10.0, 20.0, 30.0]
+                @test issorted(nc["pressure_level"])
+                @test nc["pressure_level"] ==
+                      ClimaDiagnostics.Interpolators.era5_pressure_levels()
+                @test nc["pressure_level"].attrib["units"] == "Pa"
+                @test nc["pressure_level"].attrib["stored_direction"] ==
+                      "increasing"
+                @test nc["pressure_level"].attrib["long_name"] == "pressure"
+                @test nc["pressure_level"].attrib["standard_name"] ==
+                      "air_pressure"
+                @test nc["pressure_level"].attrib["YO"] == "HI"
+            end
+        end
+    end
+end
+
+@testset "RealPressureLevelsMethod show" begin
+    space = ColumnCenterFiniteDifferenceSpace()
+    u = Fields.FieldVector(; field = ones(space))
+    z_sampling_method = Writers.RealPressureLevelsMethod(
+        u.field,
+        0.0;
+        pressure_attribs = (; YO = "HI"),
+    )
+
+    out = sprint(show, MIME("text/plain"), z_sampling_method)
+    @test occursin("RealPressureLevelsMethod", out)
+    @test count(==('\n'), out) <= 10
+
+    out2 = sprint(show, z_sampling_method)
+    @test occursin("RealPressureLevelsMethod", out2)
+    @test !occursin('\n', out2)
+
+    out3 = sprint(
+        show,
+        MIME("text/plain"),
+        z_sampling_method;
+        context = :compact => true,
+    )
+    @test out2 == out3
+
+    out_summary = sprint(summary, z_sampling_method)
+    @test occursin("RealPressureLevelsMethod", out_summary)
+    @test !occursin('\n', out_summary)
+end
