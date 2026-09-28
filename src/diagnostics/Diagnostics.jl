@@ -1,0 +1,121 @@
+"""
+    ClimaAtmos.Diagnostics
+
+Definitions of the diagnostic variables ClimaAtmos knows how to compute.
+
+Each variable is registered with `add_diagnostic_variable!`, which records its metadata
+and a `compute` function of `(state, cache, time)`, and is looked up by short name with
+`get_diagnostic_variable`. `default_diagnostics` assembles the per-model defaults, the
+helpers in `standard_diagnostic_frequencies.jl` wrap them in reductions over calendar
+periods, and [`DiagnosticsConfig`](@ref ClimaAtmos.DiagnosticsConfig) is the user-facing
+entry point that selects them for a simulation.
+
+Scheduling, accumulation, and output are handled by `ClimaDiagnostics`.
+"""
+module Diagnostics
+
+import Dates: Month, Day, Hour, DateTime, Period
+
+import LinearAlgebra: dot
+
+import ClimaComms
+import ClimaCore:
+    Fields, Geometry, InputOutput, Meshes, Spaces, Operators, Domains, Grids
+import ClimaCore.Utilities: half
+import ClimaCore.MatrixFields: @name
+import Thermodynamics as TD
+
+# compute lazily to reduce allocations
+import ..lazy
+
+import ..AtmosModel
+import ..AtmosWater
+import ..AtmosRadiation
+import ..AtmosTurbconv
+import ..AtmosCallback
+import ..EveryNSteps
+
+import ..Parameters as CAP
+
+import ..unit_basis_vector_data
+
+# microphysics_model
+import ..DryModel
+import ..EquilibriumMicrophysics0M
+import ..NonEquilibriumMicrophysics1M
+import ..NonEquilibriumMicrophysics2M
+import ..NonEquilibriumMicrophysics2MP3
+import ..NonEquilibriumMicrophysics
+import ..MoistMicrophysics
+import ..COSPModel
+
+# radiation
+import ClimaAtmos.RRTMGPInterface as RRTMGPI
+
+# vert_diff
+import ..VerticalDiffusion
+import ..DecayWithHeightDiffusion
+
+# turbconv_model
+import ..EDOnlyEDMFX
+import ..PrognosticEDMFX
+
+# gravitywave_models
+import ..NonOrographicGravityWave
+import ..BeresSourceParams
+import ..OrographicGravityWave
+
+# chemistry_model
+import ..GasPhaseChem
+
+# surface temperature
+import ..SurfaceConditions
+import ..SurfaceConditions: SlabOceanTemperature
+
+# functions used to calculate diagnostics
+import ..draft_area
+import ..compute_entrainment
+import ..compute_detrainment
+import ..detr_buoy_inv_time_scale
+import ..vertical_buoyancy_acceleration
+import ..get_physical_w
+import ..compute_gm_mixing_length
+
+import ..horizontal_integral_at_boundary
+import ..horizontal_filter_scale
+import ..ᶜmixing_length
+import ..eddy_diffusivity
+import ..eddy_viscosity
+import ..turbulent_prandtl_number
+import ..smagorinsky_lilly_length
+import ..ᶜcompute_eddy_diffusivity_coefficient
+import ..ρa⁰
+import ..specific
+import ..ᶜspecific_env_value
+import ..correlation_Tq
+
+
+# We need the abbreviations for symbols like curl, grad, and so on
+include(joinpath("..", "utils", "abbreviations.jl"))
+
+import ClimaDiagnostics
+
+import ClimaDiagnostics:
+    DiagnosticVariable, ScheduledDiagnostic, average_pre_output_hook!
+
+import ClimaDiagnostics.DiagnosticVariables: descriptive_short_name
+
+import ClimaDiagnostics.Schedules:
+    EveryStepSchedule, EveryDtSchedule, EveryCalendarDtSchedule, DivisorSchedule
+
+import ClimaDiagnostics.Writers:
+    DictWriter,
+    HDF5Writer,
+    NetCDFWriter,
+    write_field!,
+    LevelsMethod,
+    FakePressureLevelsMethod
+
+include("diagnostic.jl")
+
+end
