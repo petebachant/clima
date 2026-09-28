@@ -1,0 +1,16 @@
+# Bootstrap: generate CPU/GPU/MPI steps for affected packages only.
+agents:
+  queue: central
+  slurm_mem: 8G
+  modules: climacommon/2026_02_18
+
+env:
+  JULIA_DEPOT_PATH: "${BUILDKITE_BUILD_PATH}/${BUILDKITE_PIPELINE_SLUG}/depot/default"
+  SLURM_KILL_BAD_EXIT: 1
+
+steps:
+  - label: ":pipeline: plan"
+    command: |
+      base=origin/main
+      [ "$BUILDKITE_BRANCH" = main ] && base=HEAD~1
+      julia tools/mono.jl buildkite "$base" | buildkite-agent pipeline upload

@@ -1,0 +1,37 @@
+# Auto-register: merging a PR that bumps `version` in packages/<Pkg>/Project.toml
+# is the release. This job comments `@JuliaRegistrator register subdir=...` on
+# the merge commit for each bumped package, upstream-first.
+#
+# One-time setup per package: the General registry entry must point at this
+# repo with `subdir = "packages/<Pkg>"` (manual PR to JuliaRegistries/General),
+# and the Registrator GitHub app must be installed on this repo.
+name: Register
+on:
+  push:
+    branches: [main]
+    paths: ['packages/*/Project.toml']
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Register packages whose version changed since this ref
+        required: true
+
+permissions:
+  contents: write  # commit comments
+
+concurrency: register  # never interleave two cascades
+
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # cascades wait on General's AutoMerge for each tier
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: tools/register.sh "${{ inputs.base || github.event.before }}"

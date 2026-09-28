@@ -1,0 +1,31 @@
+# While the monorepo is being evaluated, the standalone repos are still the
+# source of truth. Pull them in weekly and open a PR, so CI here shows how
+# upstream changes interact before anyone releases them.
+name: Sync upstream subtrees
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # subtree needs history
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B sync-upstream
+          tools/subtree.sh pull
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && exit 0
+          git push -f origin sync-upstream
+          gh pr create --base main --head sync-upstream \
+            --title "chore: sync subtrees from upstream repos" \
+            --body "Automated weekly \`tools/subtree.sh pull\`." || true

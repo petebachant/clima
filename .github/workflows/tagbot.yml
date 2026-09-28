@@ -1,0 +1,39 @@
+# One TagBot run per package. Tags are prefixed: ClimaCore-v1.2.3.
+name: TagBot
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      lookback:
+        default: "3"
+permissions:
+  contents: write
+  issues: read
+  pull-requests: read
+jobs:
+  plan:
+    if: github.event_name == 'workflow_dispatch' || github.actor == 'JuliaTagBot'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.all.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - id: all
+        run: echo "matrix=$(julia tools/mono.jl affected ALL)" >> "$GITHUB_OUTPUT"
+  tagbot:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: JuliaRegistries/TagBot@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ssh: ${{ secrets.DOCUMENTER_KEY }}
+          subdir: ${{ matrix.pkg.path }}
