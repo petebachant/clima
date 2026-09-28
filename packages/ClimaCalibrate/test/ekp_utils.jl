@@ -1,0 +1,169 @@
+using Test
+
+import LinearAlgebra
+import ClimaCalibrate as CAL
+import EnsembleKalmanProcesses as EKP
+
+@testset "minibatcher_over_samples tests" begin
+    # Regular case
+    mb = CAL.minibatcher_over_samples(6, 2)
+    @test mb.minibatches == [[1, 2], [3, 4], [5, 6]]
+
+    # Non-divisible case: 7 samples with batch size 2 (should drop last sample)
+    mb_partial = CAL.minibatcher_over_samples(7, 2)
+    @test mb_partial.minibatches == [[1, 2], [3, 4], [5, 6]]  # 7th is dropped
+
+    # Edge: batch size larger than n_samples leaves no minibatch, which EKP
+    # divides by
+    @test_throws ArgumentError CAL.minibatcher_over_samples(3, 5)
+
+    # Edge: n_samples = 0
+    @test_throws ArgumentError CAL.minibatcher_over_samples(0, 2)
+
+    # Edge: batch_size = 0
+    @test_throws ArgumentError CAL.minibatcher_over_samples(2, 0)
+
+    # Using vector input
+    samples = [1, 2, 3, 4, 5, 6]
+    mb2 = CAL.minibatcher_over_samples(samples, 2)
+    @test mb2.minibatches == [[1, 2], [3, 4], [5, 6]]
+end
+
+@testset "observation_series_from_samples tests" begin
+    samples = [EKP.Observation([i], ones(1, 1), string(i)) for i in 1:6]
+    # Regular case
+    series = CAL.observation_series_from_samples(samples, 2)
+    @test series.observations == samples
+    @test series.minibatcher.minibatches == [[1, 2], [3, 4], [5, 6]]
+    @test series.names == ["1", "2", "3", "4", "5", "6"]
+
+    # fewer samples than batch size leaves no minibatch
+    @test_throws ArgumentError CAL.observation_series_from_samples(samples, 7)
+
+    # empty sample list
+    @test_throws ArgumentError CAL.observation_series_from_samples(
+        EKP.Observation[],
+        2,
+    )
+
+    # Test mismatched names
+    bad_names = ["a", "b", "c"]
+    @test_throws ArgumentError CAL.observation_series_from_samples(
+        samples,
+        2,
+        bad_names,
+    )
+end
+
+@testset "G ensemble matrix" begin
+    Γ = ones(1, 1)
+    y = [1.0]
+    prior_u1 = EKP.constrained_gaussian("amplitude", 2, 1, 0, Inf)
+    prior = EKP.combine_distributions([prior_u1])
+    N_ensemble = 10
+    initial_ensemble = EKP.construct_initial_ensemble(prior, N_ensemble)
+    ekp = EKP.EnsembleKalmanProcess(initial_ensemble, y, Γ, EKP.Inversion())
+    g_ens_mat = CAL.g_ens_matrix(ekp)
+    @test size(g_ens_mat) == (1, 10)
+    @test g_ens_mat isa Matrix{Float64}
+end
+
+@testset "Get information from nth iteration" begin
+    function make_obs(sample_num, metadata)
+        return EKP.Observation(
+            Dict(
+                "samples" => [sample_num],
+                "covariances" => [2],
+                "names" => "a name",
+                "metadata" => metadata,
+            ),
+        )
+    end
+
+    observations = [make_obs(i, "$i") for i in 1:10]
+
+    series1 = CAL.observation_series_from_samples(observations, 1)
+    series2 = CAL.observation_series_from_samples(observations, 2)
+    series3 = CAL.observation_series_from_samples(observations, 3)
+
+    for i in 1:10
+        @test CAL.get_observations_for_nth_iteration(series1, i) ==
+              [observations[i]]
+        @test CAL.get_metadata_for_nth_iteration(series1, i) == ["$i"]
+    end
+
+    for i in 1:5
+        @test CAL.get_observations_for_nth_iteration(series2, i) ==
+              observations[(2i - 1):(2i)]
+        @test CAL.get_metadata_for_nth_iteration(series2, i) ==
+              string.((2i - 1):(2i))
+    end
+
+    for i in 1:3
+        @test CAL.get_observations_for_nth_iteration(series3, i) ==
+              observations[(3i - 2):(3i)]
+        @test CAL.get_metadata_for_nth_iteration(series3, i) ==
+              string.((3i - 2):(3i))
+    end
+end
+
+@testset "Diagonal of matrices" begin
+    A = [4.0 1.0 0.0; 1.0 5.0 2.0; 0.0 2.0 6.0]
+    @test CAL.EKPUtils._diag(A) == LinearAlgebra.diag(A)
+    @test CAL.EKPUtils._diag(LinearAlgebra.Diagonal([1.0, 2.0, 3.0])) ==
+          [1.0, 2.0, 3.0]
+
+    # Full SVD
+    F = LinearAlgebra.svd(A)
+    @test CAL.EKPUtils._diag(F) ≈ LinearAlgebra.diag(A)
+
+    # Truncated SVD of a rank two matrix
+    U = [1.0 0.0; 0.0 1.0; 1.0 1.0]
+    S = [2.0, 3.0]
+    Vt = [1.0 0.0 1.0; 0.0 1.0 1.0]
+    truncated_svd = LinearAlgebra.SVD(U, S, Vt)
+    M = U * LinearAlgebra.Diagonal(S) * Vt
+    @test CAL.EKPUtils._diag(truncated_svd) ≈ LinearAlgebra.diag(M)
+
+    # SVDplusD
+    D = [1.0, 2.0, 3.0]
+    svd_plus_d = EKP.SVDplusD(F, LinearAlgebra.Diagonal(D))
+    @test CAL.EKPUtils._diag(svd_plus_d) ≈ LinearAlgebra.diag(A) .+ D
+end
+
+@testset "Residual" begin
+    # Covariance matrix of the SVDplusD observation is 12I + 4I = 16I
+    svd_plus_d = EKP.SVDplusD(
+        LinearAlgebra.svd(12.0 .* Matrix(LinearAlgebra.I, 2, 2)),
+        LinearAlgebra.Diagonal([4.0, 4.0]),
+    )
+    observations = [
+        EKP.Observation([1.0, 2.0], LinearAlgebra.Diagonal([4.0, 4.0]), "1"),
+        EKP.Observation([3.0, 4.0], 9.0 .* Matrix(LinearAlgebra.I, 2, 2), "2"),
+        EKP.Observation([5.0, 6.0], svd_plus_d, "3"),
+    ]
+    series = CAL.observation_series_from_samples(observations, 3)
+    prior = EKP.constrained_gaussian("amplitude", 2, 1, 0, Inf)
+    N_ensemble = 4
+    initial_ensemble = EKP.construct_initial_ensemble(prior, N_ensemble)
+    ekp = EKP.EnsembleKalmanProcess(initial_ensemble, series, EKP.Inversion())
+    G_ens = [
+        NaN 2.0 3.0 4.0
+        5.0 6.0 7.0 8.0
+        9.0 10.0 11.0 12.0
+        13.0 14.0 15.0 16.0
+        17.0 18.0 19.0 20.0
+        21.0 22.0 23.0 24.0
+    ]
+    EKP.update_ensemble!(ekp, G_ens)
+
+    # mean(G) ignoring NaNs = [3, 6.5, 10.5, 14.5, 18.5, 22.5],
+    # obs = [1, 2, 3, 4, 5, 6], and σ = [2, 2, 3, 3, 4, 4]
+    @test CAL.residual(ekp; N = 1) ≈ [1.0, 2.25, 2.5, 3.5, 3.375, 4.125]
+    # The default iteration is the last one
+    @test CAL.residual(ekp) == CAL.residual(ekp; N = 1)
+    # Without ignoring NaNs, the NaN propagates to the residual
+    res_with_nan = CAL.residual(ekp; N = 1, ignore_nan = false)
+    @test isnan(res_with_nan[1])
+    @test res_with_nan[2:end] ≈ [2.25, 2.5, 3.5, 3.375, 4.125]
+end
