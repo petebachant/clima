@@ -10,9 +10,45 @@ This repo exists to answer four questions with evidence, not intuition:
 For each question: what we expect, how we'll measure it, what the
 multi-repo baseline is, and what we've seen so far.
 
-## Baseline (multi-repo, last 12 months)
+## Baseline (multi-repo)
 
-<!-- BASELINE -->
+From [clima-perf](https://calkit.io/petebachant/clima-perf)
+(GitHub + General registry data for 35 CliMA repos, 2021-Q2 → 2026-Q3,
+5.2 years). Cascade window = 14 days.
+
+| | Value |
+|:--|:--|
+| Releases by tracked packages | 688 (131/yr) |
+| …of which **reactive** (upstream-driven, exist only to keep the version graph consistent) | 233 (**34%**) |
+| Dependency updates landing within 2 weeks of another package's release | 722 of 750 (**96%**) |
+| Cascade events | 629 (120/yr) |
+| …**mechanical** (compat/manifest bookkeeping a shared repo absorbs) | 349 (**55%**) → ≈66 PRs/yr eliminable |
+| …substantive (interface adaptation, still real work) | 280 (45%) |
+| Propagation PRs by title (cross-check) | 724 of 12,262 merged (138/yr) |
+| Releasing packages with *any* external registry dependents | **5 of 19** |
+
+Per repo (busiest first), from `colocation-by-repo.csv`:
+
+| Repo | Releases | Reactive | Mechanical events/yr |
+|:--|--:|--:|--:|
+| ClimaAtmos | 110 | 67 | 9.9 |
+| ClimaCore | 103 | 38 | 7.4 |
+| ClimaLand | 74 | 34 | 4.2 |
+| CloudMicrophysics | 56 | 11 | 1.7 |
+| Thermodynamics | 53 | 4 | 0.6 |
+| ClimaTimeSteppers | 47 | 16 | 2.7 |
+| ClimaParams | 44 | 2 | 0.8 |
+
+(ClimaOcean, EKP and CalibrateEmulateSample are also high on mechanical
+events, but they're outside this monorepo's scope.)
+
+clima-perf's own conclusion: the PR-count saving is modest, because
+propagation PRs already merge in under a day. The bigger cost is the
+per-release ritual, most of which serves no one outside the org.
+
+**Propagation lag** (upstream release → dependent admits it in
+`[compat]`): <!-- LAG --> being computed from clima-perf's Project.toml
+commit history.
 
 ## What the prototype showed on day one
 
@@ -104,6 +140,17 @@ most.
   PRs blocked by a failure in a *downstream* package.
 
 ## Question 3: Less release maintenance?
+
+**The catch.** A monorepo does **not** remove reactive releases by itself.
+If ClimaCore makes a breaking change, users can combine it with ClimaAtmos
+only once a ClimaAtmos release admits it. The 34% of releases that are
+reactive still have to happen. What changes is who does them:
+`mono.jl bump --release-dependents` plus `register.sh` turn them from
+per-repo human chores into one command and an automated cascade. Actually
+*eliminating* them means merging internal-only packages. That's a separate
+decision, which the "5 of 19 have external users" number argues for. The
+candidates are the packages with no external dependents that only exist
+to serve the models: ClimaUtilities, ClimaDiagnostics, ClimaInterpolations.
 
 **Hypothesis.** Yes, mostly by deleting work:
 - CompatHelper PRs between in-repo packages disappear (compat is widened
