@@ -1,0 +1,1426 @@
+module Canopy
+import ClimaParams as CP
+using DocStringExtensions
+using Thermodynamics
+using ClimaLand
+using LazyBroadcast: lazy
+using ClimaCore
+using ClimaCore.MatrixFields
+using NVTX
+import ClimaCore.MatrixFields: @name
+import ClimaUtilities.TimeVaryingInputs: AbstractTimeVaryingInput
+import ClimaUtilities.TimeManager: ITime, date
+import LinearAlgebra: I, dot
+using ClimaLand: AbstractRadiativeDrivers, AbstractAtmosphericDrivers
+import ..Parameters as LP
+import Insolation.Parameters as IP
+import Thermodynamics.Parameters as TP
+using Dates
+
+import ClimaLand:
+    name,
+    prognostic_vars,
+    prognostic_types,
+    auxiliary_vars,
+    auxiliary_types,
+    auxiliary_domain_names,
+    prognostic_domain_names,
+    initialize_prognostic,
+    initialize_auxiliary,
+    make_update_boundary_fluxes,
+    make_update_implicit_aux,
+    make_update_implicit_boundary_fluxes,
+    make_update_aux,
+    make_compute_exp_tendency,
+    make_compute_imp_tendency,
+    apply_time_reduction,
+    make_compute_jacobian,
+    get_drivers,
+    get_model_callbacks,
+    total_liq_water_vol_per_area!,
+    total_energy_per_area!,
+    IntervalBasedCallback,
+    Soil,
+    return_momentum_fluxes,
+    component_temperature,
+    component_specific_humidity,
+    surface_roughness_model,
+    get_update_surface_temperature_function,
+    get_update_surface_humidity_function,
+    surface_displacement_height,
+    get_∂q_sfc∂T_function,
+    get_∂T_sfc∂T_function
+using ClimaLand: PrescribedGroundConditions, AbstractGroundConditions
+using ClimaLand.Domains: Point, Plane, SphericalSurface, get_long
+export CanopyModel
+include("./component_models.jl")
+include("./optimal_lai.jl")  # Must be before biomass.jl (defines OptimalLAIParameters used by ZhouOptimalLAIModel)
+include("./biomass.jl")
+include("./plant_hydraulics.jl")
+include("./soil_moisture_stress.jl")
+include("./stomatalconductance.jl")
+include("./photosynthesis.jl")
+include("./photosynthesis_farquhar.jl")
+include("./pmodel.jl")
+include("./radiation.jl")
+include("./solar_induced_fluorescence.jl")
+include("./pfts.jl")
+include("./canopy_energy.jl")
+include("./canopy_parameterizations.jl")
+using Dates
+include("./autotrophic_respiration.jl")
+include("./spatially_varying_parameters.jl")
+include("./canopy_turbulent_fluxes.jl")
+
+
+
+########################################################
+# Convenience constructors for Canopy model components
+########################################################
+
+"""
+    Lee2015SIFModel{FT}(toml_dict::CP.ParamDict) where {FT}
+
+Constructs the `Lee2015SIFModel` from the `toml_dict` using the parameters
+in the `toml_dict`.
+"""
+function Lee2015SIFModel{FT}(toml_dict::CP.ParamDict) where {FT}
+    parameters = SIFParameters{FT}(;
+        kf = toml_dict["kf"],
+        kp = toml_dict["kp"],
+        kd_p1 = toml_dict["kd_p1"],
+        kd_p2 = toml_dict["kd_p2"],
+        min_kd = toml_dict["min_kd"],
+        kn_p1 = toml_dict["kn_p1"],
+        kn_p2 = toml_dict["kn_p2"],
+        kappa_p1 = toml_dict["kappa_p1"],
+        kappa_p2 = toml_dict["kappa_p2"],
+    )
+    return Lee2015SIFModel{FT, typeof(parameters)}(parameters)
+end
+
+## Soil Moisture Stress
+"""
+    PiecewiseMoistureStressModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    c::FT = toml_dict["moisture_stress_c"],
+    soil_params
+) where {FT <: AbstractFloat}
+
+Helper function to create `PiecewiseMoistureStressModel` by calculating field capacity (θ_high)
+and wilting point (θ_low) from the soil parameters.
+
+The low and high thresholds for the piecewise soil moisture stress function are given by
+the residual soil water content and the soil porosity, respectively.
+
+The soil parameters should be a named tuple with keys of `ν` and `θ_r` 
+(additional keys may be present but they will not be used). These may 
+be ClimaCore fields or floats, but must be consistently one or the other.
+
+Note that unlike other Canopy components, this model is defined on the subsurface domain.
+"""
+function PiecewiseMoistureStressModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    c::FT = toml_dict["moisture_stress_c"],
+    soil_params = Soil.soil_vangenuchten_parameters(
+        domain.space.subsurface,
+        FT,
+    ),
+) where {FT <: AbstractFloat}
+    if c <= 0
+        throw(
+            ArgumentError("Curvature parameter `c` must be greater than zero"),
+        )
+    end
+    θ_high = soil_params.ν
+    θ_low = soil_params.θ_r
+
+    return PiecewiseMoistureStressModel{FT}(; θ_high, θ_low, c)
+end
+
+"""
+    TuzetMoistureStressModel{FT}(toml_dict; sc::FT = toml_dict["moisture_stress_sc"], pc::FT = toml_dict["moisture_stress_pc"]) where{FT}
+
+A constructor for TuzetMoistureStressModel which uses the toml_dict
+values, allowing optional overrides by keyword argument.
+"""
+function TuzetMoistureStressModel{FT}(
+    toml_dict;
+    sc::FT = toml_dict["moisture_stress_sc"],
+    pc::FT = toml_dict["moisture_stress_pc"],
+) where {FT}
+    return TuzetMoistureStressModel{FT}(; sc, pc)
+end
+
+## Autotrophic respiration models
+"""
+    AutotrophicRespirationModel{FT}(toml_dict::CP.ParamDict,
+                                   ) where {FT <: AbstractFloat}
+
+Create a `AutotrophicRespirationModel` using `toml_dict` of type `FT`.
+"""
+function AutotrophicRespirationModel{FT}(
+    toml_dict::CP.ParamDict,
+) where {FT <: AbstractFloat}
+    parameters = AutotrophicRespirationParameters(toml_dict)
+    return AutotrophicRespirationModel{FT, typeof(parameters)}(parameters)
+end
+
+## Energy models
+"""
+    BigLeafEnergyModel{FT}(toml_dict::CP.ParamDict; ac_canopy = toml_dict["ac_canopy"]) where {FT <: AbstractFloat}
+
+Creates a BigLeafEnergyModel using default parameters of type FT.
+- ac_canopy (J m^-2 K^-1) - canopy specific heat per area
+"""
+function BigLeafEnergyModel{FT}(
+    toml_dict::CP.ParamDict;
+    ac_canopy::FT = toml_dict["ac_canopy"],
+) where {FT <: AbstractFloat}
+    parameters = BigLeafEnergyParameters{FT}(ac_canopy)
+    return BigLeafEnergyModel{FT, typeof(parameters)}(parameters)
+end
+
+## Photosynthesis models
+"""
+    FarquharModel{FT}(
+        domain;
+        photosynthesis_parameters = clm_photosynthesis_parameters(
+            domain.space.surface,
+        ),
+    ) where {
+        FT <: AbstractFloat,
+        MECH <: Union{FT, ClimaCore.Fields.Field},
+        VC <: Union{FT, ClimaCore.Fields.Field},
+    }
+
+Creates a FarquharModel using default parameters of type FT.
+
+The `photosynthesis_parameters` argument is a NamedTuple that contains
+- `fractional_c3`: a Float or Field indicating the proportion of plants that are C3
+- `Vcmax25`: a Float or Field representing the maximum carboxylation rate at 25C (mol m^-2 s^-1)
+By default, these parameters are set by the `clm_photosynthesis_parameters` function,
+which reads in CLM data onto the surface space as ClimaUtilities SpaceVaryingInputs.
+"""
+function FarquharModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    photosynthesis_parameters = clm_photosynthesis_parameters(
+        domain.space.surface,
+    ),
+) where {FT <: AbstractFloat}
+    (; fractional_c3, Vcmax25) = photosynthesis_parameters
+    parameters = FarquharParameters(toml_dict; fractional_c3, Vcmax25)
+    return FarquharModel{FT, typeof(parameters)}(parameters)
+end
+
+
+"""
+    function PModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        fractional_c3 = clm_photosynthesis_parameters(domain.space.surface).fractional_c3,
+        binarize = false,
+        cstar = toml_dict["pmodel_cstar"],
+        β_c3 = toml_dict["pmodel_β_c3"],
+        β_c4 = toml_dict["pmodel_β_c4"],
+        temperature_dep_yield = true,
+        ϕ0_c3 = toml_dict["pmodel_ϕ0_c3"],
+        ϕ0_c4 = toml_dict["pmodel_ϕ0_c4"],
+        ϕa0_c3 = toml_dict["pmodel_ϕa0_c3"],
+        ϕa1_c3 = toml_dict["pmodel_ϕa1_c3"],
+        ϕa2_c3 = toml_dict["pmodel_ϕa2_c3"],
+        ϕa0_c4 = toml_dict["pmodel_ϕa0_c4"],
+        ϕa1_c4 = toml_dict["pmodel_ϕa1_c4"],
+        ϕa2_c4 = toml_dict["pmodel_ϕa2_c4"],
+        α = toml_dict["pmodel_α"],
+    ) where {FT <: AbstractFloat}
+
+Constructs a P-model (an optimality model for photosynthesis) using default parameters.
+
+The following default parameters (from the TOML file) are used:
+- cstar = 0.41 (unitless) - 4 * dA/dJmax, assumed to be a constant marginal cost (Wang 2017, Stocker 2020)
+- β_c3 = 146 (unitless) - Unit cost ratio of Vcmax to transpiration for C3 plants (Stocker 2020)
+- β_c4 = 146/9 ≈ 16.222 (unitless) - Unit cost ratio of Vcmax to transpiration for C4 plants (pyrealm)
+- ϕ0_c3 = 0.052 (unitless) - constant intrinsic quantum yield. Skillman (2008)
+- ϕ0_c4 = 0.057 (unitless) - constant intrinsic quantum yield. Skillman (2008)
+- ϕa0_c3 = 0.352*0.087 (unitless) - constant term in quadratic intrinsic quantum yield (Stocker 2020)
+- ϕa1_c3 = 0.022*0.087 (K^-1) - first order term in quadratic intrinsic quantum yield (Stocker 2020)
+- ϕa2_c3 = -0.00034*0.087 (K^-2) - second order term in quadratic intrinsic quantum yield (Stocker 2020)
+- ϕa0_c4 = 0.352*0.087 (unitless) - constant term in quadratic intrinsic quantum yield (Scott and Smith, 2022)
+- ϕa1_c4 = 0.022*0.087 (K^-1) - first order term in quadratic intrinsic quantum yield (Scott and Smith, 2022)
+- ϕa2_c4 = -0.00034*0.087 (K^-2) - second order term in quadratic intrinsic quantum yield (Scott and Smith, 2022)
+- α = 0.933 (unitless) - 1 - 1/T where T is the timescale of Vcmax, Jmax acclimation. Here T = 15 days. (Mengoli 2022)
+"""
+function PModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    fractional_c3 = clm_photosynthesis_parameters(domain.space.surface).fractional_c3,
+    binarize = false,
+    cstar = toml_dict["pmodel_cstar"],
+    β_c3 = toml_dict["pmodel_β_c3"],
+    β_c4 = toml_dict["pmodel_β_c4"],
+    temperature_dep_yield = true,
+    ϕ0_c3 = toml_dict["pmodel_ϕ0_c3"],
+    ϕ0_c4 = toml_dict["pmodel_ϕ0_c4"],
+    ϕa0_c3 = toml_dict["pmodel_ϕa0_c3"],
+    ϕa1_c3 = toml_dict["pmodel_ϕa1_c3"],
+    ϕa2_c3 = toml_dict["pmodel_ϕa2_c3"],
+    ϕa0_c4 = toml_dict["pmodel_ϕa0_c4"],
+    ϕa1_c4 = toml_dict["pmodel_ϕa1_c4"],
+    ϕa2_c4 = toml_dict["pmodel_ϕa2_c4"],
+    α = toml_dict["pmodel_α"],
+) where {FT <: AbstractFloat}
+    parameters = ClimaLand.Canopy.PModelParameters(
+        cstar,
+        β_c3,
+        β_c4,
+        temperature_dep_yield,
+        ϕ0_c3,
+        ϕ0_c4,
+        ϕa0_c3,
+        ϕa1_c3,
+        ϕa2_c3,
+        ϕa0_c4,
+        ϕa1_c4,
+        ϕa2_c4,
+        α,
+    )
+
+    return PModel{FT}(fractional_c3, toml_dict, parameters; binarize)
+end
+
+
+## Plant hydraulics models
+"""
+    PlantHydraulicsModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        ν::FT = toml_dict["plant_nu"],
+        S_s::FT = toml_dict["plant_S_s"], # m3/m3/MPa to m3/m3/m
+        conductivity_model = PlantHydraulics.Weibull(toml_dict),
+        retention_model = PlantHydraulics.LinearRetentionCurve(toml_dict),
+    ) where {FT <: AbstractFloat}
+
+Creates a PlantHydraulicsModel on the provided domain, using paramters from `toml_dict`.
+
+Citation:
+Holtzman, N., Wang, Y., Wood, J. D., Frankenberg, C., & Konings, A. G. (2023).
+Constraining plant hydraulics with microwave radiometry in a land surface model:
+Impacts of temporal resolution. Water Resources Research, 59, e2023WR035481.
+https://doi.org/10.1029/2023WR035481
+"""
+function PlantHydraulicsModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    ν::FT = toml_dict["plant_nu"],
+    S_s::FT = toml_dict["plant_S_s"], # m3/m3/MPa to m3/m3/m
+    conductivity_model = Weibull(toml_dict),
+    retention_model = LinearRetentionCurve(toml_dict),
+) where {FT <: AbstractFloat}
+    parameters =
+        PlantHydraulicsParameters(; ν, S_s, conductivity_model, retention_model)
+    return PlantHydraulicsModel{FT}(parameters)
+end
+
+"""
+    PrescribedBiomassModel{FT}(
+        domain,
+        LAI::AbstractTimeVaryingInput,
+        toml_dict::CP.ParamDict;
+        SAI::FT = toml_dict["SAI"],
+        RAI::FT = toml_dict["RAI"],
+        rooting_depth = clm_rooting_depth(domain.space.surface),
+        height = toml_dict["canopy_height"]
+    ) where {FT <: AbstractFloat}
+
+Creates a PrescribedBiomassModel on the provided domain, using parameters from `toml_dict`.
+
+The required argument `LAI` should be a ClimaUtilities TimeVaryingInput for leaf area index.
+
+The following default parameters are used:
+- SAI = 0 (m2/m2) - stem area index
+- RAI = 1 (m2/m2) - root area index
+- height = 1m
+"""
+function PrescribedBiomassModel{FT}(
+    domain,
+    LAI::AbstractTimeVaryingInput,
+    toml_dict::CP.ParamDict;
+    SAI::FT = toml_dict["SAI"],
+    RAI::FT = toml_dict["RAI"],
+    rooting_depth = clm_rooting_depth(domain.space.surface),
+    height = toml_dict["canopy_height"],
+) where {FT <: AbstractFloat}
+    plant_area_index = PrescribedAreaIndices(LAI, SAI, RAI)
+    return PrescribedBiomassModel{
+        FT,
+        typeof(plant_area_index),
+        typeof(rooting_depth),
+        typeof(height),
+    }(
+        plant_area_index,
+        rooting_depth,
+        height,
+    )
+end
+
+"""
+    PrescribedBiomassModel{FT}(
+        domain,
+        LAI::AbstractTimeVaryingInput,
+        maxLAI,
+        toml_dict::CP.ParamDict;
+        SAI = toml_dict["SAI_coeff"] .* maxLAI,
+        RAI = toml_dict["RAI_coeff"] .* maxLAI,
+        rooting_depth = clm_rooting_depth(domain.space.surface),
+        height = toml_dict["canopy_height"],
+    ) where {FT <: AbstractFloat}
+
+Creates a PrescribedBiomassModel with time-constant stem and root area indices
+set as a linear multiple of the per-pixel maximum LAI: SAI = SAI_coeff * maxLAI,
+RAI = RAI_coeff * maxLAI. `maxLAI` may be a scalar or a ClimaCore Field (e.g.
+from `ClimaLand.Canopy.modis_max_lai(domain.space.surface)`); SAI/RAI inherit its
+type.
+"""
+function PrescribedBiomassModel{FT}(
+    domain,
+    LAI::AbstractTimeVaryingInput,
+    maxLAI,
+    toml_dict::CP.ParamDict;
+    SAI = toml_dict["SAI_coeff"] .* maxLAI,
+    RAI = toml_dict["RAI_coeff"] .* maxLAI,
+    rooting_depth = clm_rooting_depth(domain.space.surface),
+    height = toml_dict["canopy_height"],
+) where {FT <: AbstractFloat}
+    plant_area_index = PrescribedAreaIndices(LAI, SAI, RAI)
+    return PrescribedBiomassModel{
+        FT,
+        typeof(plant_area_index),
+        typeof(rooting_depth),
+        typeof(height),
+    }(
+        plant_area_index,
+        rooting_depth,
+        height,
+    )
+end
+
+"""
+    ZhouOptimalLAIModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        SAI::FT = toml_dict["SAI"],
+        RAI::FT = toml_dict["RAI"],
+        rooting_depth = clm_rooting_depth(domain.space.surface),
+        height = toml_dict["canopy_height"],
+    ) where {FT <: AbstractFloat}
+
+Creates a ZhouOptimalLAIModel (optimal LAI based on Zhou et al. 2025) on the provided domain,
+using parameters from `toml_dict`.
+
+The optimal LAI model computes LAI dynamically based on optimality principles, balancing
+energy and water constraints. LAI is prognostic, in `Y.canopy.biomass.LAI`, and is
+mirrored into `p.canopy.biomass.area_index.leaf`.
+
+# Arguments
+- `domain`: The model domain
+- `toml_dict`: Parameter dictionary containing optimal LAI parameters
+
+# Keyword Arguments
+- `SAI`: Stem area index (m2/m2), default from toml_dict
+- `RAI`: Root area index (m2/m2), default from toml_dict
+- `rooting_depth`: Rooting depth (m), default from CLM data
+- `height`: Canopy height (m), default the constant `canopy_height` from `toml_dict`
+
+# Example
+```julia
+biomass = ZhouOptimalLAIModel{FT}(domain, toml_dict)
+canopy = CanopyModel{FT}(...; biomass, ...)
+```
+
+# References
+Zhou et al. (2025) "A General Model for the Seasonal to Decadal Dynamics of Leaf Area"
+Global Change Biology. https://onlinelibrary.wiley.com/doi/pdf/10.1111/gcb.70125
+"""
+function ZhouOptimalLAIModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    SAI::FT = toml_dict["SAI"],
+    RAI::FT = toml_dict["RAI"],
+    rooting_depth = clm_rooting_depth(domain.space.surface),
+    # Use the constant `canopy_height` (as the prescribed-biomass models do)
+    # rather than the CLM canopy-height field: the latter is ~0 at barren/alpine
+    # cells, which makes the leaf-water storage `LAI * height` in the ϑ_l tendency
+    # vanish, so once the prognostic LAI greens up the transpiration/root fluxes
+    # drive ϑ_l (and the coupled canopy/soil state) to NaN.
+    height = toml_dict["canopy_height"],
+) where {FT <: AbstractFloat}
+    parameters = OptimalLAIParameters{FT}(toml_dict)
+    return ZhouOptimalLAIModel{FT}(parameters; SAI, RAI, rooting_depth, height)
+end
+
+## Radiative transfer models
+"""
+    TwoStreamModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        radiation_parameters = clm_canopy_radiation_parameters(domain.space.surface),
+        ϵ_canopy = toml_dict["canopy_emissivity"],
+        K_lw = toml_dict["canopy_K_lw"],
+        n_layers::Int = 20,
+    )
+
+Creates a Two Stream model for canopy radiative transfer on the provided domain.
+
+Spatially-varying parameters are read in from data files in `clm_canopy_radiation_parameters`.`
+In particular, this function returns a NamedTuple containing:
+- `Ω`: clumping index
+- `G_Function`: a G function for leaf angle distribution
+- `α_PAR_leaf`, `τ_PAR_leaf`: albedo and transmissivity in the PAR band
+- `α_NIR_leaf`, `τ_NIR_leaf`: albedo and transmissivity in the NIR band
+
+Canopy emissivity and wavelength per PAR photon are currently treated
+as constants; these can be passed in as Floats by kwarg.
+Otherwise the default values from ClimaParams.jl are used.
+
+The number of layers in the canopy is set by `n_layers`, which defaults to 20.
+"""
+function TwoStreamModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    radiation_parameters = clm_canopy_radiation_parameters(
+        domain.space.surface,
+    ),
+    ϵ_canopy::FT = toml_dict["canopy_emissivity"],
+    K_lw = toml_dict["canopy_K_lw"],
+    n_layers::Int = 20,
+) where {FT <: AbstractFloat}
+    parameters = TwoStreamParameters(
+        toml_dict;
+        radiation_parameters...,
+        ϵ_canopy,
+        K_lw,
+        n_layers,
+    )
+    return TwoStreamModel{FT, typeof(parameters)}(parameters)
+end
+
+"""
+    BeerLambertModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        radiation_parameters = clm_canopy_radiation_parameters(domain.space.surface),
+        ϵ_canopy::FT = toml_dict["canopy_emissivity"],
+        K_lw = toml_dict["canopy_K_lw"]
+    ) where {FT <: AbstractFloat}
+
+Creates a Beer-Lambert model for canopy radiative transfer on the provided domain.
+
+Spatially-varying parameters are read in from data files in `clm_canopy_radiation_parameters`.`
+In particular, this function returns a field for
+- clumping index `Ω`
+- leaf angle distribution `G_Function`
+- albedo and transmissitivy in PAR and NIR bands (`α_PAR_leaf`, `τ_PAR_leaf`, `α_NIR_leaf`, `τ_NIR_leaf`)
+
+Canopy emissivity and wavelength per PAR photon are currently treated
+as constants; these can be passed in as Floats by kwarg.
+Otherwise the default values from ClimaParams.jl are used.
+"""
+function BeerLambertModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    radiation_parameters = clm_canopy_radiation_parameters(
+        domain.space.surface,
+    ),
+    ϵ_canopy::FT = toml_dict["canopy_emissivity"],
+    K_lw = toml_dict["canopy_K_lw"],
+) where {FT <: AbstractFloat}
+    # Filter out radiation parameters that are not needed for Beer-Lambert model
+    radiation_parameters = NamedTuple{
+        filter(
+            k -> k in (:α_PAR_leaf, :α_NIR_leaf, :G_Function, :Ω),
+            keys(radiation_parameters),
+        ),
+    }(
+        radiation_parameters,
+    )
+    parameters = BeerLambertParameters(
+        toml_dict;
+        ϵ_canopy,
+        K_lw,
+        radiation_parameters...,
+    )
+    return BeerLambertModel{FT, typeof(parameters)}(parameters)
+end
+
+## Stomatal conductance models
+"""
+    MedlynConductanceModel{FT}(
+        domain,
+        toml_dict::CP.ParamDict;
+        g0::FT = toml_dict["min_stomatal_conductance"],
+        g1 = clm_medlyn_g1(domain.space.surface),
+    ) where {FT <: AbstractFloat}
+
+Creates a `MedlynConductanceModel` using default parameters of type `FT`.
+
+The `conductance_parameters` argument is a NamedTuple that contains
+- `g1`: a Float or ClimaCore Field representing the slope parameter (PA^{1/2})
+By default, this parameter is set by the `clm_medlyn_g1` function,
+which reads in CLM data onto the surface space as a ClimaUtilities SpaceVaryingInput.
+
+The following default parameter is used:
+- g0 = FT(1e-4) (mol m^-2 s^-1) - minimum stomatal conductance
+"""
+function MedlynConductanceModel{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    g1 = clm_medlyn_g1(domain.space.surface),
+    g0::FT = toml_dict["min_stomatal_conductance"],
+) where {FT <: AbstractFloat}
+    parameters = MedlynConductanceParameters(toml_dict; g0, g1)
+    return MedlynConductanceModel{FT, typeof(parameters)}(parameters)
+end
+
+"""
+    PModelConductance{FT}(toml_dict;
+                          Drel = toml_dict["Drel"],
+                        ) where {FT <: AbstractFloat}
+
+Creates a PModelConductance using default parameters of type FT.
+
+The following default parameter is used:
+- Drel = FT(1.6) (unitless) - relative diffusivity of H2O to CO2 (Bonan Table A.3)
+"""
+function PModelConductance{FT}(
+    toml_dict::CP.ParamDict;
+    Drel = toml_dict["relative_diffusivity_of_water_vapor"],
+) where {FT <: AbstractFloat}
+    cond_params = PModelConductanceParameters(Drel = Drel)
+    return PModelConductance{FT}(cond_params)
+end
+
+# PModelConductance has no spatially-varying parameters, so the domain is
+# ignored; this method exists only to match the uniform (domain, toml_dict)
+# component signature used by the CanopyModel constructor.
+PModelConductance{FT}(
+    domain,
+    toml_dict::CP.ParamDict;
+    Drel = toml_dict["relative_diffusivity_of_water_vapor"],
+) where {FT <: AbstractFloat} = PModelConductance{FT}(toml_dict; Drel)
+
+
+########################################################
+# End component model convenience constructors
+########################################################
+
+"""
+     CanopyModel{FT, AR, RM, PM, SM, SMSM, PHM, EM, SIFM, B, PS, D} <: ClimaLand.AbstractImExModel{FT}
+
+The model struct for the canopy, which contains
+- the canopy model domain (a point for site-level simulations, or
+an extended surface (plane/spherical surface) for regional or global simulations.
+- subcomponent model type for radiative transfer. This is of type
+`AbstractRadiationModel`.
+- subcomponent model type for photosynthesis. This is of type
+`AbstractPhotosynthesisModel` and supports `FarquharModel`, and `PModel`.
+- subcomponent model type for stomatal conductance. This is of type
+ `AbstractStomatalConductanceModel` and supports `MedlynConductanceModel` and
+ `PModelConductance`. Note if `PModel` is used for photosynthesis, then you
+ must also use `PModelConductance` for stomatal conductance, since these two models
+ are derived from the same set of conditions.
+- subcomponent model type for soil moisture stress. This is of type
+ `AbstractSoilMoistureStressModel`. Currently we support `TuzetMoistureStressModel` (default)
+ `PiecewiseMoistureStressModel`, and `NoMoistureStressModel` (stress factor = 1).
+- subcomponent model type for plant hydraulics. This is of type
+ `AbstractPlantHydraulicsModel` and currently only a version which
+prognostically solves Richards equation in the plant is available.
+- subcomponent model type for canopy energy. This is of type
+ `AbstractCanopyEnergyModel` and currently we support a version where
+  the canopy temperature is prescribed, and one where it is solved for
+  prognostically.
+- subcomponent model type for canopy SIF.
+  prognostically.
+- canopy model parameters, which include parameters that are shared
+between canopy model components or those needed to compute boundary
+fluxes.
+- The boundary conditions, which contain:
+    - The atmospheric conditions, which are either prescribed
+      (of type `PrescribedAtmosphere`) or computed via a coupled simulation
+      (of type `CoupledAtmosphere`).
+    - The radiative flux conditions, which are either prescribed
+      (of type `PrescribedRadiativeFluxes`) or computed via a coupled simulation
+      (of type `CoupledRadiativeFluxes`).
+    - The ground conditions, which are either prescribed or prognostic
+
+Note that the canopy height is specified as part of the
+PlantHydraulicsModel, along with the area indices of the leaves, roots, and
+stems. Eventually, when plant biomass becomes a prognostic variable (by
+integrating with a carbon model), some parameters specified here will be
+treated differently.
+
+$(DocStringExtensions.FIELDS)
+"""
+struct CanopyModel{FT, AR, RM, PM, SM, SMSM, PHM, EM, SIFM, BM, B, PSE, D} <:
+       ClimaLand.AbstractImExModel{FT}
+    "Autotrophic respiration model, a canopy component model"
+    autotrophic_respiration::AR
+    "Radiative transfer model, a canopy component model"
+    radiative_transfer::RM
+    "Photosynthesis model, a canopy component model"
+    photosynthesis::PM
+    "Stomatal conductance model, a canopy component model"
+    conductance::SM
+    "Soil moisture stress parameterization, a canopy component model"
+    soil_moisture_stress::SMSM
+    "Plant hydraulics model, a canopy component model"
+    hydraulics::PHM
+    "Energy balance model, a canopy component model"
+    energy::EM
+    "SIF model, a canopy component model"
+    sif::SIFM
+    "Biomass parameterization, a canopy component model"
+    biomass::BM
+    "Boundary Conditions"
+    boundary_conditions::B
+    "Shared parameters between component models"
+    earth_param_set::PSE
+    "Canopy model domain"
+    domain::D
+end
+
+"""
+    check_component_compatibility(photosynthesis, conductance, biomass)
+
+Asserts that the canopy components can be used together: the P-model requires the
+P-model stomatal conductance and vice versa, and `ZhouOptimalLAIModel` requires the
+P-model.
+"""
+function check_component_compatibility(photosynthesis, conductance, biomass)
+    if photosynthesis isa PModel
+        @assert conductance isa PModelConductance "When using PModel for photosynthesis, you must also use PModelConductance for stomatal conductance"
+    end
+    if conductance isa PModelConductance
+        @assert photosynthesis isa PModel "When using PModelConductance for stomatal conductance, you must also use PModel for photosynthesis"
+    end
+    if biomass isa ZhouOptimalLAIModel
+        @assert photosynthesis isa PModel "When using ZhouOptimalLAIModel for biomass, you must also use PModel for photosynthesis"
+    end
+    return nothing
+end
+
+"""
+    CanopyModel{FT}(;
+        autotrophic_respiration::AbstractAutotrophicRespirationModel{FT},
+        radiative_transfer::AbstractRadiationModel{FT},
+        photosynthesis::AbstractPhotosynthesisModel{FT},
+        conductance::AbstractStomatalConductanceModel{FT},
+        soil_moisture_stress::AbstractSoilMoistureStressModel{FT},
+        hydraulics::AbstractPlantHydraulicsModel{FT},
+        energy::AbstractCanopyEnergyModel{FT},
+        sif::AbstractSIFModel{FT},
+        biomass::AbstractBiomassModel{FT},
+        boundary_conditions::B,
+        earth_param_set::PSE,
+        domain::Union{
+            ClimaLand.Domains.Point,
+            ClimaLand.Domains.Plane,
+            ClimaLand.Domains.SphericalSurface,
+        },
+        energy = PrescribedCanopyTempModel{FT}(),
+    ) where {FT, PSE}
+
+An outer constructor for the `CanopyModel`, which makes certain
+consistency checks between parameterizations.
+"""
+function CanopyModel{FT}(;
+    autotrophic_respiration::AbstractAutotrophicRespirationModel{FT},
+    radiative_transfer::AbstractRadiationModel{FT},
+    photosynthesis::AbstractPhotosynthesisModel{FT},
+    conductance::AbstractStomatalConductanceModel{FT},
+    hydraulics::AbstractPlantHydraulicsModel{FT},
+    soil_moisture_stress::AbstractSoilMoistureStressModel{FT},
+    sif::AbstractSIFModel{FT},
+    energy = PrescribedCanopyTempModel{FT}(),
+    biomass::AbstractBiomassModel{FT},
+    boundary_conditions::B,
+    earth_param_set::PSE,
+    domain::Union{
+        ClimaLand.Domains.Point,
+        ClimaLand.Domains.Plane,
+        ClimaLand.Domains.SphericalSurface,
+    },
+) where {FT, B, PSE}
+
+    check_component_compatibility(photosynthesis, conductance, biomass)
+
+    args = (
+        autotrophic_respiration,
+        radiative_transfer,
+        photosynthesis,
+        conductance,
+        soil_moisture_stress,
+        hydraulics,
+        energy,
+        sif,
+        biomass,
+        boundary_conditions,
+        earth_param_set,
+        domain,
+    )
+    return CanopyModel{FT, typeof.(args)...}(args...)
+end
+
+"""
+    function CanopyModel{FT}(
+        domain::Union{
+            ClimaLand.Domains.Point,
+            ClimaLand.Domains.Plane,
+            ClimaLand.Domains.SphericalSurface,
+        },
+        forcing::NamedTuple,
+        LAI::AbstractTimeVaryingInput,
+        toml_dict::CP.ParamDict;
+        prognostic_land_components = (:canopy,),
+        autotrophic_respiration = AutotrophicRespirationModel{FT}(toml_dict),
+        radiative_transfer = TwoStreamModel{FT}(domain, toml_dict),
+        photosynthesis = PModel{FT}(domain, toml_dict),
+        conductance = PModelConductance{FT}(toml_dict),
+        soil_moisture_stress = TuzetMoistureStressModel{FT}(toml_dict),
+        hydraulics = PlantHydraulicsModel{FT}(domain, toml_dict),
+        energy = BigLeafEnergyModel{FT}(toml_dict),
+        biomass= PrescribedBiomassModel{FT}(domain, LAI, toml_dict),
+        sif = Lee2015SIFModel{FT}(toml_dict),
+        turbulent_flux_parameterization = MoninObukhovCanopyFluxes(toml_dict, biomass.height),
+    ) where {FT, PSE}
+
+Creates a `CanopyModel` with the provided `domain`, `forcing`, and `toml_dict`.
+
+Defaults are provided for each canopy component model, which can be overridden
+by passing in a different instance of that type of model. Default parameters are also provided
+for each canopy component, and can be changed with keyword arguments. Please see the documentation
+of each component model for details on the default parameters.
+
+The required argument `forcing` should be a NamedTuple with the following field:
+- `atmos`: a `PrescribedAtmosphere` or `CoupledAtmosphere` object
+- `radiation`: a `PrescribedRadiativeFluxes` or `CoupledRadiativeFluxes` object
+- `ground`: a `PrescribedGroundConditions` or `PrognosticGroundConditions` object
+
+The required argument `LAI` should be a `ClimaUtilities.TimeVaryingInputs.TimeVaryingInput`
+for leaf area index.
+
+When running the canopy model in standalone mode, set `prognostic_land_components = (:canopy,)`,
+while for running integrated land models, this should be a list of the individual models.
+This value of this argument must be the same across all components in the land model.
+"""
+function CanopyModel{FT}(
+    domain::Union{
+        ClimaLand.Domains.Point,
+        ClimaLand.Domains.Plane,
+        ClimaLand.Domains.SphericalSurface,
+    },
+    forcing::NamedTuple,
+    LAI::AbstractTimeVaryingInput,
+    toml_dict::CP.ParamDict;
+    prognostic_land_components = (:canopy,),
+    autotrophic_respiration = AutotrophicRespirationModel{FT}(toml_dict),
+    radiative_transfer = TwoStreamModel{FT}(domain, toml_dict),
+    photosynthesis = PModel{FT}(domain, toml_dict),
+    conductance = PModelConductance{FT}(toml_dict),
+    soil_moisture_stress = TuzetMoistureStressModel{FT}(toml_dict),
+    hydraulics = PlantHydraulicsModel{FT}(domain, toml_dict),
+    energy = BigLeafEnergyModel{FT}(toml_dict),
+    biomass = PrescribedBiomassModel{FT}(domain, LAI, toml_dict),
+    turbulent_flux_parameterization = MoninObukhovCanopyFluxes(
+        toml_dict,
+        biomass.height,
+    ),
+    sif = Lee2015SIFModel{FT}(toml_dict),
+) where {FT}
+    (; atmos, radiation, ground) = forcing
+
+    # Confirm that each spatially-varying parameter is on the correct domain
+    for component in [
+        autotrophic_respiration,
+        radiative_transfer,
+        photosynthesis,
+        conductance,
+        soil_moisture_stress,
+        hydraulics,
+        energy,
+        biomass,
+        sif,
+    ]
+        # For component models without parameters, skip the check
+        !hasproperty(component, :parameters) && continue
+
+        @assert !(component.parameters isa ClimaCore.Fields.Field) ||
+                axes(component.parameters) == domain.space.surface
+    end
+
+    # Confirm that the LAI passed agrees with the LAI of the biomass model
+    @assert biomass.plant_area_index.LAI == LAI
+    boundary_conditions = AtmosDrivenCanopyBC(
+        atmos,
+        radiation,
+        ground,
+        turbulent_flux_parameterization,
+        prognostic_land_components,
+    )
+
+    earth_param_set = LP.LandParameters(toml_dict)
+    args = (
+        autotrophic_respiration,
+        radiative_transfer,
+        photosynthesis,
+        conductance,
+        soil_moisture_stress,
+        hydraulics,
+        energy,
+        sif,
+        biomass,
+        boundary_conditions,
+        earth_param_set,
+        domain,
+    )
+    check_component_compatibility(photosynthesis, conductance, biomass)
+    return CanopyModel{FT, typeof.(args)...}(args...)
+end
+
+"""
+    function CanopyModel{FT}(
+        domain,
+        forcing::NamedTuple,
+        toml_dict::CP.ParamDict;
+        prognostic_land_components = (:canopy,),
+        biomass = ZhouOptimalLAIModel{FT}(domain, toml_dict),
+        ...
+    ) where {FT}
+
+Creates a `CanopyModel` with the provided `domain`, `forcing`, and `toml_dict`,
+using the optimal LAI model (ZhouOptimalLAIModel) by default.
+
+This constructor does not require `LAI` as a positional argument, making it suitable
+for use with prognostic LAI models like `ZhouOptimalLAIModel`.
+
+Defaults are provided for each canopy component model, which can be overridden
+by passing in a different instance of that type of model.
+
+The required argument `forcing` should be a NamedTuple with the following fields:
+- `atmos`: a `PrescribedAtmosphere` or `CoupledAtmosphere` object
+- `radiation`: a `PrescribedRadiativeFluxes` or `CoupledRadiativeFluxes` object
+- `ground`: a `PrescribedGroundConditions` or `PrognosticGroundConditions` object
+
+When running the canopy model in standalone mode, set `prognostic_land_components = (:canopy,)`,
+while for running integrated land models, this should be a list of the individual models.
+"""
+function CanopyModel{FT}(
+    domain::Union{
+        ClimaLand.Domains.Point,
+        ClimaLand.Domains.Plane,
+        ClimaLand.Domains.SphericalSurface,
+    },
+    forcing::NamedTuple,
+    toml_dict::CP.ParamDict;
+    prognostic_land_components = (:canopy,),
+    autotrophic_respiration = AutotrophicRespirationModel{FT}(toml_dict),
+    radiative_transfer = TwoStreamModel{FT}(domain, toml_dict),
+    photosynthesis = PModel{FT}(domain, toml_dict),
+    conductance = PModelConductance{FT}(domain, toml_dict),
+    soil_moisture_stress = TuzetMoistureStressModel{FT}(toml_dict),
+    hydraulics = PlantHydraulicsModel{FT}(domain, toml_dict),
+    energy = BigLeafEnergyModel{FT}(toml_dict),
+    biomass = ZhouOptimalLAIModel{FT}(domain, toml_dict),
+    turbulent_flux_parameterization = MoninObukhovCanopyFluxes(
+        toml_dict,
+        biomass.height,
+    ),
+    sif = Lee2015SIFModel{FT}(toml_dict),
+) where {FT}
+    (; atmos, radiation, ground) = forcing
+
+    # Confirm that each spatially-varying parameter is on the correct domain
+    for component in [
+        autotrophic_respiration,
+        radiative_transfer,
+        photosynthesis,
+        conductance,
+        soil_moisture_stress,
+        hydraulics,
+        energy,
+        biomass,
+        sif,
+    ]
+        # For component models without parameters, skip the check
+        !hasproperty(component, :parameters) && continue
+
+        @assert !(component.parameters isa ClimaCore.Fields.Field) ||
+                axes(component.parameters) == domain.space.surface
+    end
+
+    boundary_conditions = AtmosDrivenCanopyBC(
+        atmos,
+        radiation,
+        ground,
+        turbulent_flux_parameterization,
+        prognostic_land_components,
+    )
+
+    earth_param_set = LP.LandParameters(toml_dict)
+    args = (
+        autotrophic_respiration,
+        radiative_transfer,
+        photosynthesis,
+        conductance,
+        soil_moisture_stress,
+        hydraulics,
+        energy,
+        sif,
+        biomass,
+        boundary_conditions,
+        earth_param_set,
+        domain,
+    )
+    check_component_compatibility(photosynthesis, conductance, biomass)
+    return CanopyModel{FT, typeof.(args)...}(args...)
+end
+
+ClimaLand.name(::CanopyModel) = :canopy
+
+"""
+    canopy_components(::CanopyModel)
+
+Returns the names of the components of the CanopyModel.
+
+These names are used for storing prognostic and auxiliary variables
+in a hierarchical manner within the state vectors.
+
+These names must match the field names of the CanopyModel struct.
+"""
+canopy_components(::CanopyModel) = (
+    :hydraulics,
+    :conductance,
+    :photosynthesis,
+    :radiative_transfer,
+    :autotrophic_respiration,
+    :energy,
+    :sif,
+    :soil_moisture_stress,
+    :biomass,
+)
+
+"""
+    prognostic_vars(canopy::CanopyModel)
+
+Returns the prognostic variables for the canopy model by
+looping over each sub-component name in `canopy_components`.
+
+This relies on the propertynames of `CanopyModel` being the same
+as those returned by `canopy_components`.
+"""
+function prognostic_vars(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    prognostic_list = map(components) do model
+        prognostic_vars(getproperty(canopy, model))
+    end
+    return NamedTuple{components}(prognostic_list)
+end
+
+"""
+    prognostic_types(canopy::CanopyModel)
+
+Returns the prognostic types for the canopy model by
+looping over each sub-component name in `canopy_components`.
+
+This relies on the propertynames of `CanopyModel` being the same
+as those returned by `canopy_components`.
+"""
+function prognostic_types(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    prognostic_list = map(components) do model
+        prognostic_types(getproperty(canopy, model))
+    end
+    return NamedTuple{components}(prognostic_list)
+end
+
+"""
+    auxiliary_vars(canopy::CanopyModel)
+
+Returns the auxiliary variables for the canopy model by
+looping over each sub-component name in `canopy_components`.
+
+This relies on the propertynames of `CanopyModel` being the same
+as those returned by `canopy_components`.
+"""
+function auxiliary_vars(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    auxiliary_list = map(components) do model
+        auxiliary_vars(getproperty(canopy, model))
+    end
+    return NamedTuple{components}(auxiliary_list)
+end
+
+"""
+    auxiliary_types(canopy::CanopyModel)
+
+Returns the auxiliary types for the canopy model by
+looping over each sub-component name in `canopy_components`.
+
+This relies on the propertynames of `CanopyModel` being the same
+as those returned by `canopy_components`.
+"""
+function auxiliary_types(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    auxiliary_list = map(components) do model
+        auxiliary_types(getproperty(canopy, model))
+    end
+    return NamedTuple{components}(auxiliary_list)
+end
+
+"""
+    filter_nt(nt::NamedTuple)
+
+Removes all key/value pairs of a NamedTuple where the value is `nothing`.
+Note that NamedTuples are immutable, so rather than updating the input
+in-place, this creates a new NamedTuple with the filtered key/value pairs.
+
+This results in unnecessary allocations because a new object is being
+created, and we may want to implement a better solution in the future.
+"""
+function filter_nt(nt::NamedTuple)
+    pairs = []
+    for (k, v) in (zip(keys(nt), values(nt)))
+        ~(isnothing(v)) ? push!(pairs, k => (filter_nt(v))) : (;)
+    end
+    return NamedTuple(pairs)
+end
+
+"""
+    filter_nt(nt)
+
+Base case for `filter_nt` recursion, used when this function is called on
+a NamedTuple with no nested NamedTuples.
+"""
+filter_nt(nt) = nt
+
+"""
+    initialize_prognostic(
+        model::CanopyModel{FT},
+        coords,
+    ) where {FT}
+
+Creates the prognostic state vector of the `CanopyModel` and returns
+it as a ClimaCore.Fields.FieldVector.
+
+The input `state` is usually a ClimaCore Field object.
+
+This function loops over the components of the `CanopyModel` and appends
+each component models prognostic state vector into a single state vector,
+structured by component name.
+"""
+function initialize_prognostic(model::CanopyModel{FT}, coords) where {FT}
+    components = canopy_components(model)
+    Y_state_list = map(components) do (component)
+        submodel = getproperty(model, component)
+        getproperty(initialize_prognostic(submodel, coords), component)
+    end
+    # `Y_state_list` contains `nothing` for components with no prognostic
+    #  variables, which we need to filter out before constructing `Y`
+    Y = ClimaCore.Fields.FieldVector(;
+        name(model) => filter_nt(NamedTuple{components}(Y_state_list)),
+    )
+    return Y
+end
+
+"""
+    initialize_auxiliary(
+        model::CanopyModel{FT},
+        coords,
+    ) where {FT}
+
+Creates the auxiliary state vector of the `CanopyModel` and returns
+ it as a ClimaCore.Fields.FieldVector.
+
+The input `coords` is usually a ClimaCore Field object.
+
+This function loops over the components of the `CanopyModel` and appends
+each component models auxiliary state vector into a single state vector,
+structured by component name.
+"""
+function initialize_auxiliary(model::CanopyModel{FT}, coords) where {FT}
+    components = canopy_components(model)
+    p_state_list = map(components) do (component)
+        submodel = getproperty(model, component)
+        getproperty(initialize_auxiliary(submodel, coords), component)
+    end
+    # `p_state_list` contains `nothing` for components with no auxiliary
+    #  variables, which we need to filter out before constructing `p`
+    # We also add in boundary variables here.
+    p = (;
+        name(model) => (;
+            filter_nt(NamedTuple{components}(p_state_list))...,
+            initialize_boundary_vars(model, coords)...,
+        )
+    )
+    p = ClimaLand.add_dss_buffer_to_aux(p, model.domain)
+    return p
+end
+
+"""
+    initialize_boundary_vars(model::CanopyModel{FT}, coords)
+
+Add boundary condition-related variables to the cache.
+This calls functions defined in canopy_boundary_fluxes.jl
+which dispatch on the boundary condition type to add the correct variables.
+"""
+function initialize_boundary_vars(model::CanopyModel{FT}, coords) where {FT}
+    vars = boundary_vars(model.boundary_conditions, ClimaLand.TopBoundary())
+    types = boundary_var_types(
+        model,
+        model.boundary_conditions,
+        ClimaLand.TopBoundary(),
+    )
+    domains = boundary_var_domain_names(
+        model.boundary_conditions,
+        ClimaLand.TopBoundary(),
+    )
+    additional_aux = map(zip(types, domains)) do (T, domain)
+        zeros(T, axes(getproperty(coords, domain)))
+    end
+    return NamedTuple{vars}(additional_aux)
+end
+
+"""
+     ClimaLand.make_update_aux(canopy::CanopyModel)
+
+Creates the `update_aux!` function for the `CanopyModel`
+
+Please note that the plant hydraulics model has auxiliary variables
+that are updated in its prognostic `compute_exp_tendency!` function.
+While confusing, this is better for performance as it saves looping
+over the state vector multiple times.
+
+The other sub-components rely heavily on each other,
+so the version of the `CanopyModel` with these subcomponents
+has a single update_aux! function, given here.
+"""
+function ClimaLand.make_update_aux(canopy::CanopyModel)
+    NVTX.@annotate function update_aux!(p, Y, t)
+
+        # This updates LAI; it must come first.
+        update_biomass!(p, Y, t, canopy.biomass, canopy)
+
+        # Update p.canopy.radiative_transfer.par, .nir, .ϵ, .par_d, .nir_d
+        update_radiative_transfer!(p, Y, t, canopy.radiative_transfer, canopy)
+
+        # update the cache for hydraulics; what this update depends
+        # on the type of canopy.hydraulics
+        update_hydraulics!(p, Y, canopy.hydraulics, canopy)
+
+        # Update soil moisture stress, used in photosynthesis and conductance
+        update_soil_moisture_stress!(p, Y, canopy.soil_moisture_stress, canopy)
+
+        # Update Rd, An, Vcmax25 (if applicable to model) in place, GPP
+        update_photosynthesis!(p, Y, canopy.photosynthesis, canopy)
+
+        # update SIF (after photosynthesis!)
+        update_SIF!(p, Y, canopy.sif, canopy.photosynthesis, canopy)
+
+        # update stomatal conductance
+        update_canopy_conductance!(p, Y, canopy.conductance, canopy)
+
+        # update autotrophic respiration
+        update_autotrophic_respiration!(
+            p,
+            Y,
+            canopy.autotrophic_respiration,
+            canopy,
+        )
+    end
+    return update_aux!
+end
+
+"""
+    make_compute_exp_tendency(canopy::CanopyModel)
+
+Creates and returns the compute_exp_tendency! for the `CanopyModel`.
+"""
+function make_compute_exp_tendency(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    compute_exp_tendency_list = map(
+        x -> make_compute_exp_tendency(getproperty(canopy, x), canopy),
+        components,
+    )
+    NVTX.@annotate function compute_exp_tendency!(dY, Y, p, t)
+        for f! in compute_exp_tendency_list
+            f!(dY, Y, p, t)
+        end
+
+    end
+    return compute_exp_tendency!
+end
+
+function make_update_implicit_aux(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    update_implicit_aux_list = map(
+        x -> make_update_implicit_aux(getproperty(canopy, x), canopy),
+        components,
+    )
+    function update_implicit_aux!(p, Y, t)
+        for f! in update_implicit_aux_list
+            f!(p, Y, t)
+        end
+    end
+    return update_implicit_aux!
+end
+
+function make_update_implicit_boundary_fluxes(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    update_implicit_boundary_fluxes_list = map(
+        x -> make_update_implicit_boundary_fluxes(
+            getproperty(canopy, x),
+            canopy,
+        ),
+        components,
+    )
+    function update_implicit_boundary_fluxes!(p, Y, t)
+        for f! in update_implicit_boundary_fluxes_list
+            f!(p, Y, t)
+        end
+    end
+    return update_implicit_boundary_fluxes!
+end
+
+"""
+    make_compute_imp_tendency(canopy::CanopyModel)
+
+Creates and returns the compute_imp_tendency! for the `CanopyModel`.
+"""
+function make_compute_imp_tendency(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    compute_imp_tendency_list = map(
+        x -> make_compute_imp_tendency(getproperty(canopy, x), canopy),
+        components,
+    )
+    NVTX.@annotate function compute_imp_tendency!(dY, Y, p, t)
+        for f! in compute_imp_tendency_list
+            f!(dY, Y, p, t)
+        end
+
+    end
+    return compute_imp_tendency!
+end
+
+"""
+    ClimaLand.make_compute_jacobian(canopy::CanopyModel)
+
+Creates and returns the compute_jacobian! for the `CanopyModel`.
+"""
+function ClimaLand.make_compute_jacobian(canopy::CanopyModel)
+    components = canopy_components(canopy)
+    update_jacobian_list = map(
+        x -> make_compute_jacobian(getproperty(canopy, x), canopy),
+        components,
+    )
+    NVTX.@annotate function compute_jacobian!(W, Y, p, dtγ, t)
+        for f! in update_jacobian_list
+            f!(W, Y, p, dtγ, t)
+        end
+
+    end
+    return compute_jacobian!
+end
+
+
+function ClimaLand.get_drivers(model::CanopyModel)
+    ClimaLand.get_drivers(model.boundary_conditions)
+end
+include("./canopy_boundary_fluxes.jl")
+#Make the canopy model broadcastable
+Base.broadcastable(C::CanopyModel) = tuple(C)
+
+"""
+    ClimaLand.total_energy_per_area!(
+        surface_field,
+        model::CanopyModel,
+        Y,
+        p,
+        t,
+    )
+
+A function which updates `surface_field` in place with the value for
+the total energy per unit ground area for the `CanopyModel`.
+
+This acts by calling the method for the energy component of
+the canopy model.
+"""
+function ClimaLand.total_energy_per_area!(
+    surface_field,
+    model::CanopyModel,
+    Y,
+    p,
+    t,
+)
+    ClimaLand.total_energy_per_area!(
+        surface_field,
+        model.energy,
+        model,
+        Y,
+        p,
+        t,
+    )
+end
+
+"""
+    ClimaLand.total_liq_water_vol_per_area!(
+        surface_field,
+        model::CanopyModel,
+        Y,
+        p,
+        t,
+    )
+
+A function which updates `surface_field` in place with the value for
+the total liquid water volume per unit ground area for the `CanopyModel`.
+
+This acts by calling the method for the PlantHydraulics component of
+the canopy model.
+"""
+function ClimaLand.total_liq_water_vol_per_area!(
+    surface_field,
+    model::CanopyModel,
+    Y,
+    p,
+    t,
+)
+    ClimaLand.total_liq_water_vol_per_area!(
+        surface_field,
+        model.hydraulics,
+        model,
+        Y,
+        p,
+        t,
+    )
+end
+
+"""
+     get_model_callbacks(model::CanopyModel{FT}; start_date, Δt) where {FT}
+
+Creates the tuple of model callbacks for a CanopyModel
+by calling `get_model_callbacks` on each component model.
+"""
+function get_model_callbacks(model::CanopyModel{FT}; t0, Δt) where {FT}
+    components = canopy_components(model)
+    callbacks = ()
+    map(components) do (component)
+        submodel = getproperty(model, component)
+        cb = get_model_callbacks(submodel, model; t0, Δt)
+        callbacks = (callbacks..., cb...)
+    end
+    return callbacks
+end
+
+end

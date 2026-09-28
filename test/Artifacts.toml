@@ -1,0 +1,41 @@
+[landsea_mask_30arcseconds]
+git-tree-sha1 = "517c925535981f9d17ac9e7a65e2c35c3ce9597d"
+
+    [[landsea_mask_30arcseconds.download]]
+    sha256 = "11eaf6b7606056d198f3735f7b76ead76269cced186de78075f415101cf39088"
+    url = "https://caltech.box.com/shared/static/z013ay1k6oqofnw69bv5held9x374sux.gz"
+
+[landsea_mask_60arcseconds]
+git-tree-sha1 = "10ed7ec61def091c44545825cfb4d9599216c3c8"
+
+    [[landsea_mask_60arcseconds.download]]
+    sha256 = "eb88455a39a00bfadb77effbc31a4df561158c0ca1578476edb683d45e3c49da"
+    url = "https://caltech.box.com/shared/static/vivf36pih7e0ttahqarc2nd5jxb4q8jr.gz"
+
+[landsea_mask_1deg]
+git-tree-sha1 = "cbbc6b3752d9cb9b667ec33cfbeb46819f8db418"
+
+    [[landsea_mask_1deg.download]]
+    sha256 = "3722b553c2fdf28a6574aea2e0b167d16ab050f34e5969ada45625b3a3ecb6da"
+    url = "https://caltech.box.com/shared/static/b3u4dv0dsoswvqgp8y63bzj7awbhwztd.gz"
+    
+[twostr_test]
+git-tree-sha1 = "b0986aa28e7970a9c080461f5e52fb125cda9c3d"
+
+    [[twostr_test.download]]
+    sha256 = "c972f3ff4e041a4443c6e970021f1084a1cc176c2aeeda453f3351ef7cffa60b"
+    url = "https://caltech.box.com/shared/static/zh7wb0ar8kwg4sio64id9e6otzcsfhad.gz"
+
+[water_conservation_test]
+git-tree-sha1 = "135f148951f20f170c3a4896848911a37500d88b"
+
+    [[water_conservation_test.download]]
+    sha256 = "6f66eaf01fc8c796dfc7d879c4aec4412d06d02cba2cbf6b7ec283d4b3834838"
+    url = "https://caltech.box.com/shared/static/sid7bo8at7nxirfgmd2o7pqq8vky71pb.gz"
+
+[pmodel_unittests]
+git-tree-sha1 = "7bc54ddf3fed38e986820ee8b9753ed9ad5060d0"
+
+    [[pmodel_unittests.download]]
+    sha256 = "f1da61cddbc781a007a88f6b0c22f1b232daf9bb12b17a6f96358bda73c7e85d"
+    url = "https://caltech.box.com/shared/static/o1qa0e0e2sh2w4hig3miy1jwzd41lafx.gz"

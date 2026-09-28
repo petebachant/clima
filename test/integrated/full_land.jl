@@ -1,0 +1,956 @@
+using ClimaComms
+ClimaComms.@import_required_backends
+import ClimaTimeSteppers as CTS
+using ClimaCore.MatrixFields
+import ClimaCore.MatrixFields: @name
+using ClimaUtilities.ClimaArtifacts
+using Dates
+using Test
+import ClimaParams as CP
+using ClimaLand
+using ClimaLand.Domains
+using ClimaLand.Soil
+using ClimaLand.Canopy
+using ClimaLand.Snow
+import ClimaLand.Parameters as LP
+using ClimaCore
+using ClimaUtilities.TimeManager: ITime
+import ClimaTimeSteppers
+
+for FT in (Float32, Float64)
+    @testset "Default LandModel constructor, FT=$FT" begin
+        toml_dict = LP.create_toml_dict(FT)
+        domain = Domains.global_domain(FT)
+        atmos, radiation = ClimaLand.prescribed_analytic_forcing(FT; toml_dict)
+        forcing = (; atmos, radiation)
+        prognostic_land_components = (:canopy, :snow, :soil, :soilco2)
+
+        dt = FT(180)
+
+        # Soil model
+        soil = Soil.EnergyHydrology{FT}(
+            domain,
+            forcing,
+            toml_dict;
+            prognostic_land_components,
+            additional_sources = (ClimaLand.RootExtraction{FT}(),),
+        )
+
+        # SoilCO2 model
+        co2_prognostic_soil =
+            Soil.Biogeochemistry.PrognosticMet(soil.parameters)
+        soilco2_drivers =
+            Soil.Biogeochemistry.SoilDrivers(co2_prognostic_soil, atmos)
+        soilco2 = Soil.Biogeochemistry.SoilCO2Model{FT}(
+            domain,
+            soilco2_drivers,
+            toml_dict,
+        )
+
+        # Canopy model
+        surface_domain = Domains.obtain_surface_domain(domain)
+        LAI = TimeVaryingInput((t) -> FT(1.0))
+        ground = ClimaLand.PrognosticGroundConditions{FT}()
+        canopy_forcing = (; atmos, radiation, ground)
+        canopy = Canopy.CanopyModel{FT}(
+            surface_domain,
+            canopy_forcing,
+            LAI,
+            toml_dict;
+            prognostic_land_components,
+        )
+
+        # Snow model
+        snow = SnowModel(
+            FT,
+            surface_domain,
+            forcing,
+            toml_dict,
+            dt;
+            prognostic_land_components,
+        )
+        lake = nothing
+        model = LandModel{FT}(canopy, snow, soil, soilco2, lake)
+
+        # The constructor has many asserts that check the model
+        # components, so we don't need to check them again here.
+        @test model.soil === soil
+        @test model.soilco2 === soilco2
+        @test model.canopy === canopy
+        @test model.snow === snow
+        @test isnothing(model.lake)
+    end
+
+    @testset "LandModel and component model show and summary, FT=$FT" begin
+        toml_dict = LP.create_toml_dict(FT)
+        domain = Domains.global_domain(FT)
+        atmos, radiation = ClimaLand.prescribed_analytic_forcing(FT; toml_dict)
+        forcing = (; atmos, radiation)
+        prognostic_land_components = (:canopy, :snow, :soil, :soilco2)
+        soil = Soil.EnergyHydrology{FT}(
+            domain,
+            forcing,
+            toml_dict;
+            prognostic_land_components,
+            additional_sources = (ClimaLand.RootExtraction{FT}(),),
+        )
+        co2_prognostic_soil =
+            Soil.Biogeochemistry.PrognosticMet(soil.parameters)
+        soilco2_drivers =
+            Soil.Biogeochemistry.SoilDrivers(co2_prognostic_soil, atmos)
+        soilco2 = Soil.Biogeochemistry.SoilCO2Model{FT}(
+            domain,
+            soilco2_drivers,
+            toml_dict,
+        )
+        surface_domain = Domains.obtain_surface_domain(domain)
+        LAI = TimeVaryingInput((t) -> FT(1.0))
+        ground = ClimaLand.PrognosticGroundConditions{FT}()
+        canopy_forcing = (; atmos, radiation, ground)
+        canopy = Canopy.CanopyModel{FT}(
+            surface_domain,
+            canopy_forcing,
+            LAI,
+            toml_dict;
+            prognostic_land_components,
+        )
+        snow = SnowModel(
+            FT,
+            surface_domain,
+            forcing,
+            toml_dict,
+            FT(180);
+            prognostic_land_components,
+        )
+        model = LandModel{FT}(canopy, snow, soil, soilco2, nothing)
+
+        # `soil` also exercises the generic AbstractModel fallback show
+        for x in (model, soil)
+            typename = string(nameof(typeof(x)))
+
+            out = sprint(show, MIME("text/plain"), x)
+            @test occursin(typename, out)
+            @test count(==('\n'), out) <= 10
+
+            out2 = sprint(show, x)
+            @test occursin(typename, out2)
+            @test !occursin('\n', out2)
+            out3 =
+                sprint(show, MIME("text/plain"), x; context = :compact => true)
+            @test out2 == out3
+
+            out_summary = sprint(summary, x)
+            @test occursin(typename, out_summary)
+            @test !occursin('\n', out_summary)
+        end
+    end
+
+    @testset "LandModel with no soilco2 model constructor, FT=$FT" begin
+        toml_dict = LP.create_toml_dict(FT)
+        domain = Domains.global_domain(FT)
+        atmos, radiation = ClimaLand.prescribed_analytic_forcing(FT; toml_dict)
+        forcing = (; atmos, radiation)
+        prognostic_land_components = (:canopy, :snow, :soil)
+
+        # Soil model
+        soil = Soil.EnergyHydrology{FT}(
+            domain,
+            forcing,
+            toml_dict;
+            prognostic_land_components,
+            additional_sources = (ClimaLand.RootExtraction{FT}(),),
+        )
+
+        # Canopy model
+        surface_domain = Domains.obtain_surface_domain(domain)
+        LAI = TimeVaryingInput((t) -> FT(1.0))
+        ground = ClimaLand.PrognosticGroundConditions{FT}()
+        canopy_forcing = (; atmos, radiation, ground)
+        canopy = Canopy.CanopyModel{FT}(
+            surface_domain,
+            canopy_forcing,
+            LAI,
+            toml_dict;
+            prognostic_land_components,
+        )
+
+        # Snow model
+        dt = FT(180)
+        snow = SnowModel(
+            FT,
+            surface_domain,
+            forcing,
+            toml_dict,
+            dt;
+            prognostic_land_components,
+        )
+        soilco2 = nothing
+        lake = nothing
+        model = LandModel{FT}(canopy, snow, soil, soilco2, lake)
+
+        # The constructor has many asserts that check the model
+        # components, so we don't need to check them again here.
+        @test model.soil === soil
+        @test isnothing(model.soilco2)
+        @test model.canopy === canopy
+        @test model.snow === snow
+        @test isnothing(model.lake)
+        Y, p, cds = initialize(model)
+        @test !hasproperty(Y, :soilco2)
+        @test ClimaLand.land_components(model) == (:canopy, :snow, :soil)
+    end
+end
+
+"""
+    check_ocean_values_p(p, binary_mask; val = 0.0)
+
+This function tests that every field stored in `p` has all of
+its values (where binary_mask == 1) equal to  `val`. Note that
+this is meant to be used with the full land model (canopy,
+snow, soil, soilco2).
+
+Useful for checking if land model functions are updating the
+values over the ocean.
+"""
+function check_ocean_values_p(p, binary_mask; val = 0.0)
+    properties = [
+        p.drivers,
+        p.soil,
+        p.soilco2,
+        p.snow,
+        p.canopy.energy,
+        p.canopy.hydraulics,
+        p.canopy.radiative_transfer,
+        p.canopy.photosynthesis,
+        p.canopy.sif,
+        p.canopy.turbulent_fluxes,
+        p.canopy.autotrophic_respiration,
+        p.canopy.conductance,
+    ]
+    for property in properties
+        for var in propertynames(property)
+            field_values = Array(parent(getproperty(property, var)))
+            if length(size(field_values)) == 5 # 3d var
+                @test extrema(field_values[:, 1, 1, :, Array(binary_mask)]) ==
+                      (val, val)
+            else
+                @test extrema(field_values[1, 1, :, Array(binary_mask)]) ==
+                      (val, val)
+            end
+        end
+    end
+
+    field_pn_p = [
+        pn for pn in propertynames(p) if pn != :soil &&
+            pn != :canopy &&
+            pn != :snow &&
+            pn != :soilco2 &&
+            pn != :drivers &&
+            ~occursin("dss", String(pn))
+    ]
+
+    for var in field_pn_p
+        field_values = Array(parent(getproperty(p, var)))
+        if length(size(field_values)) == 5 # 3d var
+            @test extrema(field_values[:, 1, 1, :, Array(binary_mask)]) ==
+                  (val, val)
+        else
+            @test extrema(field_values[1, 1, :, Array(binary_mask)]) ==
+                  (val, val)
+
+        end
+    end
+end
+
+"""
+    check_ocean_values_Y(Y, binary_mask; val = 0.0)
+
+This function tests that every field stored in `Y` has all of
+its values (where binary_mask == 1) equal to  `val`. Note that
+this is meant to be used with the full land model (canopy,
+snow, soil, soilco2).
+
+Useful for checking if land model functions are updating the
+values over the ocean.
+"""
+function check_ocean_values_Y(Y, binary_mask; val = 0.0)
+    @test extrema(Array(parent(Y.soil.ϑ_l))[:, 1, 1, 1, Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(Array(parent(Y.soil.θ_i))[:, 1, 1, 1, Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(
+        Array(parent(Y.soil.ρe_int))[:, 1, 1, 1, Array(binary_mask)],
+    ) == (val, val)
+    @test extrema(vec(Array(parent(Y.snow.U)))[Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(vec(Array(parent(Y.snow.S)))[Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(vec(Array(parent(Y.snow.S_l)))[Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(vec(Array(parent(Y.canopy.energy.T)))[Array(binary_mask)]) ==
+          (val, val)
+    @test extrema(
+        vec(Array(parent(Y.canopy.hydraulics.ϑ_l)))[Array(binary_mask)],
+    ) == (val, val)
+end
+
+
+@testset "Global LandModel tests" begin
+    context = ClimaComms.context()
+    nelements = (101, 15)
+    Δt = 450.0
+    FT = Float64
+    toml_dict = LP.create_toml_dict(FT)
+    earth_param_set = LP.LandParameters(toml_dict)
+
+    domain = ClimaLand.Domains.global_domain(
+        FT;
+        nelements = nelements,
+        mask_threshold = FT(0.99),
+    );
+    surface_space = domain.space.surface;
+    start_date = DateTime(2008);
+    stop_date = start_date + Second(Δt)
+    forcing = ClimaLand.prescribed_forcing_era5(
+        start_date,
+        stop_date,
+        domain.space.surface,
+        toml_dict,
+        FT;
+        use_lowres_forcing = true,
+        context,
+    )
+    LAI = ClimaLand.Canopy.prescribed_lai_modis(
+        domain.space.surface,
+        start_date,
+        stop_date,
+    );
+
+    land = LandModel{FT}(
+        forcing,
+        LAI,
+        toml_dict,
+        domain,
+        Δt;
+        prognostic_land_components = (:canopy, :snow, :soil, :soilco2),
+    );
+
+    @test domain == ClimaLand.get_domain(land)
+    @test ClimaComms.context(land) == ClimaComms.context()
+    @test ClimaComms.device(land) == ClimaComms.device()
+    @test ClimaLand.land_components(land) == (:canopy, :snow, :soil, :soilco2)
+    @testset "Initial condition function from file" begin
+        Y, p, cds = initialize(land)
+        t0 = ITime(0, Second(1), start_date)
+        ic_path = ClimaLand.Artifacts.soil_ic_2008_50m_path(; context)
+        set_ic! = ClimaLand.Simulations.make_set_initial_state_from_file(
+            ic_path,
+            land;
+            enforce_constraints = true,
+        )
+        set_ic!(Y, p, t0, land)
+
+        soil = land.soil
+        evaluate!(p.drivers.T, soil.boundary_conditions.top.atmos.T, t0)
+        binary_mask = parent(soil.domain.space.surface.grid.mask.is_active)[:]
+        T_bounds = extrema(vec(parent(p.drivers.T))[Array(binary_mask)])
+
+        @test all(
+            parent(Y.soil.ϑ_l .- soil.parameters.θ_r)[
+                :,
+                1,
+                1,
+                1,
+                Array(binary_mask),
+            ] .> 0,
+        )
+        @test all(
+            parent(Y.soil.ϑ_l .+ Y.soil.θ_i .- soil.parameters.ν)[
+                :,
+                1,
+                1,
+                1,
+                Array(binary_mask),
+            ] .< 0,
+        )
+        ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+            Y.soil.ϑ_l,
+            Y.soil.θ_i,
+            soil.parameters.ρc_ds,
+            soil.parameters.earth_param_set,
+        )
+        T = ClimaLand.Soil.temperature_from_ρe_int.(
+            Y.soil.ρe_int,
+            Y.soil.θ_i,
+            ρc_s,
+            soil.parameters.earth_param_set,
+        )
+        @test minimum(parent(T)[:, 1, 1, 1, Array(binary_mask)]) >= T_bounds[1]
+        @test maximum(parent(T)[:, 1, 1, 1, Array(binary_mask)]) <= T_bounds[2]
+    end
+
+    @testset "Initial condition from parameters" begin
+        Y, p, cds = initialize(land)
+        binary_mask =
+            parent(land.soil.domain.space.surface.grid.mask.is_active)[:]
+
+        t0 = ITime(0, Second(1), start_date)
+        set_ic! =
+            ClimaLand.Simulations.make_set_initial_state_from_atmos_and_parameters(
+                land;
+            )
+        set_ic!(Y, p, t0, land)
+        @test Y.canopy.energy.T == p.drivers.T
+        (; θ_r, ν, ρc_ds) = land.soil.parameters
+
+        @test all(
+            abs.(parent(Y.soil.ϑ_l .- (θ_r .+ (ν .- θ_r) ./ 2)))[
+                :,
+                1,
+                1,
+                1,
+                Array(binary_mask),
+            ] .< eps(FT),
+        )
+        @test all(parent(Y.soil.θ_i)[:, 1, 1, 1, Array(binary_mask)] .≈ 0)
+        @test all(
+            vec(parent(Y.canopy.hydraulics.ϑ_l))[Array(binary_mask)] .-
+            land.canopy.hydraulics.parameters.ν .≈ 0,
+        )
+        @test all(vec(parent(Y.snow.U))[Array(binary_mask)] .≈ 0)
+        @test all(vec(parent(Y.snow.S))[Array(binary_mask)] .≈ 0)
+        @test all(vec(parent(Y.snow.S_l))[Array(binary_mask)] .≈ 0)
+        @test all(
+            parent(Y.soilco2.CO2)[:, 1, 1, 1, Array(binary_mask)] .- FT(6e-5) .≈
+            0,
+        )
+        @test all(
+            parent(Y.soilco2.O2)[:, 1, 1, 1, Array(binary_mask)] .- FT(0.08) .≈
+            0,
+        )
+        @test all(parent(Y.soilco2.SOC)[:, 1, 1, 1, Array(binary_mask)] .>= 0)
+    end
+
+
+    @testset "Total energy and water" begin
+        Y, p, cds = initialize(land)
+        # Soil IC
+        ϑ_l0 = land.soil.parameters.ν ./ 2
+        θ_i0 = land.soil.parameters.ν ./ 5
+        T = FT(270.0)
+        ρc_s = @. Soil.volumetric_heat_capacity(
+            ϑ_l0,
+            θ_i0,
+            land.soil.parameters.ρc_ds,
+            earth_param_set,
+        )
+        ρe_int0 =
+            @. Soil.volumetric_internal_energy(θ_i0, ρc_s, T, earth_param_set)
+        Y.soil.ϑ_l .= ϑ_l0
+        Y.soil.θ_i .= θ_i0
+
+        Y.soil.ρe_int = ρe_int0
+
+        # Canopy IC
+        ϑ0 = land.canopy.hydraulics.parameters.ν / 2
+        CTemp0 = FT(290.5)
+
+        Y.canopy.hydraulics.ϑ_l .= ϑ0
+
+        Y.canopy.energy.T .= CTemp0
+
+        # Snow IC
+        S0 = FT(0.5)
+        S_l0 = FT(0.3)
+        STemp0 = FT(270)
+        U0 = Snow.energy_from_T_and_swe(
+            S0,
+            STemp0,
+            land.snow.parameters.ΔS,
+            land.snow.parameters.earth_param_set,
+        )
+
+        Y.snow.S .= S0
+        Y.snow.S_l .= S_l0
+        Y.snow.U .= U0
+
+        t0 = 0.0
+        set_initial_cache! = make_set_initial_cache(land)
+        set_initial_cache!(p, Y, t0)
+
+        # Check total
+        area_index = p.canopy.biomass.area_index.leaf
+        h_canopy = land.canopy.biomass.height
+        ρ_ice = LP.ρ_cloud_ice(earth_param_set)
+        ρ_liq = LP.ρ_cloud_liq(earth_param_set)
+        int_cache = ClimaCore.Fields.zeros(domain.space.surface)
+        ClimaCore.Operators.column_integral_definite!(
+            int_cache,
+            @. (ϑ_l0 + θ_i0 * ρ_ice / ρ_liq)
+        )
+        soil_exp = int_cache
+        canopy_exp = ClimaCore.Fields.zeros(domain.space.surface)
+        @. canopy_exp = area_index * h_canopy * ϑ0
+        snow_exp = S0
+        total_water = ClimaCore.Fields.zeros(domain.space.surface)
+        cache = ClimaCore.Fields.zeros(domain.space.surface)
+        ClimaLand.total_liq_water_vol_per_area!(
+            total_water,
+            land,
+            Y,
+            p,
+            t0,
+            cache,
+        )
+
+        oceans = .~Array(parent(domain.space.surface.grid.mask.is_active))[:]
+        continents = Array(parent(domain.space.surface.grid.mask.is_active))[:]
+        expected = ClimaCore.Fields.zeros(domain.space.surface)
+        @. expected = snow_exp + canopy_exp + soil_exp
+        @test all(
+            vec(Array(parent(total_water)))[continents] .≈
+            vec(Array(parent(expected)))[continents],
+        )
+        @test all(
+            vec(Array(parent(total_water)))[oceans] .≈
+            vec(Array(parent(expected)))[oceans],
+        )
+
+        int_cache .*= 0
+        ClimaCore.Operators.column_integral_definite!(int_cache, ρe_int0)
+        soil_exp = int_cache
+        @. canopy_exp =
+            area_index * land.canopy.energy.parameters.ac_canopy * CTemp0
+        snow_exp = U0
+        total_energy = ClimaCore.Fields.zeros(domain.space.surface)
+        ClimaLand.total_energy_per_area!(total_energy, land, Y, p, t0, cache)
+        @. expected = snow_exp + canopy_exp + soil_exp
+        @test all(
+            vec(Array(parent(total_energy)))[continents] .≈
+            vec(Array(parent(expected)))[continents],
+        )
+        @test all(
+            vec(Array(parent(total_energy)))[oceans] .≈
+            vec(Array(parent(expected)))[oceans],
+        )
+    end
+
+    @testset "Column integral mask awareness" begin
+        Y, p, cds = initialize(land)
+        Y.soil.ϑ_l .= land.soil.parameters.ν .+ FT(1e-3)
+        fill!(parent(p.soil.is_saturated), FT(0.5)) # integrand
+        @test extrema(p.soil.h∇) == (0.0, 0.0) # integral (0,0)
+        @. p.soil.is_saturated = ClimaLand.Soil.Runoff.is_saturated(
+            Y.soil.ϑ_l + Y.soil.θ_i,
+            land.soil.parameters.ν,
+        )
+        ClimaCore.Operators.column_integral_definite!(
+            p.soil.h∇,
+            p.soil.is_saturated,
+        )
+        @test maximum(p.soil.h∇) ≈ FT(50 * 1) # computed the integral over land ∫is_sat dz = 1 x ∫dz = 1 x 50m
+        @test minimum(p.soil.h∇) ≈ FT(0.0) # did not compute an integral over the ocean, does not update
+    end
+
+
+    @testset "Mask of full land" begin
+        Y, p, cds = initialize(land)
+        Y .= 0
+        surface_space = axes(Y.snow.U)
+        subsurface_space = axes(Y.soil.ϑ_l)
+        binary_mask = .~parent(surface_space.grid.mask.is_active)[:]
+        # Test that the cache is zero over the ocean
+        @info("testing initial cache")
+        check_ocean_values_p(p, binary_mask)
+
+        # Set initial conditions
+        ic_path = ClimaLand.Artifacts.soil_ic_2008_50m_path(; context)
+        set_initial_state! =
+            ClimaLand.Simulations.make_set_initial_state_from_file(
+                ic_path,
+                land,
+            )
+        t0 = 0.0
+        set_initial_state!(Y, p, t0, land)
+        # Now, set the cache with physical values and make sure there are no NaNs, or values set over the ocean
+        set_initial_cache! = make_set_initial_cache(land)
+        set_initial_cache!(p, Y, t0)
+        @info("testing set cache")
+        check_ocean_values_p(p, binary_mask)
+
+        # Check tendency functions do not update the state over the ocean
+        dY = similar(Y)
+        # Implicit tendency
+        @. dY = 0
+        compute_imp_tendency! = make_compute_imp_tendency(land)
+        compute_imp_tendency!(dY, Y, p, t0)
+        @info("testing implicit tendency")
+        check_ocean_values_Y(dY, binary_mask)
+
+        # Explicit tendency
+        @. dY = 0
+        exp_tendency! = make_exp_tendency(land)
+        exp_tendency!(dY, Y, p, t0)
+        @info("testing explicit tendency")
+        check_ocean_values_Y(dY, binary_mask)
+
+
+        # Jacobian checks
+        @info("testing Jacobian updates")
+
+        jacobian! = ClimaLand.make_compute_jacobian(land)
+        jac_prototype = ClimaLand.initialize_jacobian(Y)
+        update_implicit_cache! = ClimaLand.make_update_implicit_cache(land)
+        # Check that the jacobian update respects the mask
+        update_implicit_cache!(p, Y, t0)
+        jacobian!(jac_prototype, Y, p, Δt, t0)
+        (; matrix) = jac_prototype
+        ∂ϑres∂ϑ = matrix[@name(soil.ϑ_l), @name(soil.ϑ_l)]
+        @test extrema(
+            Array(parent(∂ϑres∂ϑ.entries.:1))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ϑres∂ϑ.entries.:2))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ϑres∂ϑ.entries.:3))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+
+        ∂ρeres∂ρe = matrix[@name(soil.ρe_int), @name(soil.ρe_int)]
+        @test extrema(
+            Array(parent(∂ρeres∂ρe.entries.:1))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ρeres∂ρe.entries.:2))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ρeres∂ρe.entries.:3))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        ∂ρeres∂ϑ = matrix[@name(soil.ρe_int), @name(soil.ϑ_l)]
+        @test extrema(
+            Array(parent(∂ρeres∂ϑ.entries.:1))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ρeres∂ϑ.entries.:2))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+        @test extrema(
+            Array(parent(∂ρeres∂ϑ.entries.:3))[:, 1, 1, 1, Array(binary_mask)],
+        ) == (0.0, 0.0)
+
+        ∂Tres∂T = matrix[@name(canopy.energy.T), @name(canopy.energy.T)]
+        @test extrema(
+            vec(Array(parent(∂Tres∂T.entries.:1)))[Array(binary_mask)],
+        ) == (0.0, 0.0)
+
+
+        # Now carry out a solve of Jx = b, with x = Y, and b = 1
+        b = similar(Y)
+        fill!(parent(b), 1)
+        x = deepcopy(Y)
+        fill!(parent(x), 1)
+        @test axes(x.soil.ϑ_l).grid.horizontal_grid.mask ==
+              surface_space.grid.mask
+        @test axes(b.soil.ϑ_l).grid.horizontal_grid.mask ==
+              surface_space.grid.mask
+        check_ocean_values_Y(x, binary_mask; val = 1.0)
+        check_ocean_values_Y(b, binary_mask; val = 1.0)
+
+
+        MatrixFields.field_matrix_solve!(
+            jac_prototype.solver,
+            x,
+            jac_prototype.matrix,
+            b,
+        )
+        check_ocean_values_Y(x, binary_mask; val = 1.0)
+
+        # Take a step
+        jac_kwargs = (; jac_prototype = jac_prototype, Wfact = jacobian!)
+        prob = ClimaTimeSteppers.ODEProblem(
+            CTS.ClimaODEFunction(
+                T_exp! = exp_tendency!,
+                T_imp! = ClimaTimeSteppers.ODEFunction(
+                    compute_imp_tendency!;
+                    jac_kwargs...,
+                ),
+                dss! = ClimaLand.dss!,
+                cache_imp! = (Y, p, t) -> update_implicit_cache!(p, Y, t),
+            ),
+            Y,
+            (t0, t0 + Δt),
+            p,
+        )
+        # Define timestepper and ODE algorithm
+        stepper = CTS.ARS111()
+        ode_algo = CTS.IMEXAlgorithm(
+            stepper,
+            CTS.NewtonsMethod(
+                max_iters = 3,
+                update_j = CTS.UpdateEvery(CTS.NewNewtonIteration),
+            ),
+        )
+
+        sol = ClimaTimeSteppers.solve(
+            prob,
+            ode_algo;
+            dt = Δt,
+            adaptive = false,
+            saveat = [t0, t0 + Δt],
+        )
+        u = sol.u[end]
+        check_ocean_values_Y(u, binary_mask;)
+    end
+
+end
+
+@testset "Default LandModel with inland waters" begin
+    FT = Float64
+    context = ClimaComms.context()
+    toml_dict = LP.create_toml_dict(FT)
+
+    domain = ClimaLand.Domains.global_box_domain(
+        FT;
+        nelements = (180, 360, 5),
+        mask_threshold = FT(0.99),
+        context,
+    )
+    surface_space = domain.space.surface
+
+    start_date = DateTime(2008)
+    stop_date = start_date + Second(450)
+    Δt = FT(450)
+
+    atmos, radiation = ClimaLand.prescribed_forcing_era5(
+        start_date,
+        stop_date,
+        surface_space,
+        toml_dict,
+        FT;
+        use_lowres_forcing = true,
+        context,
+    )
+    forcing = (; atmos, radiation)
+
+    LAI = ClimaLand.Canopy.prescribed_lai_modis(
+        surface_space,
+        start_date,
+        stop_date,
+    )
+    land = LandModel{FT}(
+        forcing,
+        LAI,
+        toml_dict,
+        domain,
+        Δt;
+        prognostic_land_components = (:canopy, :lake, :snow, :soil, :soilco2),
+    )
+
+    @test land.lake isa ClimaLand.InlandWater.SlabLakeModel
+    Y, p, cds = initialize(land)
+    t0 = ITime(0, Second(1), start_date)
+    ic_path = ClimaLand.Artifacts.saturated_land_ic_path(; context)
+    set_ic! =
+        ClimaLand.Simulations.make_set_initial_state_from_file(ic_path, land)
+
+    set_ic!(Y, p, t0, land)
+    set_initial_cache! = ClimaLand.make_set_initial_cache(land)
+    set_initial_cache!(p, Y, t0)
+
+    # Check that canopy fluxes are zero where lakes are:
+    lake_mask = parent(p.lake_fraction) .== 1
+    @test all(parent(p.canopy.biomass.area_index.leaf)[lake_mask] .== 0)
+    @test all(parent(p.canopy.biomass.area_index.stem)[lake_mask] .== 0)
+    @test all(parent(p.canopy.biomass.area_index.root)[lake_mask] .== 0)
+    @test all(parent(p.canopy.turbulent_fluxes.shf)[lake_mask] .== 0)
+    @test all(parent(p.canopy.turbulent_fluxes.lhf)[lake_mask] .== 0)
+    @test all(parent(p.canopy.hydraulics.fa_roots)[lake_mask] .== 0)
+    @test all(parent(p.canopy.energy.fa_energy_roots)[lake_mask] .== 0)
+    @test all(parent(p.canopy.turbulent_fluxes.vapor_flux)[lake_mask] .== 0)
+    @test all(parent(p.canopy.radiative_transfer.LW_n)[lake_mask] .== 0)
+    @test all(parent(p.canopy.radiative_transfer.SW_n)[lake_mask] .== 0)
+    @test all(
+        parent(
+            Base.materialize(get_An_canopy(p, land.canopy.photosynthesis)),
+        )[lake_mask] .== 0,
+    )
+    @test all(parent(get_GPP(p, land.canopy.photosynthesis))[lake_mask] .== 0)
+    @test all(parent(p.canopy.sif.SIF)[lake_mask] .== 0)
+    @test all(parent(p.canopy.autotrophic_respiration.Ra)[lake_mask] .== 0)
+
+    land_mask = parent(surface_space.grid.mask.is_active)[:]
+    # test bare soil fraction over land
+    # over the ocean, the lake mask is not initialized and may not be 0
+    @test all(
+        parent(
+            @. p.bare_soil_fraction -
+               (1 - p.snow.snow_cover_fraction - p.lake_fraction)
+        )[:][land_mask] .≈ 0,
+    )
+
+    # test ground albedo
+    snow_frac = p.snow.snow_cover_fraction
+    α_soil = p.soil.PAR_albedo
+    α_snow = p.snow.α_snow
+    f_lake = p.lake_fraction
+    α_lake = p.lake.albedo
+    @test all(
+        parent(
+            @. p.α_ground.PAR - (
+                p.bare_soil_fraction * α_soil +
+                snow_frac * α_snow +
+                f_lake * α_lake
+            )
+        )[:][land_mask] .≈ 0,
+    )
+    α_soil = p.soil.NIR_albedo
+    @test all(
+        parent(
+            @. p.α_ground.NIR - (
+                p.bare_soil_fraction * α_soil +
+                snow_frac * α_snow +
+                f_lake * α_lake
+            )
+        )[:][land_mask] .≈ 0,
+    )
+
+    # Make sure lake radiation is set
+    @test sum(parent(p.lake.R_n)[lake_mask]) != 0
+
+    # Make sure the soil bc was updated correctly over the lakes
+    p_copy = deepcopy(p)
+    ClimaLand.Soil.soil_boundary_fluxes!(
+        land.soil.boundary_conditions.top,
+        Val(land.soil.boundary_conditions.top.prognostic_land_components),
+        land.soil,
+        Y,
+        p_copy,
+        t0,
+    )
+    @test all(
+        parent(p.soil.top_bc.heat .- p_copy.soil.top_bc.heat)[lake_mask] .≈
+        parent(p.lake_fraction .* p.lake.sediment_heat_flux)[lake_mask],
+    )
+    @test all(
+        parent(p.soil.top_bc.heat .- p_copy.soil.top_bc.heat)[:][.~lake_mask[:] .&& land_mask] .≈
+        0,
+    )
+
+    # Snow cover fraction cannot exceed 1 - lake fraction
+    @test all(
+        parent(p.snow.snow_cover_fraction .- (1 .- p.lake_fraction))[lake_mask] .<=
+        0,
+    )
+
+end
+
+
+@testset "Integrated inland water tests" begin
+    FT = Float64
+    context = ClimaComms.context()
+    toml_dict = LP.create_toml_dict(FT)
+
+    domain = ClimaLand.Domains.global_box_domain(
+        FT;
+        nelements = (180, 360, 5),
+        mask_threshold = FT(0.99),
+        context,
+    )
+    surface_space = domain.space.surface
+
+    start_date = DateTime(2008)
+    stop_date = start_date + Second(450)
+    Δt = FT(450)
+
+    atmos, radiation = ClimaLand.prescribed_forcing_era5(
+        start_date,
+        stop_date,
+        surface_space,
+        toml_dict,
+        FT;
+        use_lowres_forcing = true,
+        context,
+    )
+    forcing = (; atmos, radiation)
+
+    LAI = ClimaLand.Canopy.prescribed_lai_modis(
+        surface_space,
+        start_date,
+        stop_date,
+    )
+    land_with_lake = LandModel{FT}(
+        forcing,
+        LAI,
+        toml_dict,
+        domain,
+        Δt;
+        prognostic_land_components = (:canopy, :lake, :snow, :soil, :soilco2),
+    )
+
+    land_no_lake = LandModel{FT}(
+        forcing,
+        LAI,
+        toml_dict,
+        domain,
+        Δt;
+        prognostic_land_components = (:canopy, :snow, :soil, :soilco2),
+    )
+    simulation_no_lake = ClimaLand.Simulations.LandSimulation(
+        start_date,
+        stop_date,
+        Δt,
+        land_no_lake;
+        diagnostics = nothing,
+    )
+    simulation_with_lake = ClimaLand.Simulations.LandSimulation(
+        start_date,
+        stop_date,
+        Δt,
+        land_with_lake;
+        diagnostics = nothing,
+    )
+
+    # Take a step
+    ClimaLand.Simulations.step!(simulation_no_lake)
+    ClimaLand.Simulations.step!(simulation_with_lake)
+    YL = simulation_with_lake._integrator.u
+    YNL = simulation_no_lake._integrator.u
+    # Check that YL == YNL when lake mask is 0 and we are over land.
+    # Wrap in Array(...) so the mask is a CPU Vector{Bool} and can index
+    # the CPU `Array(parent(...))[:]` views below on GPU runs.
+    land_mask = Array(parent(surface_space.grid.mask.is_active))[:]
+    no_lake_mask =
+        Array(parent(land_with_lake.lake.inland_water_mask))[:] .== 0 .&&
+        land_mask
+
+    @test all(
+        Array(parent(ClimaLand.Domains.top_center_to_surface(YL.soil.ϑ_l)))[:][no_lake_mask] .==
+        Array(parent(ClimaLand.Domains.top_center_to_surface(YNL.soil.ϑ_l)))[:][no_lake_mask],
+    )
+    @test all(
+        Array(parent(ClimaLand.Domains.top_center_to_surface(YL.soil.θ_i)))[:][no_lake_mask] .==
+        Array(parent(ClimaLand.Domains.top_center_to_surface(YNL.soil.θ_i)))[:][no_lake_mask],
+    )
+    @test all(
+        Array(
+            parent(ClimaLand.Domains.top_center_to_surface(YL.soil.ρe_int)),
+        )[:][no_lake_mask] .== Array(
+            parent(ClimaLand.Domains.top_center_to_surface(YNL.soil.ρe_int)),
+        )[:][no_lake_mask],
+    )
+    @test all(
+        Array(parent(YL.snow.U))[:][no_lake_mask] .==
+        Array(parent(YNL.snow.U))[:][no_lake_mask],
+    )
+    @test all(
+        Array(parent(YL.snow.S))[:][no_lake_mask] .==
+        Array(parent(YNL.snow.S))[:][no_lake_mask],
+    )
+    @test all(
+        Array(parent(YL.snow.S_l))[:][no_lake_mask] .==
+        Array(parent(YNL.snow.S_l))[:][no_lake_mask],
+    )
+    @test all(
+        Array(parent(YL.canopy.energy.T))[:][no_lake_mask] .==
+        Array(parent(YNL.canopy.energy.T))[:][no_lake_mask],
+    )
+end

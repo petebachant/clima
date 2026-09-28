@@ -1,0 +1,144 @@
+# https://github.com/jheinen/GR.jl/issues/278#issuecomment-587090846
+ENV["GKSwstype"] = "nul"
+push!(LOAD_PATH, joinpath(@__DIR__, ".."))
+using Distributed
+@everywhere using Documenter
+@everywhere using Literate
+@everywhere using ClimaLand
+@everywhere using DocumenterInterLinks
+@everywhere using DocumenterCitations
+include("pages_helper.jl")
+include("list_tutorials.jl")
+
+@everywhere links = InterLinks(
+    "Julia" => "https://docs.julialang.org/en/v1/objects.inv",
+    "ClimaCore" => "https://clima.github.io/ClimaCore.jl/dev/objects.inv",
+    "Documenter" => "https://documenter.juliadocs.org/stable/objects.inv",
+    # ClimaCoupler does not generate objects.inv for some reason
+    #                   "ClimaCoupler" => "https://clima.github.io/ClimaCoupler.jl/dev/objects.inv",
+);
+
+@everywhere bib = CitationBibliography(
+    joinpath(@__DIR__, "src", "refs.bib");
+    style = :numeric,
+)
+
+@everywhere const clima_dir = dirname(dirname(pathof(ClimaLand)));
+@everywhere source_dir = joinpath(@__DIR__, "src")
+@everywhere GENERATED_DIR = joinpath(source_dir, "generated") # generated files directory
+rm(GENERATED_DIR, force = true, recursive = true)
+mkpath(GENERATED_DIR)
+@everywhere function generate_tutorial(tutorials_dir, tutorial)
+    rpath = relpath(dirname(tutorial), tutorials_dir)
+    rpath = rpath == "." ? "" : rpath
+    gen_dir = joinpath(GENERATED_DIR, rpath)
+    mkpath(gen_dir)
+
+    cd(gen_dir) do
+        # change the Edit on GitHub link:
+        path = relpath(clima_dir, pwd())
+        content = """
+                # ```@meta
+                    # EditURL = "https://github.com/CliMA/ClimaLand.jl/$(path)"
+                    # ```
+                """
+        mdpre(str) = content * str
+        input = abspath(tutorial)
+        Literate.markdown(
+            input;
+            execute = true,
+            documenter = true,
+            preprocess = mdpre,
+        )
+    end
+end
+tutorials_jl = flatten_to_array_of_strings(get_second(tutorials))
+println("Building literate tutorials...")
+tutorials_dir = joinpath(@__DIR__, "src", "tutorials")
+tutorials_jl = map(x -> joinpath(tutorials_dir, x), tutorials_jl)
+# run serially after the parallel pass since they are too memory heavy
+memory_heavy_tutorials = ["snowy_land.jl", "bucket.jl"]
+is_heavy(t) = basename(t) in memory_heavy_tutorials
+pmap(t -> generate_tutorial(tutorials_dir, t), filter(!is_heavy, tutorials_jl))
+# release worker memory before running remaining tutorials serially
+nworkers() > 1 && rmprocs(workers())
+foreach(
+    t -> generate_tutorial(tutorials_dir, t),
+    filter(is_heavy, tutorials_jl),
+)
+
+# update list of rendered markdown tutorial output for mkdocs
+ext_jl2md(x) = joinpath(basename(GENERATED_DIR), replace(x, ".jl" => ".md"))
+tutorials = transform_second(x -> ext_jl2md(x), tutorials)
+include("list_of_apis.jl")
+include("list_standalone_models.jl")
+include("list_diagnostics.jl")
+pages = Any[
+    "Home" => "index.md",
+    "Fundamental Concepts" => "fundamental_concepts.md",
+    "Running your first simulation" => "getting_started.md",
+    "Available Models and Parameterizations" => "available_models.md",
+    "Parameters" => "parameters.md",
+    "Tutorials" => tutorials,
+    "Writing and accessing outputs" => diagnostics,
+    "Model Equations" => standalone_models,
+    "Calibration and benchmark" => [
+        "Calibrating model parameters" => "calibration.md",
+        "Model Benchmark" => "leaderboard/leaderboard.md",
+    ],
+    "Running on GPU or with MPI" => "architectures.md",
+    "Additional resources" => [
+        "Repository structure" => "repo_structure.md",
+        "Restarting a simulation" => "restarts.md",
+        "Software utilities" => [
+            "ITime type" => "itime.md",
+            "Shared utilities" => "shared_utilities.md",
+        ],
+        "Physical units" => "physical_units.md",
+    ],
+    "Julia background" => "julia.md",
+    "APIs" => apis,
+    "Contributor guide" => "contributing.md",
+    "References" => "references.md",
+]
+
+mathengine = MathJax(
+    Dict(
+        :TeX => Dict(
+            :equationNumbers => Dict(:autoNumber => "AMS"),
+            :Macros => Dict(),
+        ),
+    ),
+)
+
+format = Documenter.HTML(
+    prettyurls = !isempty(get(ENV, "CI", "")),
+    collapselevel = 1,
+    mathengine = mathengine,
+    ansicolor = true,
+    size_threshold = 500_000,  # 500 KiB instead of default 200 KiB
+    size_threshold_warn = 300_000,  # 300 KiB instead of default 100 KiB
+)
+
+makedocs(
+    sitename = "ClimaLand.jl",
+    authors = "Clima Land Model Team",
+    format = format,
+    pages = pages,
+    checkdocs = :exports,
+    doctest = true,
+    clean = true,
+    modules = [ClimaLand];
+    plugins = [bib, links],
+)
+
+deploydocs(
+    repo = "github.com/CliMA/ClimaLand.jl.git",
+    target = "build",
+    push_preview = all(
+        !isempty,
+        (get(ENV, "GITHUB_TOKEN", ""), get(ENV, "DOCUMENTER_KEY", "")),
+    ),
+    devbranch = "main",
+    forcepush = true,
+)

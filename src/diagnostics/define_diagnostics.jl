@@ -1,0 +1,1353 @@
+"""
+    define_diagnostics!(land_model, possible_diags)
+
+Calls `conditional_add_diagnostic_variable!` for all available variables, which adds a
+compute function specialized for `land_model` to `ALL_DIAGNOSTICS` if the variable's
+`short_name` is in `possible_diags`. If `possible_diags` is `Val{:all}()`, then all diagnostic
+variables are added regardless of their short name.
+"""
+function define_diagnostics!(land_model, possible_diags)
+    ### Conservation ###
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "epa",
+        long_name = "Energy per unit ground area",
+        standard_name = "energy_per_area",
+        units = "J m^-2",
+        comments = "Vertically integrated volumetric energy per area",
+        compute! = (out, Y, p, t) ->
+            compute_energy_per_area!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "wvpa",
+        long_name = "Water volume per unit ground area",
+        standard_name = "water_volume_per_area",
+        units = "m^3 m^-2",
+        comments = "Vertically integrated volumetric water per area",
+        compute! = (out, Y, p, t) ->
+            compute_water_volume_per_area!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "epac",
+        long_name = "Energy per unit ground area change",
+        standard_name = "energy_per_area_change",
+        units = "J m^-2",
+        comments = "Expected change in vertically integrated volumetric energy per area",
+        compute! = (out, Y, p, t) ->
+            compute_energy_per_area_change!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "wvpac",
+        long_name = "Water volume per unit ground area change",
+        standard_name = "water_volume_per_area_change",
+        units = "m^3 m^-2",
+        comments = "Expected change in vertically integrated volumetric water per area",
+        compute! = (out, Y, p, t) ->
+            compute_water_volume_per_area_change!(out, Y, p, t, land_model),
+    )
+
+    ### BucketModel ###
+
+    ## Stored in p (diagnostics variables stored in the cache) ##
+
+    # Shortwave Albedo
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swa",
+        long_name = "Shortwave Albedo",
+        standard_name = "sw_albedo",
+        units = "",
+        comments = "The fraction of downwelling shortwave radiation reflected by the land surface.",
+        compute! = (out, Y, p, t) ->
+            compute_sw_albedo!(out, Y, p, t, land_model),
+    )
+
+    # Net radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rn",
+        long_name = "Net Radiation",
+        standard_name = "net_radiation",
+        units = "W m^-2",
+        comments = "Difference between downwelling and upwelling shortwave and longwave radiation at the land surface.",
+        compute! = (out, Y, p, t) ->
+            compute_net_radiation!(out, Y, p, t, land_model),
+    )
+
+    # Bucket Surface temperature
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tsfc",
+        long_name = "Bucket Surface Temperature",
+        standard_name = "surface_temperature",
+        units = "K",
+        comments = "Temperature of the bucket-land surface.",
+        compute! = (out, Y, p, t) ->
+            compute_surface_temperature!(out, Y, p, t, land_model),
+    )
+
+    # Latent heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lhf",
+        long_name = "Latent Heat Flux",
+        standard_name = "latent_heat_flux",
+        units = "W m^-2",
+        comments = "Exchange of energy at the land-atmosphere interface due to water evaporation or sublimation.",
+        compute! = (out, Y, p, t) ->
+            compute_latent_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    # Aerodynamic resistance
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rae",
+        long_name = "Aerodynamic Resistance",
+        standard_name = "aerodynamic_resistance",
+        units = "m s^-1",
+        comments = "Effiency of turbulent transport controlling the land-atmosphere exchange of sensible and latent heat.",
+        compute! = (out, Y, p, t) ->
+            compute_aerodynamic_resistance!(out, Y, p, t, land_model),
+    )
+
+    # Sensible heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "shf",
+        long_name = "Sensible Heat Flux",
+        standard_name = "sensible_heat_flux",
+        units = "W m^-2",
+        comments = "Exchange of energy at the land-atmosphere interface due to temperature difference.",
+        compute! = (out, Y, p, t) ->
+            compute_sensible_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    # Vapor flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "vflux",
+        long_name = "Liquid water evaporation",
+        standard_name = "vapor_flux",
+        units = "m s^-1",
+        comments = "Flux of water from the land surface to the atmosphere. E.g., evaporation or sublimation.",
+        compute! = (out, Y, p, t) ->
+            compute_vapor_flux!(out, Y, p, t, land_model),
+    )
+
+    ## Stored in Y (prognostic or state variables) ##
+
+    # Soil temperature (3D) at depth
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tsoil",
+        long_name = "Soil temperature",
+        standard_name = "soil_temperature",
+        units = "K",
+        comments = "Soil temperature at multiple soil depth. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_temperature!(out, Y, p, t, land_model),
+    )
+
+    # Surbsurface water storage
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "wsoil",
+        long_name = "subsurface Water Storage",
+        standard_name = "subsurface_water_storage",
+        units = "m",
+        comments = "Soil water content.",
+        compute! = (out, Y, p, t) ->
+            compute_subsurface_water_storage!(out, Y, p, t, land_model),
+    )
+
+    # Surface water content
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "wsfc",
+        long_name = "Surface Water Content",
+        standard_name = "surface_water_content",
+        units = "m",
+        comments = "Water at the soil surface.",
+        compute! = (out, Y, p, t) ->
+            compute_surface_water_content!(out, Y, p, t, land_model),
+    )
+
+    # Surface snow water content
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ssfc",
+        long_name = "Snow Water Equivalent",
+        standard_name = "snow_water_equivalent",
+        units = "m",
+        comments = "Snow at the soil surface, expressed in water equivalent.",
+        compute! = (out, Y, p, t) ->
+            compute_snow_water_equivalent!(out, Y, p, t, land_model),
+    )
+
+    ###### SoilCanopyModel ######
+
+    ## stored in p (diagnostics variables stored in the cache) ##
+
+    ## Canopy Module ##
+
+    ### Canopy - Solar Induced Fluorescence
+    # Solar Induced Fluorescence
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sif",
+        long_name = "Solar Induced Fluorescence",
+        standard_name = "solar_induced_fluorescence",
+        units = "W m^-2 sr^-1 μm^-1",
+        comments = "The fluorescence of leaves induced by solar radiation at 755nm. This quantity is correlated with photosynthesis activity.",
+        compute! = (out, Y, p, t) ->
+            compute_solar_induced_fluorescence!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Autotrophic respiration
+    # Autotrophic respiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ra",
+        long_name = "Autotrophic Respiration",
+        standard_name = "autotrophic_respiration",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "The canopy autotrophic respiration, the sum of leaves, stems and roots respiration.",
+        compute! = (out, Y, p, t) ->
+            compute_autotrophic_respiration!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Conductance
+    # Stomatal conductance
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "gs",
+        long_name = "Leaf stomatal Conductance",
+        standard_name = "stomatal_conductance",
+        units = "mol H2O m^-2 s^-1",
+        comments = "The conductance of leaves. This depends on stomatal opening. It varies with factors such as soil moisture or atmospheric water demand.",
+        compute! = (out, Y, p, t) ->
+            compute_stomatal_conductance!(out, Y, p, t, land_model),
+    )
+
+    # Canopy transpiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "trans",
+        long_name = "Canopy Transpiration",
+        standard_name = "canopy_transpiration",
+        units = "kg m^-2 s^-1",
+        comments = "The water evaporated from the canopy due to leaf transpiration (flux of water mass, kg of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_canopy_transpiration!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Energy
+
+    # Canopy latent heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "clhf",
+        long_name = "Canopy Latent Heat Flux",
+        standard_name = "canopy_latent_heat_flux",
+        units = "W m^-2",
+        comments = "The energy used for canopy transpiration.",
+        compute! = (out, Y, p, t) ->
+            compute_canopy_latent_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    # Canopy sensible heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "cshf",
+        long_name = "Canopy Sensible Heat Flux",
+        standard_name = "canopy_sensible_heat_flux",
+        units = "W m^-2",
+        comments = "The energy used for canopy temperature change.",
+        compute! = (out, Y, p, t) ->
+            compute_canopy_sensible_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Hydraulics
+    # Leaf water potential
+
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lwp",
+        long_name = "Leaf Water Potential",
+        standard_name = "leaf_water_potential",
+        units = "m",
+        comments = "The water potential of a leaf.",
+        compute! = (out, Y, p, t) ->
+            compute_leaf_water_potential!(out, Y, p, t, land_model),
+    )
+    #=
+        # Flux per ground area
+        conditional_add_diagnostic_variable!(possible_diags;
+            short_name = "fa",
+            long_name = "Flux Per Ground Area",
+            standard_name = "flux_per_ground_area",
+            units = "m s^-1",
+            comments = "Flux of water volume per m^2 of plant per second, multiplied by the area index (plant area/ground area).",
+            compute! = (out, Y, p, t) ->
+                compute_flux_per_ground_area!(out, Y, p, t, land_model),
+        )
+        =#
+
+    # Root flux per ground area
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "far",
+        long_name = "Root flux per ground area",
+        standard_name = "root_flux_per_ground_area",
+        units = "m s^-1",
+        comments = "Flux of water volume per m^2 of root per second, multiplied by the area index (root area/ground area).",
+        compute! = (out, Y, p, t) ->
+            compute_root_flux_per_ground_area!(out, Y, p, t, land_model),
+    )
+
+    # Leaf area index
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lai",
+        long_name = "Leaf area Index",
+        standard_name = "leaf_area_index",
+        units = "m^2 m^-2",
+        comments = "The area index of leaves, expressed in surface area of leaves per surface area of ground.",
+        compute! = (out, Y, p, t) ->
+            compute_leaf_area_index!(out, Y, p, t, land_model),
+    )
+
+    # Daily potential GPP (from optimal LAI model)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "a0d",
+        long_name = "Daily Potential GPP",
+        standard_name = "daily_potential_gpp",
+        units = "mol CO2 m^-2 day^-1",
+        comments = "Trailing ~1-day running total of potential GPP (fAPAR=1), used by the optimal LAI model.",
+        compute! = (out, Y, p, t) ->
+            compute_a0_daily!(out, Y, p, t, land_model),
+    )
+
+    # Annual potential GPP (from optimal LAI model)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "a0a",
+        long_name = "Annual Potential GPP",
+        standard_name = "annual_potential_gpp",
+        units = "mol CO2 m^-2 yr^-1",
+        comments = "Smoothed 1-year total of potential GPP (fAPAR=1), used by the optimal LAI model.",
+        compute! = (out, Y, p, t) ->
+            compute_a0_annual!(out, Y, p, t, land_model),
+    )
+
+    # Pure-C3 and pure-C4 annual potential GPP
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "a0c3",
+        long_name = "Annual Potential GPP, C3 pathway",
+        standard_name = "annual_potential_gpp_c3",
+        units = "mol CO2 m^-2 yr^-1",
+        comments = "Smoothed 1-year total of pure-C3 potential GPP.",
+        compute! = (out, Y, p, t) ->
+            compute_a0c3_annual!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "a0c4",
+        long_name = "Annual Potential GPP, C4 pathway",
+        standard_name = "annual_potential_gpp_c4",
+        units = "mol CO2 m^-2 yr^-1",
+        comments = "Smoothed 1-year total of pure-C4 potential GPP.",
+        compute! = (out, Y, p, t) ->
+            compute_a0c4_annual!(out, Y, p, t, land_model),
+    )
+
+    # Annual precipitation (from optimal LAI model)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "pra",
+        long_name = "Annual Precipitation",
+        standard_name = "annual_precipitation",
+        units = "m yr^-1",
+        comments = "Smoothed 1-year precipitation total, used by the optimal LAI model water limitation.",
+        compute! = (out, Y, p, t) ->
+            compute_precip_annual!(out, Y, p, t, land_model),
+    )
+
+    # Fraction of C3 photosynthesis
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "fc3",
+        long_name = "Fraction C3 Photosynthesis",
+        standard_name = "fraction_c3_photosynthesis",
+        units = "",
+        comments = "Fraction of C3 (vs C4) photosynthesis, 1 = all C3.",
+        compute! = (out, Y, p, t) ->
+            compute_fractional_c3!(out, Y, p, t, land_model),
+    )
+
+    # Canopy composition: shares of canopy productivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ftr",
+        long_name = "Tree Share of Canopy Productivity",
+        standard_name = "tree_productivity_share",
+        units = "",
+        comments = "Share of canopy productivity from C3 trees. ftr + fc3g + fc4g = 1.",
+        compute! = (out, Y, p, t) ->
+            compute_fraction_tree!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "fc3g",
+        long_name = "C3 Grass Share of Canopy Productivity",
+        standard_name = "c3_grass_productivity_share",
+        units = "",
+        comments = "Share of canopy productivity from C3 grasses. ftr + fc3g + fc4g = 1.",
+        compute! = (out, Y, p, t) ->
+            compute_fraction_c3_grass!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "fc4g",
+        long_name = "C4 Grass Share of Canopy Productivity",
+        standard_name = "c4_grass_productivity_share",
+        units = "",
+        comments = "Share of canopy productivity from C4 grasses. ftr + fc3g + fc4g = 1.",
+        compute! = (out, Y, p, t) ->
+            compute_fraction_c4_grass!(out, Y, p, t, land_model),
+    )
+
+    # Moisture stress factor
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "msf",
+        long_name = "Moisture Stress Factor",
+        standard_name = "moisture_stress_factor",
+        units = "",
+        comments = "Sensitivity of plants conductance to soil water content. Unitless",
+        compute! = (out, Y, p, t) ->
+            compute_moisture_stress_factor!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Photosynthesis
+    # GPP - Gross Primary Productivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "gpp",
+        long_name = "Gross Primary Productivity",
+        standard_name = "gross_primary_productivity",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "Gross photosynthesis (carbon assimilation) of the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthesis_gross_canopy!(out, Y, p, t, land_model),
+    )
+
+    # NEE - Net Ecosystem Exchange
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "nee",
+        long_name = "Net Ecosystem Exchange",
+        standard_name = "net_ecosystem_exchange",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "Net CO2 flux from ecosystem to atmosphere (positive upward). NEE = ER - GPP.",
+        compute! = (out, Y, p, t) ->
+            compute_net_ecosystem_exchange!(out, Y, p, t, land_model),
+    )
+
+    # Leaf net photosynthesis
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "an",
+        long_name = "Leaf Net Photosynthesis",
+        standard_name = "leaf_net_photosynthesis",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "Net photosynthesis (carbon assimilation) of a leaf",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthesis_net_leaf!(out, Y, p, t, land_model),
+    )
+
+    # Leaf respiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rd",
+        long_name = "Leaf Respiration",
+        standard_name = "leaf_dark_respiration",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "Leaf respiration, called dark respiration because usually measured in the abscence of radiation.",
+        compute! = (out, Y, p, t) ->
+            compute_respiration_leaf!(out, Y, p, t, land_model),
+    )
+
+    # Vcmax25
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "vcmax25",
+        long_name = "Vcmax25",
+        standard_name = "vcmax25",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "The parameter vcmax of leaves at 25 degree celsius.",
+        compute! = (out, Y, p, t) -> compute_vcmax25!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Radiative Transfer
+    # NIR - near infrared radiaton
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "nir",
+        long_name = "Near Infrared Radiation",
+        standard_name = "near_infrared_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of near infrared radiation reaching the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_near_infrared_radiation_down!(out, Y, p, t, land_model),
+    )
+
+    # ANIR - absorbed near infrared radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "anir",
+        long_name = "Absorbed Near Infrared Radiation",
+        standard_name = "absorbed_near_infrared_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of near infrared radiation absorbed by the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_near_infrared_radiation_absorbed!(out, Y, p, t, land_model),
+    )
+
+    # RNIR - reflected near infrared radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rnir",
+        long_name = "Reflected Near Infrared Radiation",
+        standard_name = "reflected_near_infrared_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of near infrared radiation reflected by the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_near_infrared_radiation_reflected!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # TNIR - transmitted near infrared radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tnir",
+        long_name = "Transmitted Near Infrared Radiation",
+        standard_name = "transmitted_near_infrared_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of near infrared radiation transmitted by the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_near_infrared_radiation_transmitted!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # PAR - photosynthetically active radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "par",
+        long_name = "Photosynthetically Active Radiation",
+        standard_name = "photosynthetically_active_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The subset of total radiation that activates photosynthesis reaching the canopy.",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthetically_active_radiation_down!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # APAR - absorbed photosynthetically active radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "apar",
+        long_name = "Absorbed Photosynthetically Active Radiation",
+        standard_name = "absorbed_photosynthetically_active_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of photosynthetically active radiation absorbed by the leaf. The rest if reflected or transmitted.",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthetically_active_radiation_absorbed!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # RPAR - reflected photosynthetically active radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rpar",
+        long_name = "Reflected Photosynthetically Active Radiation",
+        standard_name = "reflected_photosynthetically_active_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of photosynthetically active radiation reflected by leaves.",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthetically_active_radiation_reflected!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # TPAR - transmitted photosynthetically active radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tpar",
+        long_name = "Transmitted Photosynthetically Active Radiation",
+        standard_name = "transmitted_photosynthetically_active_radiation",
+        units = "mol photons m^-2 s^-1",
+        comments = "The amount of photosynthetically active radiation transmitted by leaves.",
+        compute! = (out, Y, p, t) ->
+            compute_photosynthetically_active_radiation_transmitted!(
+                out,
+                Y,
+                p,
+                t,
+                land_model,
+            ),
+    )
+
+    # Net longwave radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lwn",
+        long_name = "Net Longwave Radiation",
+        standard_name = "net_longwave_radiation",
+        units = "W m^-2",
+        comments = "The net (down minus up) longwave radiation at the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_radiation_longwave_net!(out, Y, p, t, land_model),
+    )
+
+    # Net shortwave radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swn",
+        long_name = "Net Shortwave Radiation",
+        standard_name = "net_shortwave_radiation",
+        units = "W m^-2",
+        comments = "The net (down minus up) shortwave radiation at the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_radiation_shortwave_net!(out, Y, p, t, land_model),
+    )
+
+    ### Canopy - Vegetation carbon (derived from prescribed biomass)
+    # Vegetation carbon
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "cveg",
+        long_name = "Vegetation carbon",
+        standard_name = "vegetation_carbon_content",
+        units = "kg C m^-2",
+        comments = "Total above-ground vegetation carbon per unit ground area, derived from prescribed LAI and SAI using specific carbon densities. cVeg = σl*LAI + ηsl*h*SAI, where σl is specific leaf density (kg C/m^2 leaf), ηsl is live stem wood coefficient (kg C/m^3), h is canopy height (m).",
+        compute! = (out, Y, p, t) ->
+            compute_vegetation_carbon!(out, Y, p, t, land_model),
+    )
+
+    # Air pressure
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "airp",
+        long_name = "Air pressure",
+        standard_name = "air_pressure",
+        units = "Pa",
+        comments = "The air pressure.",
+        compute! = (out, Y, p, t) ->
+            compute_pressure!(out, Y, p, t, land_model),
+    )
+
+    # Rainfall
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rain",
+        long_name = "Rainfall",
+        standard_name = "rainfall",
+        units = "m s^-1",
+        comments = "Precipitation of liquid water volume (m^3 of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_rainfall!(out, Y, p, t, land_model),
+    )
+
+    # Net longwave radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lwd",
+        long_name = "Down Longwave Radiation",
+        standard_name = "down_longwave_radiation",
+        units = "W m^-2",
+        comments = "The downwelling longwave radiation at the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_radiation_longwave_down!(out, Y, p, t, land_model),
+    )
+
+    # Net shortwave radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swd",
+        long_name = "Shortwave Radiation Downwards",
+        standard_name = "down_shortwave_radiation",
+        units = "W m^-2",
+        comments = "The downwelling shortwave radiation at the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_radiation_shortwave_down!(out, Y, p, t, land_model),
+    )
+
+    # Snowfall
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snow",
+        long_name = "Snowfall",
+        standard_name = "snowfall",
+        units = "m s^-1",
+        comments = "The precipitation of snow in liquid water volume (m^3 of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_snowfall!(out, Y, p, t, land_model),
+    )
+
+    # Total precip (mass flux)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "precip",
+        long_name = "Total precipitation",
+        standard_name = "total_precipitation",
+        units = "kg m^-2 s^-1",
+        comments = "The total flux from precipitation in kg of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) -> compute_precip!(out, Y, p, t, land_model),
+    )
+
+    #Air temperature
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tair",
+        long_name = "Air Temperature (K)",
+        standard_name = "tair",
+        units = "K",
+        comments = "The air temperature at the lowest level of the atmosphere (coupled) or 2m level (prescribed).",
+        compute! = (out, Y, p, t) -> compute_tair!(out, Y, p, t, land_model),
+    )
+
+    # Vapor pressure deficit
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "vpd",
+        long_name = "Vapor Pressure Deficit",
+        standard_name = "vapor_pressure_deficit",
+        units = "Pa",
+        comments = "The vapor pressure deficit of the air, computed from the air temperature, pressure, and specific humidity. It is taken over ice below freezing and is non-negative.",
+        compute! = (out, Y, p, t) -> compute_vpd!(out, Y, p, t, land_model),
+    )
+
+
+    # Wind speed
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ws",
+        long_name = "Wind Speed",
+        standard_name = "wind_speed",
+        units = "m s^-1",
+        comments = "The average wind speed.",
+        compute! = (out, Y, p, t) ->
+            compute_wind_speed!(out, Y, p, t, land_model),
+    )
+
+    ## Soil Module ##
+    # Infiltration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "infil",
+        long_name = "Infiltration",
+        standard_name = "infiltration",
+        units = "m s^-1",
+        comments = "The flux of liquid water volume into the soil (m^3 of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_infiltration!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sath",
+        long_name = "Saturated height of soil",
+        standard_name = "saturated_height",
+        units = "m",
+        comments = "The integrated height of soil which is saturated (m)",
+        compute! = (out, Y, p, t) ->
+            compute_saturated_height!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "infc",
+        long_name = "Infiltration Capacity",
+        standard_name = "infiltration_capacity",
+        units = "m s^-1",
+        comments = "The maximum flux of liquid water volume into the soil (m^3 of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_infiltration_capacity!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sfsat",
+        long_name = "Soil saturated fraction at the surface",
+        standard_name = "soil_fsat",
+        units = "",
+        comments = "The fraction of the soil surface which is saturated (unitless)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_fsat!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sdr",
+        long_name = "Soil drainage",
+        standard_name = "soil drainage",
+        units = "m s^-1",
+        comments = "The flux of liquid water volume out of the soil domain bottom (m^3 of water per m^2 of ground per second).",
+        compute! = (out, Y, p, t) ->
+            compute_bottom_water_flux!(out, Y, p, t, land_model),
+    )
+
+    # Soil albedo
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "salb",
+        long_name = "Soil Albedo",
+        standard_name = "surface albedo",
+        units = "",
+        comments = "The mean of PAR and NIR albedo, which are calculated as α_soil_band = α_band_dry * (1 - S_e) + α_band_wet * S_e.",
+        compute! = (out, Y, p, t) ->
+            compute_soil_albedo!(out, Y, p, t, land_model),
+    )
+
+
+    # Soil hydraulic conductivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "shc",
+        long_name = "Soil Hydraulic Conductivity",
+        standard_name = "soil_hydraulic_conductivity",
+        units = "m s^-1",
+        comments = "Soil hydraulic conductivity. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_hydraulic_conductivity!(out, Y, p, t, land_model),
+    )
+
+    # Soil thermal conductivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "stc",
+        long_name = "Soil Thermal Conductivity",
+        standard_name = "soil_thermal_conductivity",
+        units = "W m^-1 K^-1",
+        comments = "Soil thermal conductivity. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_thermal_conductivity!(out, Y, p, t, land_model),
+    )
+
+    # Soil Water Potential
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swp",
+        long_name = "Soil Water Potential",
+        standard_name = "soil_water_potential",
+        units = "Pa",
+        comments = "Soil water potential. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_water_potential!(out, Y, p, t, land_model),
+    )
+
+    # Soil net radiation
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "soilrn",
+        long_name = "Soil Net Radiation",
+        standard_name = "soil_net_radiation",
+        units = "W m^-2",
+        comments = "Net radiation at the soil surface.",
+        compute! = (out, Y, p, t) ->
+            compute_soil_net_radiation!(out, Y, p, t, land_model),
+    )
+
+    ### Soil - Turbulent Fluxes
+
+    # Soil latent heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "soillhf",
+        long_name = "Soil Latent Heat Flux",
+        standard_name = "soil_Latent_Heat_Flux",
+        units = "W m^-2",
+        comments = "Soil latent heat flux, the amount of liquid water evaporated by the soil, expressed in energy units (W m^-2).",
+        compute! = (out, Y, p, t) ->
+            compute_soil_latent_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    # Soil sensible heat flux
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "soilshf",
+        long_name = "Soil Sensible Heat Flux",
+        standard_name = "soil_sensible_Heat_Flux",
+        units = "W m^-2",
+        comments = "Soil sensible heat flux, the amount of energy exchanged between the soil and atmosphere to change the temperature of the soil.",
+        compute! = (out, Y, p, t) ->
+            compute_soil_sensible_heat_flux!(out, Y, p, t, land_model),
+    )
+
+    ### Soil - SoilCO2
+    # Heterotrophic respiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "hr",
+        long_name = "Heterotrophic Respiration",
+        standard_name = "heterotrophic_respiration",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "The CO2 efflux at the soil surface due to microbial decomposition of soil organic matter. This is not necessarily equal to CO2 production by microbes, as co2 diffusion through the soil pores takes time.",
+        compute! = (out, Y, p, t) ->
+            compute_heterotrophic_respiration!(out, Y, p, t, land_model),
+    )
+
+    # Soil CO2 diffusivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "scd",
+        long_name = "Soil CO2 Diffusivity",
+        standard_name = "soil_co2_diffusivity",
+        units = "m^2 s^-1",
+        comments = "The diffusivity of CO2 in the porous phase of the soil. Depends on soil texture, moisture, and temperature. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soilco2_diffusivity!(out, Y, p, t, land_model),
+    )
+
+    # Soil O2 diffusivity
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sod",
+        long_name = "Soil O2 Diffusivity",
+        standard_name = "soil_o2_diffusivity",
+        units = "m^2 s^-1",
+        comments = "The diffusivity of O2 in the porous phase of the soil. Depends on soil texture, moisture, and temperature. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soilo2_diffusivity!(out, Y, p, t, land_model),
+    )
+
+    # Soil CO2 microbial source
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "scms",
+        long_name = "Soil CO2 Microbial Source",
+        standard_name = "soil_co2_microbial_source",
+        units = "kg C m^-3 s^-1",
+        comments = "The production of CO2 by microbes in the soil. Vary by layers of soil depth. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soilco2_source_microbe!(out, Y, p, t, land_model),
+    )
+
+    ## Other ##
+    # Longwave out
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lwu",
+        long_name = "Longwave Radiation Up",
+        standard_name = "longwave_radiation_up",
+        units = "W m^-2",
+        comments = "Upwelling longwave radiation.",
+        compute! = (out, Y, p, t) -> compute_lw_up!(out, Y, p, t, land_model),
+    )
+
+    # Shortwave out
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swu",
+        long_name = "Shortwave Radiation Up",
+        standard_name = "shortwave_radiation_up",
+        units = "W m^-2",
+        comments = "Upwelling shortwave radiation",
+        compute! = (out, Y, p, t) -> compute_sw_up!(out, Y, p, t, land_model),
+    )
+
+    # Evapotranspiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "et",
+        long_name = "Evapotranspiration",
+        standard_name = "evapotranspiration",
+        units = "kg m^-2 s^-1",
+        comments = "Total flux of water mass out of the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_evapotranspiration!(out, Y, p, t, land_model),
+    )
+
+    # Ecosystem respiration
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "er",
+        long_name = "Ecosystem Respiration",
+        standard_name = "ecosystem respiration",
+        units = "mol CO2 m^-2 s^-1",
+        comments = "Total respiration flux out of the surface.",
+        compute! = (out, Y, p, t) ->
+            compute_total_respiration!(out, Y, p, t, land_model),
+    )
+
+    # Surface runoff
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sr",
+        long_name = "Surface Runoff",
+        standard_name = "surface_runoff",
+        units = "m s^-1",
+        comments = "Water runoff at the surface, this is the water flowing horizontally above the ground.",
+        compute! = (out, Y, p, t) ->
+            compute_surface_runoff!(out, Y, p, t, land_model),
+    )
+
+    # Subsurface runoff
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ssr",
+        long_name = "Subsurface Runoff",
+        standard_name = "subsurface_runoff",
+        units = "m s^-1",
+        comments = "Water runoff from below the surface",
+        compute! = (out, Y, p, t) ->
+            compute_subsurface_runoff!(out, Y, p, t, land_model),
+    )
+
+    # Total runoff
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tr",
+        long_name = "Total Runoff",
+        standard_name = "total_runoff",
+        units = "m s^-1",
+        comments = "Total water runoff (surface + subsurface)",
+        compute! = (out, Y, p, t) ->
+            compute_total_runoff!(out, Y, p, t, land_model),
+    )
+
+    ## Stored in Y (prognostic or state variables) ##
+
+    # Canopy temperature
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ct",
+        long_name = "Canopy Temperature",
+        standard_name = "canopy_temperature",
+        units = "K",
+        comments = "Canopy temperature.",
+        compute! = (out, Y, p, t) ->
+            compute_canopy_temperature!(out, Y, p, t, land_model),
+    )
+
+    # Soil CO2
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sco2",
+        long_name = "Soil CO2",
+        standard_name = "soil_co2",
+        units = "kg C m^-3",
+        comments = "Soil CO2 carbon mass per soil volume (air + dissolved) (depth resolved).",
+        compute! = (out, Y, p, t) -> compute_soilco2!(out, Y, p, t, land_model),
+    )
+
+    # Soil O2
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "so2",
+        long_name = "Soil O2 Volumetric Fraction",
+        standard_name = "soil_o2_volumetric_fraction",
+        units = "m^3 m^-3",
+        comments = "Volumetric fraction of O₂ in the soil air (gas phase), computed from the prognostic O₂ mass concentration via the ideal gas law. (depth resolved)",
+        compute! = (out, Y, p, t) -> compute_soilo2!(out, Y, p, t, land_model),
+    )
+
+    # Soil Organic Carbon
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "soc",
+        long_name = "Soil Organic Carbon",
+        standard_name = "soil_organic_carbon",
+        units = "kg C m^-3",
+        comments = "Soil organic carbon mass per soil volume (depth resolved).",
+        compute! = (out, Y, p, t) -> compute_soc!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "soc_int",
+        long_name = "1m Depth Integrated Soil Organic Carbon",
+        standard_name = "integrated_soc",
+        units = "kg C m^-2",
+        comments = "1m Integrated Mass concentration of soil organic carbon",
+        compute! = (out, Y, p, t) ->
+            compute_integrated_soc!(out, Y, p, t, land_model),
+    )
+
+    # Soil CO2 in ppm (for NEON comparison)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sco2_ppm",
+        long_name = "Soil Pore Air CO2 Concentration",
+        standard_name = "soil_pore_air_co2_concentration",
+        units = "ppm",
+        comments = "CO2 concentration in soil pore air space, in parts per million by volume. Computed from air-equivalent CO2 concentration using ideal gas law. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soilco2_ppm!(out, Y, p, t, land_model),
+    )
+
+    # Soil water content
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swc",
+        long_name = "Soil Water Content",
+        standard_name = "soil_water_content",
+        units = "m^3 m^-3",
+        comments = "The volume of soil water per volume of soil. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_water_content!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "iwc",
+        long_name = "Integrated Soil Water Mass in first 10cm",
+        standard_name = "soil_10cm_water_mass",
+        units = "kg/m^2",
+        comments = "The integrated water mass to a depth of 10cm",
+        compute! = (out, Y, p, t) ->
+            compute_10cm_water_mass!(out, Y, p, t, land_model),
+    )
+
+    # Plant water content
+
+    #=
+    conditional_add_diagnostic_variable!(possible_diags;
+        short_name = "pwc",
+        long_name = "Plant Water Content",
+        standard_name = "plant_water_content",
+        units = "m^3 m^-3",
+        comments = "The volume of plant water per volume of plant.",
+        compute! = (out, Y, p, t) ->
+            compute_plant_water_content!(out, Y, p, t, land_model),
+    )
+    =#
+    # return a Tuple
+
+    # Soil ice
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "si",
+        long_name = "Soil Ice",
+        standard_name = "soil_ice",
+        units = "m^3 m^-3",
+        comments = "The volume of soil ice per volume of soil. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_ice_content!(out, Y, p, t, land_model),
+    )
+
+    # Soil internal energy
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "sie",
+        long_name = "Soil Internal Energy",
+        standard_name = "soil_internal_energy",
+        units = "W m^-2",
+        comments = "The energy per volume of soil. (depth resolved)",
+        compute! = (out, Y, p, t) ->
+            compute_soil_internal_energy!(out, Y, p, t, land_model),
+    )
+
+    # SWE
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "swe",
+        long_name = "Snow water equivalent",
+        standard_name = "snow_water_equivalent",
+        units = "m",
+        comments = "The height of liquid water if all snow melted",
+        compute! = (out, Y, p, t) ->
+            compute_snow_water_equivalent!(out, Y, p, t, land_model),
+    )
+
+    # Snow depth
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snd",
+        long_name = "Snow depth",
+        standard_name = "snow_depth",
+        units = "m",
+        comments = "The snow depth",
+        compute! = (out, Y, p, t) ->
+            compute_snow_depth!(out, Y, p, t, land_model),
+    )
+
+    # Snow cover fraction
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snowc",
+        long_name = "Snow cover fraction",
+        standard_name = "snow_cover_fraction",
+        units = "",
+        comments = "The snow cover fraction",
+        compute! = (out, Y, p, t) ->
+            compute_snow_cover_fraction!(out, Y, p, t, land_model),
+    )
+
+    # Snow bulk temperature
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snowtb",
+        long_name = "Snow bulk temperature",
+        standard_name = "snow_bulk_temp",
+        units = "K",
+        comments = "The bulk (layer-averaged) temperature of the snowpack",
+        compute! = (out, Y, p, t) ->
+            compute_snow_bulk_temp!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snowk",
+        long_name = "Snow thermal conductivity",
+        standard_name = "snow_thermal_conductivity",
+        units = "W m^-1 K^-1",
+        comments = "The thermal conductivity of the snowpack",
+        compute! = (out, Y, p, t) -> compute_snowk!(out, Y, p, t, land_model),
+    )
+    # Snow sfc temperature
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snowtsfc",
+        long_name = "Snow sfc temperature",
+        standard_name = "snow_sfc_temp",
+        units = "K",
+        comments = "The snow surface temperature",
+        compute! = (out, Y, p, t) ->
+            compute_snow_sfc_temp!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "snowtbot",
+        long_name = "Snow bot temperature",
+        standard_name = "snow_bot_temp",
+        units = "K",
+        comments = "The temperature at the bottom of the snowpack",
+        compute! = (out, Y, p, t) ->
+            compute_snow_bot_temp!(out, Y, p, t, land_model),
+    )
+
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "ghf",
+        long_name = "Ground heat flux",
+        standard_name = "ground_heat_flux",
+        units = "W m^-2",
+        comments = "The conductive heat flux between the snow and the soil; positive values transfer energy from the soil up into the snowpack",
+        compute! = (out, Y, p, t) -> compute_ghf!(out, Y, p, t, land_model),
+    )
+
+    ### Slab Lake ###
+    # Lake internal energy (prognostic)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lkie",
+        long_name = "Lake Internal Energy",
+        standard_name = "lake_internal_energy",
+        units = "J m^-2",
+        comments = "Internal energy of the slab lake per unit lake area.",
+        compute! = (out, Y, p, t) ->
+            compute_lake_internal_energy!(out, Y, p, t, land_model),
+    )
+
+    # Lake temperature (cache)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "tlake",
+        long_name = "Lake Temperature",
+        standard_name = "lake_temperature",
+        units = "K",
+        comments = "Temperature of the slab lake.",
+        compute! = (out, Y, p, t) ->
+            compute_lake_temperature!(out, Y, p, t, land_model),
+    )
+
+    # Lake liquid fraction (cache)
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "qlake",
+        long_name = "Lake Liquid Fraction",
+        standard_name = "lake_liquid_fraction",
+        units = "",
+        comments = "Liquid fraction of the slab lake (0 = fully frozen, 1 = fully liquid).",
+        compute! = (out, Y, p, t) ->
+            compute_lake_liquid_fraction!(out, Y, p, t, land_model),
+    )
+
+    # Lake albedo
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "alake",
+        long_name = "Lake Shortwave Albedo",
+        standard_name = "lake_sw_albedo",
+        units = "",
+        comments = "Lake broadband sw albedo",
+        compute! = (out, Y, p, t) ->
+            compute_lake_sw_albedo!(out, Y, p, t, land_model),
+    )
+
+    # Lake fluxes
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "rnlake",
+        long_name = "Lake net radiative flux",
+        standard_name = "lake_rn",
+        units = "W m-2",
+        comments = "Lake net radiative flux per lake area",
+        compute! = (out, Y, p, t) -> compute_lake_rn!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "lhflake",
+        long_name = "Lake latent heat flux",
+        standard_name = "lake_lhf",
+        units = "W m-2",
+        comments = "Lake latent heat flux per lake area",
+        compute! = (out, Y, p, t) ->
+            compute_lake_lhf!(out, Y, p, t, land_model),
+    )
+    conditional_add_diagnostic_variable!(
+        possible_diags;
+        short_name = "shflake",
+        long_name = "Lake sensible heat flux",
+        standard_name = "lake_shf",
+        units = "W m-2",
+        comments = "Lake sensible heat flux per lake area",
+        compute! = (out, Y, p, t) ->
+            compute_lake_shf!(out, Y, p, t, land_model),
+    )
+end

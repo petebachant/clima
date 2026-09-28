@@ -1,0 +1,727 @@
+ClimaLand.jl Release Notes
+========================
+main
+----
+- ![][badge-🔥behavioralΔ] Optimal-LAI climate inputs (`f0`, growing-season VPD and length)
+  are now computed throughout the simulation from time-integrated prognostic variables;
+  trees vs grass and C3 vs C4 are now predicted by `ZhouOptimalLAIModel` (stored in
+  `p.canopy.biomass.composition`, diagnostics `ftr`, `fc3g`, `fc4g`, `fc3`) and used by
+  photosynthesis; potential GPP now assumes moisture stress is 1. `z`/`sigma`/`alpha`
+  recalibrated to 29.2/1.01/0.202, and the P-model, moisture-stress and canopy-flux defaults
+  updated from a separate calibration.
+  PR [#1831](https://github.com/CliMA/ClimaLand.jl/pull/1831)
+- ![][badge-💥breaking] `ZhouOptimalLAIModel` no longer uses the `optimal_lai_inputs` keyword
+  argument, and requires the P-model; `optimal_lai_f0` is renamed `optimal_lai_f0_max`;
+  `get_Vcmax25_leaf` and `get_Vcmax25_canopy` take the canopy model as a fourth argument.
+  PR [#1831](https://github.com/CliMA/ClimaLand.jl/pull/1831)
+- ![][badge-✨feature] The global land model restart test (`test/integrated/restart.jl`)
+  also runs with `ZhouOptimalLAIModel`, whose time-integrated variables are checkpointed
+  with the rest of the state. PR [#1831](https://github.com/CliMA/ClimaLand.jl/pull/1831)
+- ![][badge-🐛bugfix] Where the optimal-LAI initial-condition file has no data (`f0` south
+  of 60°S, ocean pixels picked up by coastal cells), `ZhouOptimalLAIModel` starts from a
+  bare canopy instead of NaN, so LAI is predicted over Antarctica.
+  PR [#1831](https://github.com/CliMA/ClimaLand.jl/pull/1831)
+- Fix the 10 cm soil water mass diagnostic for standalone soil models, register
+  the optimal-LAI and soil CO2 ppm diagnostics only for models that support
+  them, and fix the default time interpolation of the perturbed ERA5 drivers.
+  Re-enable the neural snow tool tests (now using local data fixtures), add
+  unit tests for the diagnostics compute methods, show methods, perturbed
+  drivers and the `LandSimulation` interface, and exclude the plotting and
+  Fluxnet extensions from Codecov.
+  PR [#1883](https://github.com/CliMA/ClimaLand.jl/pull/1883)
+- Add an ERA5-forced single column tutorial.
+  PR [#1885](https://github.com/CliMA/ClimaLand.jl/pull/1885)
+- Add a vapor pressure deficit diagnostic (`vpd`) for models with a canopy.
+  PR [#1885](https://github.com/CliMA/ClimaLand.jl/pull/1885)
+
+v1.12.2
+----
+- Bug fix in SIF computation PR[#1877](https://github.com/CliMA/ClimaLand.jl/pull/1877)
+- Update compat to ClimaTimeSteppers v1 PR[#1878](https://github.com/CliMA/ClimaLand.jl/pull/1878)
+
+v1.12.1
+----
+- Update compat to ClimaCore v0.16 PR[#1869](https://github.com/CliMA/ClimaLand.jl/pull/1869)
+
+v1.12.0
+----
+- ![][badge-✨feature] Partitioning leaderboard, zonal-mean, and
+  interannual-spread panels.
+  PR [#1836](https://github.com/CliMA/ClimaLand.jl/pull/1836)
+- ![][badge-✨feature] Change initial condition function name from
+  set_subseasonal to set_from_era5land.
+  PR [#1858](https://github.com/CliMA/ClimaLand.jl/pull/1858)
+- ![][badge-✨feature] Add a `ColumnEnsemble` domain: a `Column` alias holding
+  an ensemble of independent columns. PR
+  [#1826](https://github.com/CliMA/ClimaLand.jl/pull/1826)
+- ![][badge-✨feature] Use the `WorkerBackend` for calibration on Derecho, so
+  workers start as soon as they are available and are packed onto a single node
+  to save GPU hours. PR [#1860](https://github.com/CliMA/ClimaLand.jl/pull/1860)
+
+v1.11.2
+-------
+- ![][badge-✨feature] Add a restart test for the global land model with the P-model
+  (`test/integrated/restart.jl`): restarting from a checkpoint reproduces an uninterrupted
+  run bit-for-bit. PR [#1840](https://github.com/CliMA/ClimaLand.jl/pull/1840)
+
+v1.11.1
+-------
+- ![][badge-🔥behavioralΔ] Add support for ClimaCore v0.15.
+  PR [#XXXX](https://github.com/CliMA/ClimaLand.jl/pull/XXXX)
+- ![][badge-✨feature] Add a `TimeIntegratedVariable` utility for prognostic time-integrated
+  variables — a running mean/sum or plain time-integral stored in `Y` and advanced by the
+  time-stepper (no callback, checkpoint/restart-safe). PR [#1797](https://github.com/CliMA/ClimaLand.jl/pull/1797)
+- ![][badge-🔥behavioralΔ] Make the optimal-LAI and P-model acclimation states continuous
+  prognostic time-integrated variables in `Y`, replacing the local-noon callbacks so they
+  evolve smoothly every timestep and are exactly reproducible across checkpoint/restart. The
+  P-model `AccVars` relaxes toward the instantaneous optimum weighted onto solar noon (a
+  smooth midday window, unit daily mean). The optimal-LAI state is set in `set_ic!`, so a
+  custom initial-condition function must call `set_canopy_biomass_initial_conditions!`.
+  Adds the `pra` diagnostic and the `optimal_lai_tau_long_term` parameter.
+  PR [#1797](https://github.com/CliMA/ClimaLand.jl/pull/1797)
+- ![][badge-✨feature] Add a leaderboard of the model's energy and water partitioning against
+  ERA5 (`Partitioning_leaderboard.png`), and zonal-mean, seasonal-cycle and
+  interannual-variability panels to the annual leaderboards.
+  PR [#1836](https://github.com/CliMA/ClimaLand.jl/pull/1836)
+- ![][badge-🚀performance] Resolve each leaderboard's land-sea mask once instead of on every
+  masked slice, taking a 19-year run of all leaderboards from ~40 min to ~8 min.
+  PR [#1836](https://github.com/CliMA/ClimaLand.jl/pull/1836)
+- ![][badge-🐛bugfix] Correct the units of the `trans` diagnostic from `m s^-1` to
+  `kg m^-2 s^-1`. PR [#1836](https://github.com/CliMA/ClimaLand.jl/pull/1836)
+- ![][badge-🔥behavioralΔ] Read single-site plotting data through `site_timeseries`, which works
+  with either output writer, and fix the `DictWriter` timestamps across a year boundary.
+  PR [#1836](https://github.com/CliMA/ClimaLand.jl/pull/1836)
+
+v1.11.0
+-----
+- ![][badge-🔥featureΔ] Use latest SF version which enables us to do a single rather than nested set of solves for the snow surface temperature. Since this SF release was a breaking change, upgrade compat to 1.2. We now use the snow surface temperature parameterization based on the equilibrium gradient approach by default [#1774](https://github.com/CliMA/ClimaLand.jl/pull/1774)
+
+v1.10.3
+-----
+- ![][badge-🐛bugfix] Fix the P-model intercellular CO2 (`ci`): guard the water-stress factor
+  `ξ` so `ci` no longer returns a `NaN` when `ξ = 0` (recovering the `ci = Γ*` limit), which
+  previously propagated through GPP, `An`, stomatal conductance, and the canopy turbulent
+  fluxes. PR [#1811](https://github.com/CliMA/ClimaLand.jl/pull/1811)
+- ![][badge-🔥behavioralΔ] Update the SIF `kd_p2` parameter (0.0273 → 0.0773, Tol et al. 2014)
+  and correct the `sif` diagnostic units to `W m^-2 sr^-1 μm^-1`. PR [#1812](https://github.com/CliMA/ClimaLand.jl/pull/1812)
+- ![][badge-🐛bugfix] Fix a C4 typo in `compute_chi`: the C4 intercellular CO2 used the C3
+  dryness sensitivity `ξ_c3` instead of `ξ_c4`, biasing the blended χ (and hence the
+  optimal-LAI water-limitation term) at C4 and mixed C3/C4 cells. PR [#1805](https://github.com/CliMA/ClimaLand.jl/pull/1805)
+- ![][badge-🐛bugfix] Build the leaderboard/calibration MODIS `lai` obs
+  (`get_modis_lai_obs_var`) as a calendar-monthly mean instead of a month-start
+  snapshot, matching the model's monthly-mean `lai` diagnostic. The snapshot led
+  the mean by ~half a month, biasing the seasonal cycle of prescribed-LAI runs.
+  Also shifts the LAI calibration target by up to ~0.2 m² m⁻².
+  PR [#1806](https://github.com/CliMA/ClimaLand.jl/pull/1806)
+
+v1.10.2
+-----
+- ![][badge-🔥behavioralΔ] Remove SAI from energy fluxes, tendency PR [#1782](https://github.com/CliMA/ClimaLand.jl/pull/1782)
+- ![][badge-🔥behavioralΔ] Set the `optimal_lai_z`/`optimal_lai_sigma`/`optimal_lai_alpha`
+  defaults to values calibrated against MODIS LAI (Yuan et al. 2017): 21.4 / 0.939 / 0.0701.
+  Only affects runs using prognostic LAI (`ZhouOptimalLAIModel`); the prescribed-LAI default
+  is unchanged. PR [#1794](https://github.com/CliMA/ClimaLand.jl/pull/1794)
+- ![][badge-✨feature] Add a `PROGNOSTIC_LAI` switch to `experiments/long_runs/snowy_land_pmodel.jl`
+  to run with prognostic optimal LAI instead of prescribed MODIS LAI, and run it weekly on CI
+  (plus on demand via the `long run opt lai` label). PR [#1794](https://github.com/CliMA/ClimaLand.jl/pull/1794)
+- ![][badge-✨feature] Add an `INVERSION` leaderboard (model vs inversion-derived NEE/GPP/ER,
+  plus MODIS LAI on prognostic-LAI runs only) to the snowy-land long run. PR [#1794](https://github.com/CliMA/ClimaLand.jl/pull/1794)
+
+v1.10.1
+-----
+- Fix GPU crash in CLM canopy radiation parameter regridding
+
+v1.10.0
+-----
+- ![][badge-🔥behavioralΔ] use the Sturm et al snow thermal K parameterization, ROSETTA parameters,
+   and new spun up initial conditions. PR [#1772](https://github.com/CliMA/ClimaLand.jl/pull/1766)
+- ![][badge-✨feature] Add selectable snow thermal conductivity parameterizations
+  (`JordanSnowConductivityModel`, default, after Jordan 1991; and
+  `SturmSnowConductivityModel`, after Sturm et al. 1997) and a piecewise-linear
+  snow-bottom-temperature parameterization (`snow_T_bottom`) used to compute the
+  snow-soil ground heat flux. Adds the `snowtb`, `snowtsfc`, `snowtbot`, `snowk`, and
+  `ghf` diagnostics. PR [#1766](https://github.com/CliMA/ClimaLand.jl/pull/1766)
+- ![][badge-💥breaking] The `SnowParameters` field `κ_ice` is replaced by `κ_snow`, an
+  `AbstractSnowConductivityModel` (default `JordanSnowConductivityModel`). PR [#1766](https://github.com/CliMA/ClimaLand.jl/pull/1766)
+- ![][badge-🔥behavioralΔ] The snow-soil ground heat flux is now driven by the
+  temperature at the bottom of the snowpack rather than the bulk snow temperature,
+  changing the snow/soil energy exchange. PR [#1766](https://github.com/CliMA/ClimaLand.jl/pull/1766)
+- Add Calibrate-Emulate-Sample (CES) UQ pipeline: `experiments/calibration/emulate.jl` and `sample.jl` extend the existing ClimaCalibrate workflow with GP emulation and RWMH-MCMC posterior sampling; add two site-level CES tutorials (perfect-model and observation-based) demonstrating full uncertainty quantification for Vcmax25 and g1 at US-MOz PR[#1764](https://github.com/CliMA/ClimaLand.jl/pull/1764)
+
+v1.9.0
+-----
+- Add Rosetta-derived spatially varying van Genuchten soil parameters (Montzka et al. 2017) as an option PR[#1763](https://github.com/CliMA/ClimaLand.jl/pull/1763)
+- Reduce unnecessary computation for sublimation, shortwave radiation, and implicit cache; removal of make_imp_tendency and make_update_jacobian functions PR[#1757](https://github.com/CliMA/ClimaLand.jl/pull/1757)
+- Add `inversion_nee` artifact (inversion-derived NEE/GPP/ER/Rh, monthly 1°×1°, 2002–2020) and `inversion_nee_dataset_path` accessor PR[#1760](https://github.com/CliMA/ClimaLand.jl/pull/1760)
+- Make SoilCO2 and O2 implicitly stepped PR[#1752](https://github.com/CliMA/ClimaLand.jl/pull/1752)
+- Change timestep to 900s from 450s in calibration, longruns and benchmarks; reduce the number of short/default diagnostics PR[#1756](https://github.com/CliMA/ClimaLand.jl/pull/1756)
+
+v1.8.3
+-----
+- Replace `CTS.DistributedODEAlgorithm` with `CTS.TimeSteppingAlgorithm` to match upstream CTS callback rename PR[#1751](https://github.com/CliMA/ClimaLand.jl/pull/1751)
+
+v1.8.2
+-----
+- Remove allocation and clipping of Y PR[#1748](https://github.com/CliMA/ClimaLand.jl/pull/1748)
+- Improve benchmarks pipeline PR[#1741](https://github.com/CliMA/ClimaLand.jl/pull/1741)
+- Add plots to CI PR[#1740](https://github.com/CliMA/ClimaLand.jl/pull/1740)
+
+v1.8.1
+-----
+- Change default land model to use the pmodel, piecewise soil moisture stress, and snow albedo zenith angle parameterization PR[#1726](https://github.com/CliMA/ClimaLand.jl/pull/1726)
+
+v1.8.0
+-----
+- Remove `convert_cb` function PR[#1730](https://github.com/CliMA/ClimaLand.jl/pull/1730)
+- ![breaking change][badge-💥breaking] Rewrite DAMM soil respiration in centered-Arrhenius form: `soilCO2_pre_exponential_factor` is replaced by `soilCO2_reference_rate` and `soilCO2_reference_temperature`, with retuned `Ea_sx` and `kM_sx` defaults PR[#1714](https://github.com/CliMA/ClimaLand.jl/pull/1714)
+- ![][badge-🔥behavioralΔ] Diffuse soil CO2/O2 using an effective porosity that includes Henry's-law dissolved gas; initialize prognostic SOC from SoilGrids and hold it constant; pass soil ice into the biogeochemistry PR[#1714](https://github.com/CliMA/ClimaLand.jl/pull/1714)
+- Use nearest neighbor to create higher resolution soil retention parameter data; use these by default and corresponding spun up initial condition PR[#1712](https://github.com/CliMA/ClimaLand.jl/pull/1712)
+- ![breaking change][badge-💥breaking] Refactor `PlantHydraulicsModel` to a
+  single above-ground compartment; `PlantHydraulics` submodule has been
+  merged into `Canopy` PR[#1709](https://github.com/CliMA/ClimaLand.jl/pull/1709)
+
+v1.7.0
+-----
+- ![breaking change][badge-💥breaking] Don't compute bucket fluxes in coupled case PR[#1677](https://github.com/CliMA/ClimaLand.jl/pull/1677)
+- ![][badge-✨feature] Add slab lake model to integrated models PR[#1672](https://github.com/CliMA/ClimaLand.jl/pull/1672)
+
+v1.6.5
+-----
+- drop SciMLBase dependency PR[#1678](https://github.com/CliMA/ClimaLand.jl/pull/1678)
+- always use hi-resolution PFT maps and soil albedo map PR[#1697](https://github.com/CliMA/ClimaLand.jl/pull/1697)
+- change limits on leaderboard annual plots PR[#1698](https://github.com/CliMA/ClimaLand.jl/pull/1698)
+- add standalone lake model PR[#1695](https://github.com/CliMA/ClimaLand.jl/pull/1695)
+
+v1.6.4
+-----
+- Update environment in ClimaCoupler.jl downstream test PR[#1685](https://github.com/CliMA/ClimaLand.jl/pull/1685)
+- Update README PR[#1683](https://github.com/CliMA/ClimaLand.jl/pull/1683)
+- Allow different beta values for C3 and C4 plants PR[#1684](https://github.com/CliMA/ClimaLand.jl/pull/1684)
+- Test different bare soil evaporation scheme with calibratable parameters PR[#1663](https://github.com/CliMA/ClimaLand.jl/pull/1663)
+- Add CFTime dep and compat to avoid bug in ClimaUtilities PR[#1682](https://github.com/CliMA/ClimaLand.jl/pull/1682)
+- Change bare soil evaporation scheme PR[#1663](https://github.com/CliMA/ClimaLand.jl/pull/1663)
+- ![breaking change][badge-💥breaking] Use fractional C3/C4 for `PModel` PR[#1680](https://github.com/CliMA/ClimaLand.jl/pull/1680)
+
+v1.6.3
+-----
+- SOC diagnostic integrated over depth PR[#1662](https://github.com/CliMA/ClimaLand.jl/pull/1662)
+
+v1.6.2
+-----
+- Update compat to SurfaceFluxes 1.0 PR[#1668](https://github.com/CliMA/ClimaLand.jl/pull/1668)
+- Clean up pkgversion checks and set ClimaDiagnostics in compat to 0.3 PR[#1676](https://github.com/CliMA/ClimaLand.jl/pull/1676)
+
+v1.6.1
+------
+- Update compat to Thermodynamics 1.0 PR[#1667](https://github.com/CliMA/ClimaLand.jl/pull/1667)
+
+v1.6.0
+------
+- Initialize the cache in LandSimulation constructor only for offline runs PR[#1641](https://github.com/CliMA/ClimaLand.jl/pull/1641)
+- Run tests on julia 1.12 instead of 1.11 PR[#1650](https://github.com/CliMA/ClimaLand.jl/pull/1650)
+- Create set ic functions for the bucket PR[#1644](https://github.com/CliMA/ClimaLand.jl/pull/1644)
+- Add CRUJRA forcing PR[#1624](https://github.com/CliMA/ClimaLand.jl/pull/1624)
+- ![breaking change][badge-💥breaking] Unify radiation for bucket and integrated land PR[#1630](https://github.com/CliMA/ClimaLand.jl/pull/1630)
+- ![breaking change][badge-💥breaking] Refactor NeuralSnow extension, reducing ClimaLand dependencies and breaking up extensions PR[#1631](https://github.com/CliMA/ClimaLand.jl/pull/1631)
+
+v1.5.3
+------
+- Updated parameters, quantum yield for C4, canopy LW PR[#1613](https://github.com/CliMA/ClimaLand.jl/pull/1613)
+- ![][badge-✨feature] Add prognostic optimal LAI model (Zhou et al. 2025) as a biomass model (`ZhouOptimalLAIModel`), computing LAI dynamically from energy and water constraints
+
+v1.5.2
+------
+- Fix divide by zero bug
+
+v1.5.1
+------
+- Adjust RootSolvers lower compat
+
+v1.5.0
+------
+- Update to Insolation v1; use cosine zenith angle directly from Insolation.jl PR[#1617](https://github.com/CliMA/ClimaLand.jl/pull/1617)
+- Add parameterization for snow surface temperature PR[#1593](https://github.com/CliMA/ClimaLand.jl/pull/1593)
+- Make the soil model use the same turbulent fluxes function call as the other components PR[#1609](https://github.com/CliMA/ClimaLand.jl/pull/1609)
+- ![breaking change][badge-💥breaking] Remove thermal state from ClimaLand, use latest Thermodynamics package [#1594](https://github.com/CliMA/ClimaLand.jl/pull/1594)
+
+v1.4.0
+------
+- ![breaking change][badge-💥breaking] update ClimaLand to work with the new SurfaceFluxes package release PR[#1591](https://github.com/CliMA/ClimaLand.jl/pull/1591)
+- Reduce duplicate cache updates and treat soil and snow boundary fluxes explicitly PR[#1559](https://github.com/CliMA/ClimaLand.jl/pull/1559)
+
+v1.3.0
+------
+- ![breaking change][badge-💥breaking] `LandModel` now can be used without a soilco2 component. The convenience constructor now does not create a soilco2 component by default. PR[#1580](https://github.com/CliMA/ClimaLand.jl/pull/1580)
+- ![breaking change][badge-💥breaking] Use new spun-up IC with zero flux at the bottom of the domain by default; miscellaneous bug fixes [#1584](https://github.com/CliMA/ClimaLand.jl/pull/1584)
+- Use Gryanik surface flux parameters [#1578](https://github.com/CliMA/ClimaLand.jl/pull/1578)
+
+v1.2.1
+-------
+- Previous bug fix to harmonic mean formula produces instability; revert until we can solve the issues fixing it causes [#1575](https://github.com/CliMA/ClimaLand.jl/pull/1575)
+
+v1.2.0
+-------
+- Make soil organic carbon and soil O2 prognostic; remove prescribed Soil Organic Carbon driver [#1545](https://github.com/CliMA/ClimaLand.jl/pull/1545)
+
+v1.1.1
+-------
+- Update SurfaceFluxes compatibility to support v0.14 PR[#1563](https://github.com/CliMA/ClimaLand.jl/pull/1563)
+- Remove internal canopy PrescribedTranspiration type and method. PR[#1561](https://github.com/CliMA/ClimaLand.jl/pull/1561)
+
+v1.1.0
+-------
+- ClimaLand LandModel computes fluxes when run with a coupled atmosphere. PR[#1561](https://github.com/CliMA/ClimaLand.jl/pull/1561)
+
+v1.0.2
+------
+- Add runoff diagnostics [#1552](https://github.com/CliMA/ClimaLand.jl/pull/1552)
+- Use fluxnet measured CO2 and allow non-integer time offsets  [#1509](https://github.com/CliMA/ClimaLand.jl/pull/1509)
+- Add for global box domain [#1539](https://github.com/CliMA/ClimaLand.jl/pull/1539)
+- Add ILAMB conversion script and ILAMB leaderboard [#1534](https://github.com/CliMA/ClimaLand.jl/pull/1534)
+
+v1.0.1
+------
+- Switch to use the Vast filesystem on central
+
+v1.0.0
+------
+- Release v1 PR[#1488](https://github.com/CliMA/ClimaLand.jl/pull/1488)
+- Update benchmark scripts as they were out of date [#1490](https://github.com/CliMA/ClimaLand.jl/pull/1490)
+- ![][badge-🐛bugfix] Fix periodic calendar to use all of the data rather than repeat the last year [#1489](https://github.com/CliMA/ClimaLand.jl/pull/1489)
+- Update default snow albedo parameters PR[#1484](https://github.com/CliMA/ClimaLand.jl/pull/1484)
+- Update default pmodel parameters PR[#1482](https://github.com/CliMA/ClimaLand.jl/pull/1482)
+- Use linear interpolation with a periodic calendar in time by default for ERA5 forcing PR[#1468](https://github.com/CliMA/ClimaLand.jl/pull/1468)
+- `PrescribedAtmosphere` fields can't be `nothing` PR[#1438](https://github.com/CliMA/ClimaLand.jl/pull/1438)
+- ![][badge-🐛bugfix] Check for coupled forcing in available diagnostics PR[#1434](https://github.com/CliMA/ClimaLand.jl/pull/1434)
+- ![breaking change][badge-💥breaking] Move the area indices and rooting depth to the biomass component PR[#1388](https://github.com/CliMA/ClimaLand.jl/pull/1388)
+- Remove the unused integrated constructors based on args and types PR[#1408](https://github.com/CliMA/ClimaLand.jl/pull/1408)
+- Add moisture stress component to the canopy model PR[#1387](https://github.com/CliMA/ClimaLand.jl/pull/1387)
+- ![breaking change][badge-💥breaking] All callbacks are now constructed with `IntervalBasedCallback`,  which uses ClimaDiagnostics for scheduling. PR[#1380](https://github.com/CliMA/ClimaLand.jl/pull/1380)
+  - `FrequencyBasedCallback` renamed to `IntervalBasedCallback`
+  - `NonInterpSavingCallback` can no longer be constructed with a vector of
+  times to save at. Instead, the callback can be constructed with one of the following methods
+
+      ```julia
+    # recommended constructors
+    saving_cb = NonInterpSavingCallback(start_date, stop_date, callback_period)
+    # OR
+    saving_cb = NonInterpSavingCallback(t0, tf, callback_period)
+    saved_values = saving_cb.affect!.saved_values # saved_values NamedTuple automatically constructed
+      ```
+
+  - `DriverUpdateCallback` can no longer be constructed with a vector of
+  update times. Instead, it can now be constructed with `DriverUpdateCallback(updatefunc, update_period, t0)`.
+  - The `LandSimulation` construtor now expects `updateat` to be the update period instead of a vector of times.
+  - `CheckpointCallback` signature is changed to `CheckpointCallback(checkpoint_period, output_dir, t0; model, dt = nothing)`
+  - `NaNCheckCallback` signature changed to `NaNCheckCallback(nancheck_period, t0; dt = nothing, mask = nothing)`
+  - The `ReportCallback` constructor no longer accepts the number of steps between reports as an argument. The
+  function signature is now `ReportCallback(period, t0; dt = nothing)`
+- ![breaking change][badge-💥breaking] Model constructors should use toml dict PR[#1385](https://github.com/CliMA/ClimaLand.jl/pull/1385)
+
+v0.20.1
+-------
+- Add C4 plant support to PModel PR[#1356](https://github.com/CliMA/ClimaLand.jl/pull/1356)
+- Remove `PrognosticSoilConditions` in favor of using `PrognosticGroundConditions` more generally PR[#1411](https://github.com/CliMA/ClimaLand.jl/pull/1411)
+- Diagnostics improvements PR[#1350](https://github.com/CliMA/ClimaLand.jl/pull/1350), PR[#1410](https://github.com/CliMA/ClimaLand.jl/pull/1410)
+- Update to ClimaParams v1 PR[#1406](https://github.com/CliMA/ClimaLand.jl/pull/1406)
+- Add error metrics to tutorials PR[#1407](https://github.com/CliMA/ClimaLand.jl/pull/1407)
+- Fix Fluxnet UTC offset sign convention PR[#1405](https://github.com/CliMA/ClimaLand.jl/pull/1405)
+- Format fix PR[#1402](https://github.com/CliMA/ClimaLand.jl/pull/1402)
+
+v0.20.0
+-------
+- ![][badge-🐛bugfix] Correctly compare atmos/canopy heights when atmos height is Field or Float PR[#1394](https://github.com/CliMA/ClimaLand.jl/pull/1394)
+- Add a function to set soil ICs from temperature and total water PR[#1384](https://github.com/CliMA/ClimaLand.jl/pull/1384)
+- ![breaking change][badge-💥breaking] Move LAI artifact into Canopy module PR[#1386](https://github.com/CliMA/ClimaLand.jl/pull/1386)
+- Various docs improvements PR[#1391](https://github.com/CliMA/ClimaLand.jl/pull/1391), PR[#1367](https://github.com/CliMA/ClimaLand.jl/pull/1367)
+
+v0.19.0
+-------
+- ![breaking change][badge-💥breaking] Rename `end_date` to `stop_date`; hide MODIS LAI path in function args PR[#1344](https://github.com/CliMA/ClimaLand.jl/pull/1344)
+- Use correct van Genuchten parameters as a function of depth PR[#1304](https://github.com/CliMA/ClimaLand.jl/pull/1304)
+- Fix divide by zero when VPD is zero PR[#1363](https://github.com/CliMA/ClimaLand.jl/pull/1363)
+- Remove Smith Optimality model; use PModel instead PR[#1361](https://github.com/CliMA/ClimaLand.jl/pull/1361)
+- Use ClimaParams instead of hard coding values for long runs PR[#1300](https://github.com/CliMA/ClimaLand.jl/pull/1300)
+
+v0.18.2
+-------
+- Fix rendering in docs PR[#1338](https://github.com/CliMA/ClimaLand.jl/pull/1338)
+- Add calibration tutorial against observations PR[#1337](https://github.com/CliMA/ClimaLand.jl/pull/1337)
+- Hide domain error in Soil CO2 diffusivity function PR[#1336](https://github.com/CliMA/ClimaLand.jl/pull/1336)
+
+v0.18.1
+-------
+- Unify default diagnostics code PR[#1313](https://github.com/CliMA/ClimaLand.jl/pull/1313)
+- Improve documentation of Fluxnet and global runs PR[#1288](https://github.com/CliMA/ClimaLand.jl/pull/1288)
+- Implement sub-daily PModel PR[#1281](https://github.com/CliMA/ClimaLand.jl/pull/1281)
+- Misc. bugfixes PR[#1310](https://github.com/CliMA/ClimaLand.jl/pull/1310)
+- Use new constructors for LandModel PR[#1306](https://github.com/CliMA/ClimaLand.jl/pull/1306)
+- Add ERA5 forcing artifact with perturbed atmospheric temperature PR[#1291](https://github.com/CliMA/ClimaLand.jl/pull/1291)
+- Use new constructors for CanopyModel and SoilCanopyModel PR[#1284](https://github.com/CliMA/ClimaLand.jl/pull/1284)
+
+
+v0.18.0
+-------
+- Use FluxnetSimulationsExt in fluxnet experiments PR[#1295](https://github.com/CliMA/ClimaLand.jl/pull/1295/files#diff-597adb6c799a803db91ad8d3f827958a793598e2b74423332705227b48b2507f)
+- Use nearest neighbor spatial interpolation PR[#1290](https://github.com/CliMA/ClimaLand.jl/pull/1290)
+- Use global MODIS LAI for all simulations; remove `modis_lai_fluxnet_sites` artifact PR[#1282](https://github.com/CliMA/ClimaLand.jl/pull/1282)
+- Use ClimaUtilities v0.1.25 to read in spatial data to a point using lat/lon PR[#1279](https://github.com/CliMA/ClimaLand.jl/pull/1279)
+- Add data handling tools to FluxnetSimulationsExt and use throughout docs and experiments PR[#1238](https://github.com/CliMA/ClimaLand.jl/pull/1238)
+- Add convenience constructors for CanopyModel and integrated models PR[#1255](https://github.com/CliMA/ClimaLand.jl/pull/1255)
+- Rename LandSimulationVisualization to LandSimulationVisualizationExt; add template for FluxnetSimulationsExt PR[#1259](https://github.com/CliMA/ClimaLand.jl/pull/1259)
+- Remove root_depths from the PrescribeGroundConditions struct, and treat these ground ``drivers" consistently with how we handle atmospheric forcing PR[#1199](https://github.com/CliMA/ClimaLand.jl/pull/1240)
+- Add constructors with default values for Canopy components PR[#1233](https://github.com/CliMA/ClimaLand.jl/pull/1233)
+
+v0.17.2
+-------
+- ![][badge-🐛bugfix] Clip VPD to fix bug in medlyn term computation PR[#1242](https://github.com/CliMA/ClimaLand.jl/pull/1242)
+- Create the extension LandSimulationsVisualization PR[#1199](https://github.com/CliMA/ClimaLand.jl/pull/1199)
+- Enable constructing Point and Column domains with latitude and longitude PR[#1237](https://github.com/CliMA/ClimaLand.jl/pull/1237)
+
+v0.17.1
+-------
+- ![][badge-🐛bugfix] Fix bug in soil boundary var types for coupled atmos PR[#1228](https://github.com/CliMA/ClimaLand.jl/pull/1228)
+
+v0.17.0
+-------
+- ![][badge-🐛bugfix] Fix texure norm bug (soil composition) PR[#1217](https://github.com/CliMA/ClimaLand.jl/pull/1217)
+- ![breaking change][badge-💥breaking] Remove ModelSetup.jl and split spatial parameter functions up PR[#1211](https://github.com/CliMA/ClimaLand.jl/pull/1211)
+- ![breaking change][badge-💥breaking] Rename all `comms_ctx` to `context` PR[#1207](https://github.com/CliMA/ClimaLand.jl/pull/1207)
+- Output NaNs in diagnostics where the ocean is PR[#1200](https://github.com/CliMA/ClimaLand.jl/pull/1200)
+- ![breaking change][badge-💥breaking] Make soil albedo parameterization modular
+PR[#1184](https://github.com/CliMA/ClimaLand.jl/pull/1184)
+- Use new spun up initial conditions from 19 year run PR[#1196](https://github.com/CliMA/ClimaLand.jl/pull/1196)
+
+v0.16.3
+-------
+- Clip ERA5 wind speeds PR[#1166](https://github.com/CliMA/ClimaLand.jl/pull/1166)
+- Start and end simulations in March for seasonality PR[#1175](https://github.com/CliMA/ClimaLand.jl/pull/1175)
+- Remove some fields from the canopy radiation cache PR[#1172](https://github.com/CliMA/ClimaLand.jl/pull/1172)
+- Include energy of rain in snow energy fluxes PR[#1176](https://github.com/CliMA/ClimaLand.jl/pull/1176)
+- Remove atmos fluxes from cache PR[#1177](https://github.com/CliMA/ClimaLand.jl/pull/1177)
+- Run "longer" runs for 20 years PR[#1180](https://github.com/CliMA/ClimaLand.jl/pull/1180)
+- Remove 3 variables from canopy cache PR[#1179](https://github.com/CliMA/ClimaLand.jl/pull/1179)
+- Clean up canopy interfaces PR[#1181](https://github.com/CliMA/ClimaLand.jl/pull/1181)
+- Add energy from precipitation PR[#1164](https://github.com/CliMA/ClimaLand.jl/pull/1164)
+
+v0.16.2
+-------
+- Fix bug in reflected radiation PR[#1156](https://github.com/CliMA/ClimaLand.jl/pull/1156)
+- Add `Simulations` module for global runs PR[#1152](https://github.com/CliMA/ClimaLand.jl/pull/1152)
+- Improve stability of soil model when soil is frozen PR[#1158](https://github.com/CliMA/ClimaLand.jl/pull/1158)
+- Fix bugs in ClimaComms method calls PR[#1160](https://github.com/CliMA/ClimaLand.jl/pull/1160)
+- Add energy free drainage bottom BC for soil PR[#1161](https://github.com/CliMA/ClimaLand.jl/pull/1161)
+- Add total energy and water to bucket cache PR[#1104](https://github.com/CliMA/ClimaLand.jl/pull/1104)
+- Add calibration job script example to slurm [#1142](https://github.com/CliMA/ClimaLand.jl/pull/1142)
+- Compute zenith angle when using `CoupledRadiativeFluxes` [#1135](https://github.com/CliMA/ClimaLand.jl/pull/1135)
+
+v0.16.1
+-------
+- Don't add DSS buffer when npolynomial is 0 PR[#1153](https://github.com/CliMA/ClimaLand.jl/pull/1153)
+- Simplify artifact paths PR[#1150](https://github.com/CliMA/ClimaLand.jl/pull/1150)
+- Clean up IC setting PR[#1151](https://github.com/CliMA/ClimaLand.jl/pull/1151)
+- Add default BCs and sources for soilCO2 PR[#1141](https://github.com/CliMA/ClimaLand.jl/pull/1141)
+
+v0.16.0
+-------
+- Enforce physically in albedo model for snow PR[#1124](https://github.com/CliMA/ClimaLand.jl/pull/1124) and PR[#1131](https://github.com/CliMA/ClimaLand.jl/pull/1131)
+- Add capability to step some sources implicitly PR[#1113](https://github.com/CliMA/ClimaLand.jl/pull/1113)
+
+v0.15.14
+-------
+- add masking of ocean PR[#1050](https://github.com/CliMA/ClimaLand.jl/pull/1050)
+
+v0.15.13
+-------
+- fix for GPU compatibility of integrated land model coupled
+  flux calculations PR[#1093](https://github.com/CliMA/ClimaLand.jl/pull/1093)
+
+v0.15.12
+-------
+- adds functions to compute turbulent fluxes for integrated land
+  model in coupled simulations PR[#1062](https://github.com/CliMA/ClimaLand.jl/pull/1062), [PR#1089](https://github.com/CliMA/ClimaLand.jl/pull/1089)
+- adds functions which compute total energy and water content per
+  unit ground area PR[#1071](https://github.com/CliMA/ClimaLand.jl/pull/1071)
+
+v0.15.11
+--------
+- update drivers to support running `LandModel` in coupled mode
+  PR[#1035](https://github.com/CliMA/ClimaLand.jl/pull/1035)
+
+v0.15.10
+--------
+- use GL vs GLL quadrature; speeds up simulation 2x globally
+  PR[#1051](https://github.com/CliMA/ClimaLand.jl/pull/1051)
+- Use MODIS LAI by default in experiments and longruns
+  PR[#973](https://github.com/CliMA/ClimaLand.jl/pull/973)
+- Revert PR993 changes to runoff
+  PR[#1021](https://github.com/CliMA/ClimaLand.jl/pull/1021)
+- Add ITime (see [ClimaUtilities documentation](https://clima.github.io/ClimaUtilities.jl/dev/timemanager/) for more information)
+  PR[#1030](https://github.com/CliMA/ClimaLand.jl/pull/1030)
+
+v0.15.9
+-------
+- Remove `ImplicitEquationJacobian` and use
+  `ClimaCore.MatrixFields.FieldMatrixWithSolver` instead
+  PR[#996](https://github.com/CliMA/ClimaLand.jl/pull/996)
+- Add global seasonal plots for long runs
+  PR[#923](https://github.com/CliMA/ClimaLand.jl/pull/923)
+- Various snow model changes
+  PR[#965](https://github.com/CliMA/ClimaLand.jl/pull/965)
+  PR[#989](https://github.com/CliMA/ClimaLand.jl/pull/989)
+  PR[#988](https://github.com/CliMA/ClimaLand.jl/pull/988)
+
+v0.15.8
+-------
+- Add `soilco2.C` to `:short` default diagnostics
+  PR[#984](https://github.com/CliMA/ClimaLand.jl/pull/984)
+- Add function to count NaNs in state variables
+  PR[#970](https://github.com/CliMA/ClimaLand.jl/pull/970)
+- Reduce allocations by updating functions to modify in-place
+  PR[#967](https://github.com/CliMA/ClimaLand.jl/pull/967)
+  PR[#978](https://github.com/CliMA/ClimaLand.jl/pull/978)
+  PR[#981](https://github.com/CliMA/ClimaLand.jl/pull/981)
+  PR[#980](https://github.com/CliMA/ClimaLand.jl/pull/980)
+- Include freezing point depression in `EnergyHydrology`,
+  and generate plots for paper.
+  PR[#963](https://github.com/CliMA/ClimaLand.jl/pull/963)
+- Rename `LandHydrologyModel` to `SoilSnowModel`
+  PR[#968](https://github.com/CliMA/ClimaLand.jl/pull/968)
+
+
+v0.15.7
+-------
+- Run unit tests on GPU, and update code for GPU compatibility
+  (including workaround for ClimaCore type inference failure)
+  PR[#739](https://github.com/CliMA/ClimaLand.jl/pull/739)
+- Initialize communications contexts, enabling experiments
+  to run with MPI.
+  PR[#954](https://github.com/CliMA/ClimaLand.jl/pull/954)
+
+v0.15.6
+-------
+- Add progress log for snow land longrun
+  PR[#943](https://github.com/CliMA/ClimaLand.jl/pull/943)
+- Add tutorial to check the analytic solution of phase change
+  in soil
+  PR[#940](https://github.com/CliMA/ClimaLand.jl/pull/940)
+- Update soil water bc and snow conductivity to match paper.
+  Infiltration/runoff are now calculated from precip, snow melt,
+  and evaporation, and infiltration is the boundary condition.
+  PR[#931](https://github.com/CliMA/ClimaLand.jl/pull/931)
+- Don't include snow depth in surface height. This fixes a bug
+  that was causing NaNs when snow depth was >10m.
+  PR[#935](https://github.com/CliMA/ClimaLand.jl/pull/935)
+- Add snowy land benchmark
+  PR[#932](https://github.com/CliMA/ClimaLand.jl/pull/932)
+- Use ClimaArtifacts Lehmann 2008 dataset for evaporation experiment
+  PR[#929](https://github.com/CliMA/ClimaLand.jl/pull/929)
+- Use 2008 ERA forcing instead of 2021 for longruns, benchmarks,
+  and other forced runs
+  PR[#920](https://github.com/CliMA/ClimaLand.jl/pull/920)
+- Update deprecated function calls to reduce test warnings
+  PR[#925](https://github.com/CliMA/ClimaLand.jl/pull/925)
+- Use the TOPMODEL artifact from ClimaArtifacts
+  PR[#928](https://github.com/CliMA/ClimaLand.jl/pull/928)
+
+v0.15.5
+-------
+- Integrated land model with snow, soil, canopy
+  PR[#834](https://github.com/CliMA/ClimaLand.jl/pull/834)
+
+v0.15.4
+-------
+- The foliage clumping index of the radiative transfer model now varies spatially, using MODIS data
+  PR[#863](https://github.com/CliMA/ClimaLand.jl/pull/863)
+- All outputs directories use activelink, described [here](https://clima.github.io/ClimaUtilities.jl/dev/outputpathgenerator/)
+  PR[#804](https://github.com/CliMA/ClimaLand.jl/pull/804)
+- Add functions to save simulations to checkpoints and read them back.
+  PR[#853](https://github.com/CliMA/ClimaLand.jl/pull/853)
+- Add `start_date` to output NetCDF files.
+  PR[#853](https://github.com/CliMA/ClimaLand.jl/pull/853)
+
+v0.15.3
+-------
+- It is now possible to call `ClimaComms.context` and `ClimaComms.device` Models
+  and Domains. This provides a unambiguous way to determine the context and
+  device for general simulations.
+  PR[#852](https://github.com/CliMA/ClimaLand.jl/pull/852)
+- `prescribed_analytic_forcing` is now available to simplify setting up analytic experiments.
+  PR[#870](https://github.com/CliMA/ClimaLand.jl/pull/870)
+
+v0.15.2
+--------
+- Boundary fluxes are non-allocating
+PR[#819](https://github.com/CliMA/ClimaLand.jl/pull/819)
+- Artifacts for the bucket model are now automatically downloaded. PR [#820](https://github.com/CliMA/ClimaLand.jl/pull/820)
+
+v0.15.1
+--------
+- Add a tutorial of a single site calibration of a perfect model PR[#621](https://github.com/CliMA/ClimaLand.jl/pull/621)
+- Add a longrun simulation for the bucket PR[#807](https://github.com/CliMA/ClimaLand.jl/pull/807)
+- Add ground heat flux to snow-soil model PR[#796](https://github.com/CliMA/ClimaLand.jl/pull/796)
+- Add snow-soil model PR [#779](https://github.com/CliMA/ClimaLand.jl/pull/779)
+- Step canopy temperature implicitly. PR [#675](https://github.com/CliMA/ClimaLand.jl/pull/675)
+
+v0.15.0
+--------
+- Add regional simulation example PR [#757](https://github.com/CliMA/ClimaLand.jl/pull/757)
+- Reduced number of dependencies, leading to faster instantiation and import time,
+- Improved compatibility of ClimaLand with older versions of packages.
+  PR[#749](https://github.com/CliMA/ClimaLand.jl/pull/749)
+  PR[#748](https://github.com/CliMA/ClimaLand.jl/pull/748)
+- Added more inputs varying in space (MedlynConductance and Vcmax).
+  PR[#759](https://github.com/CliMA/ClimaLand.jl/pull/759)
+- Added a regional run example.
+  PR[#757](https://github.com/CliMA/ClimaLand.jl/pull/757)
+- ![breaking change][badge-💥breaking] Extend photosynthesis mechanism parameter to support fields.
+PR[#774](https://github.com/CliMA/ClimaLand.jl/pull/774)
+  - C3/C4 structs are removed. Now C3 is represented by a float of 1.0 and C4 by a float of 0.0
+
+v0.14.3
+--------
+- Add support for regional simulations, box runs centered around a given
+  longitude and latitude.
+  PR [#710](https://github.com/CliMA/ClimaLand.jl/pull/710)
+- Add support for SoilCanopyModel diagnostics
+  PR [#699](https://github.com/CliMA/ClimaLand.jl/pull/699)
+
+v0.14.1
+--------
+- Add simple model for single-column surface runoff
+  PR[#702](https://github.com/CliMA/ClimaLand.jl/pull/702)
+
+v0.14.0
+--------
+- Use the soil parameters in creating the biogeochemistry SoilMet driver for consistency.
+  PR[#690](https://github.com/CliMA/ClimaLand.jl/pull/690)
+- ![][badge-💥breaking] Generalize our forcing ``drivers" to include prescribed soil organic carbon
+  PR[#692](https://github.com/CliMA/ClimaLand.jl/pull/692)
+- Add a long run with diagnostics
+  PR[#688](https://github.com/CliMA/ClimaLand.jl/pull/688)
+
+v0.13.0
+--------
+- NOTE: the breaking PR below was merged by accident in v0.12.5
+- ![][badge-💥breaking] rename update_jacobian to compute_jacobian
+  and tendency_jacobian to jacobian
+  PR[#685](https://github.com/CliMA/ClimaLand.jl/pull/685)
+
+v0.12.5
+--------
+- Turn of dss
+  PR[#650](https://github.com/CliMA/ClimaLand.jl/pull/650)
+- Add ClimaCoupler downstream test
+  PR [#680](https://github.com/CliMA/ClimaLand.jl/pull/680)
+- Adds ClimaLand.Diagnostics
+  PR [#628](https://github.com/CliMA/ClimaLand.jl/pull/628)
+- Improve Performance of soil canopy model
+  PR [#666](https://github.com/CliMA/ClimaLand.jl/pull/666)
+  PR [#677](https://github.com/CliMA/ClimaLand.jl/pull/677)
+- Add base global soil canopy run to benchmark and experiments
+  PR [#591](https://github.com/CliMA/ClimaLand.jl/pull/591)
+  PR [#669](https://github.com/CliMA/ClimaLand.jl/pull/669)
+- updates Jacobian for soil energy
+  PR[#678](https://github.com/CliMA/ClimaLand.jl/pull/678)
+
+v0.12.4
+--------
+- Fix various canopy flux bugs
+  PR [#641](https://github.com/CliMA/ClimaLand.jl/pull/641)
+- Adds Richards to benchmark
+  PR [#648](https://github.com/CliMA/ClimaLand.jl/pull/648)
+- Reduce allocations in update runoffs
+  PR [#664](https://github.com/CliMA/ClimaLand.jl/pull/664)
+- Store z in cache instead of model
+  PR [#658](https://github.com/CliMA/ClimaLand.jl/pull/658)
+
+v0.12.3
+--------
+- Add benchmark pipeline
+  PR [#592](https://github.com/CliMA/ClimaLand.jl/pull/592)
+  PR [#642](https://github.com/CliMA/ClimaLand.jl/pull/642)
+- Removed ArtifactWrappers
+  PR [#627](https://github.com/CliMA/ClimaLand.jl/pull/627)
+  PR [#540](https://github.com/CliMA/ClimaLand.jl/pull/640)
+- Run RichardsModel on GPU
+  PR [#638](https://github.com/CliMA/ClimaLand.jl/pull/638)
+
+v0.12.2
+--------
+- Update implicit solver interface
+  PR [#542](https://github.com/CliMA/ClimaLand.jl/pull/542)
+- Add ClimaLand.Artifacts
+  PR [#624](https://github.com/CliMA/ClimaLand.jl/pull/624)
+
+v0.12.1
+--------
+- Add `regridder_type` option to albedo constructors.
+  PR [#662](https://github.com/CliMA/ClimaLand.jl/pull/622)
+- ![][badge-✨feature] Add simple snow model.
+  PR [#147](https://github.com/CliMA/ClimaLand.jl/pull/147)
+- ![][badge-✨feature] Implemented a simple sublimation model, which is now
+  included in the soil model. PR [#373](https://github.com/CliMA/ClimaLand.jl/pull/373)
+
+v0.12.0
+--------
+- Updated to ClimaComms 0.6 and ClimaCore 0.14. Now, `CUDA` and `MPI` are no
+  longer automatically installed.
+
+v0.11.2
+--------
+-  Add profiling of soil/canopy model to buildkite pipeline. This was the
+   first global run of this model, and we also fixed dss! for tuple-valued fields,
+   changed how we compute the zenith angle to allow for 2d fields, and changed
+   instances of `sum` to a column integral.
+   PR [#561](https://github.com/CliMA/ClimaLand.jl/pull/561)
+- ![][badge-✨feature] Use
+  [ClimaUtilities](https://github.com/CliMA/ClimaUtilities.jl) for `Space` and
+  `Time` `VaryingInputs`. This adds support to non-conservative MPI/GPU
+  compatible regridding of NetCDF input. PR
+  [#560](https://github.com/CliMA/ClimaLand.jl/pull/560)
+- Moved neural snow to extension, reducing latency by a factor 2. PR
+  [#567](https://github.com/CliMA/ClimaLand.jl/pull/567)
+
+v0.11.1
+-------
+- ![][badge-✨feature] Add option to profile albedo job. PR
+  [#505](https://github.com/CliMA/ClimaLand.jl/pull/551)
+- ![][badge-✨feature] ClimaLandSimulations: better plots (legend and style tweaks, added cumulative ET and P), unit tests, start and end time as an optional argument. PR [#494](https://github.com/CliMA/ClimaLand.jl/pull/494)
+- ![][badge-🐛bugfix] ClimaLandSimulations: installation readme. PR [#494](https://github.com/CliMA/ClimaLand.jl/pull/494)
+
+v0.11.0
+-------
+- Update SurfaceFluxes compat to include 0.11: PR [#548](https://github.com/CliMA/ClimaLand.jl/pull/548)
+- Started changelog: PR [#547](https://github.com/CliMA/ClimaLand.jl/pull/547)
+- ![][badge-🐛bugfix] Use ClimaCore v0.13.2, which includes remapping allocation fix for CPU case: PR [#546](https://github.com/CliMA/ClimaLand.jl/pull/546)
+- ![][badge-💥breaking] Refactor BucketModelParameters, move some parameters to ClimaParams: PR [#507](https://github.com/CliMA/ClimaLand.jl/pull/507)
+- ![][badge-✨feature] Add TOPMODEL runoff parameterization: PR [#511](https://github.com/CliMA/ClimaLand.jl/pull/511), Issue [#266](https://github.com/CliMA/ClimaLand.jl/issues/266)
+- Add web dashboard for Fluxnet simulations: PR [#478](https://github.com/CliMA/ClimaLand.jl/pull/478)
+- Use depot for buildkite pipeline: PR [#537](https://github.com/CliMA/ClimaLand.jl/pull/537)
+- ![][badge-✨feature] Refactor EnergyHydrologyParameters, move some parameters to ClimaParams: PR [#505](https://github.com/CliMA/ClimaLand.jl/pull/505)
+- Update to ClimaCore v0.13 (note: introduced CPU global bucket bug): PR [#536](https://github.com/CliMA/ClimaLand.jl/pull/536)
+- Add ClimaLand logos: PR [#525](https://github.com/CliMA/ClimaLand.jl/pull/525)
+- ![][badge-✨feature] Add infrastructure to use PFTs, add experiment running Ozark with PFTs: PR [#493](https://github.com/CliMA/ClimaLand.jl/pull/493)
+- ![][badge-💥breaking] Refactor boundary condition types to unify types/structure: PR [#535](https://github.com/CliMA/ClimaLand.jl/pull/535)
+- ![][badge-💥breaking] Update to ClimaParams v0.10, free Insolation and Thermodynamics, update SurfaceFluxes: PR [#508](https://github.com/CliMA/ClimaLand.jl/pull/508)
+- ![][badge-✨feature] Add PrescribedPrecipitation driver to be used in global simulations: PR [#533](https://github.com/CliMA/ClimaLand.jl/pull/533)
+- Switch to use new-central, pin Insolation (0.9.1) and Thermodynamics (0.12.3) versions: PR [#526](https://github.com/CliMA/ClimaLand.jl/pull/526)
+- ![][badge-💥breaking] Refactor albedo parameterizations to have two albedo models, PrescribedBaregroundAlbedo and PrescribedSurfaceAlbedo: PR [#513](https://github.com/CliMA/ClimaLand.jl/pull/513)
+- Add documentation of standalone models: PR [#474](https://github.com/CliMA/ClimaLand.jl/pull/474)
+
+<!--
+Contributors are welcome to begin the description of changelog items with badge(s) below. Here is a brief description of when to use badges for a particular pull request / set of changes:
+ - 💥breaking - breaking changes. For example: removing deprecated functions/types, removing support for functionality, API changes, breaking changes in compats.
+ - ✨feature - new feature added. For example: adding support for a new parameterization.
+ - 🐛bugfix - bugfix. For example: fixing incorrect logic, resulting in incorrect results, or fixing code that otherwise might give a `MethodError`.
+ - 🔥behavioralΔ - behavioral changes. For example: a new model is used, yielding more accurate results.
+ - 🤖precisionΔ - machine-precision changes. For example, swapping the order of summed arguments can result in machine-precision changes.
+ - 🚀performance - performance improvements. For example: improving type inference, reducing allocations, or code hoisting.
+-->
+
+[badge-💥breaking]: https://img.shields.io/badge/💥BREAKING-red.svg
+[badge-✨feature]: https://img.shields.io/badge/feature/enhancement-blue.svg
+[badge-🐛bugfix]: https://img.shields.io/badge/🐛bugfix-purple.svg
+[badge-🔥behavioralΔ]: https://img.shields.io/badge/🔥behavioralΔ-orange.svg
+[badge-🤖precisionΔ]: https://img.shields.io/badge/🤖precisionΔ-black.svg
+[badge-🚀performance]: https://img.shields.io/badge/🚀performance-green.svg

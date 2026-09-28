@@ -1,0 +1,442 @@
+using Test
+import ClimaComms
+ClimaComms.@import_required_backends
+import ClimaParams as CP
+import ClimaUtilities.TimeVaryingInputs: TimeVaryingInput
+using Thermodynamics
+using SurfaceFluxes
+using StaticArrays
+using Dates
+import ClimaLand
+using ClimaLand.Snow
+using ClimaLand.Domains
+import ClimaLand.Parameters as LP
+
+@testset "Snow Model" begin
+    FT = Float32
+    toml_dict = LP.create_toml_dict(FT)
+
+    start_date = DateTime(2005)
+    Δt = FT(180.0)
+    surf_temp_choice = Snow.EquilibriumGradientTemperatureModel{FT}()
+    parameters = SnowParameters(toml_dict, Δt, surf_temp = surf_temp_choice)
+    domain = Point(; z_sfc = FT(0))
+    "Radiation"
+    SW_d = TimeVaryingInput((t) -> eltype(t)(20.0))
+    LW_d = TimeVaryingInput((t) -> eltype(t)(20.0))
+    rad = ClimaLand.PrescribedRadiativeFluxes(FT, SW_d, LW_d, start_date)
+    "Atmos"
+    precip = TimeVaryingInput((t) -> eltype(t)(0)) # no precipitation
+    T_atmos = TimeVaryingInput((t) -> eltype(t)(290.0))
+    u_atmos = TimeVaryingInput((t) -> eltype(t)(10.0))
+    q_atmos = TimeVaryingInput((t) -> eltype(t)(0.0003))
+    h_atmos = FT(3)
+    P_atmos = TimeVaryingInput((t) -> eltype(t)(101325))
+    atmos = ClimaLand.PrescribedAtmosphere(
+        precip,
+        precip,
+        T_atmos,
+        u_atmos,
+        q_atmos,
+        P_atmos,
+        start_date,
+        h_atmos,
+        toml_dict,
+    )
+    model = ClimaLand.Snow.SnowModel(
+        parameters = parameters,
+        domain = domain,
+        boundary_conditions = ClimaLand.Snow.AtmosDrivenSnowBC(atmos, rad),
+    )
+    @test ClimaComms.context(model) == ClimaComms.context()
+    @test ClimaComms.device(model) == ClimaComms.device()
+    drivers = ClimaLand.get_drivers(model)
+    @test drivers == (atmos, rad)
+    Y, p, coords = ClimaLand.initialize(model)
+    @test (Y.snow |> propertynames) == (:S, :S_l, :U)
+    @test (p.snow |> propertynames) == (
+        :q_sfc,
+        :q_l,
+        :κ,
+        :T,
+        :T_sfc,
+        :z_snow,
+        :α_snow,
+        :ρ_snow,
+        :R_n,
+        :phase_change_flux,
+        :energy_runoff,
+        :water_runoff,
+        :liquid_water_flux,
+        :total_energy_flux,
+        :total_water_flux,
+        :applied_energy_flux,
+        :applied_water_flux,
+        :snow_cover_fraction,
+        :surf_residual_flux,
+        :turbulent_fluxes,
+    )
+
+    Y.snow.S .= FT(0.1)
+    Y.snow.S_l .= FT(0.0)
+    Y.snow.U .= ClimaLand.Snow.energy_from_T_and_swe.(
+        Y.snow.S,
+        FT(273.0),
+        model.parameters.ΔS,
+        Ref(model.parameters.earth_param_set),
+    )
+    set_initial_cache! = ClimaLand.make_set_initial_cache(model)
+    t0 = FT(0.0)
+    set_initial_cache!(p, Y, t0)
+    (; α_snow, ϵ_snow) = model.parameters
+    _σ = LP.Stefan(model.parameters.earth_param_set)
+    _ρ_l = FT(LP.ρ_cloud_liq(model.parameters.earth_param_set))
+    # Check if aux update occurred correctly
+    z = p.snow.z_snow
+    @test p.snow.snow_cover_fraction == @. min(
+        model.parameters.scf.β_scf * z / model.parameters.scf.z0 /
+        (z / model.parameters.scf.z0 + 1),
+        1,
+    )
+    @test all(parent(p.snow.α_snow) .== α_snow.α)
+    @test p.snow.R_n == @. (
+        -(1 - α_snow.α) * 20.0f0 - ϵ_snow * (20.0f0 - _σ * p.snow.T_sfc^4)
+    )
+    R_n_copy = copy(p.snow.R_n)
+    ClimaLand.net_radiation!(
+        R_n_copy,
+        model.boundary_conditions.radiation,
+        model,
+        Y,
+        p,
+        t0,
+    )
+    @test p.snow.R_n == R_n_copy
+    @test p.snow.q_l == liquid_mass_fraction.(Y.snow.S, Y.snow.S_l)
+    @test p.snow.T == snow_bulk_temperature.(
+        Y.snow.U,
+        Y.snow.S,
+        p.snow.q_l,
+        parameters.ΔS,
+        model.parameters.earth_param_set,
+    )
+
+    #Surface temperature tests:
+    # setting of the initial cache already solved and set p.snow.T_sfc and p.surf_residual_flux
+    # the first time - now we can compare the results:
+    roughness_model = ClimaLand.surface_roughness_model(model, Y, p)
+    #might need to change below line in future depending on how gustiness models are implemented:
+    gustiness = SurfaceFluxes.ConstantGustinessSpec(
+        model.boundary_conditions.atmos.gustiness,
+    )
+    h_sfc = ClimaLand.surface_height(model, Y, p)
+    displ = ClimaLand.surface_displacement_height(model, Y, p)
+    tsfc_original = copy(p.snow.T_sfc)
+    SW_net = (p.snow.α_snow .- FT(1)) .* p.drivers.SW_d
+    tsfc_1 = copy(p.snow.T_sfc)
+    tsfc_1 .= ClimaLand.Snow.solve_for_surface_temp_at_a_point.(
+        p.snow.T_sfc,
+        p.snow.T,
+        p.snow.z_snow,
+        p.snow.κ,
+        p.snow.ρ_snow,
+        model.parameters.ϵ_snow,
+        SW_net,
+        p.drivers.LW_d,
+        p.snow.q_l,
+        h_sfc,
+        displ,
+        p.drivers.P,
+        p.drivers.T,
+        p.drivers.q,
+        p.drivers.u,
+        roughness_model,
+        model.boundary_conditions.atmos.h,
+        gustiness,
+        model.parameters.earth_param_set,
+        model.parameters.surf_temp,
+    )
+
+    #no update should occur from update_surf_temp!:
+    Snow.update_surf_temp!(
+        model,
+        model.parameters.surf_temp,
+        SW_net,
+        p.drivers.LW_d,
+        Y,
+        p,
+        t0,
+    )
+    @test p.snow.T_sfc == tsfc_original
+    earth_param_set = model.parameters.earth_param_set
+    _LH_f0 = LP.LH_f0(earth_param_set)
+    @test p.snow.surf_residual_flux ≈
+          (
+        p.snow.turbulent_fluxes.lhf .+ p.snow.turbulent_fluxes.shf .+
+        p.snow.R_n .+
+        p.snow.κ .* (p.snow.T_sfc .- p.snow.T) ./
+        ClimaLand.Snow.surface_temp_scaling_length.(
+            p.snow.κ,
+            p.snow.ρ_snow,
+            p.snow.z_snow,
+            earth_param_set,
+        )
+    ) ./ (_LH_f0 * _ρ_l)
+
+    @test p.snow.snow_cover_fraction == @. min(
+        2 * p.snow.z_snow ./ FT(0.1) / (p.snow.z_snow ./ FT(0.1) + 1),
+        FT(1),
+    )
+    thermo_params =
+        LP.thermodynamic_parameters(model.parameters.earth_param_set)
+    surface_flux_params =
+        LP.surface_fluxes_parameters(model.parameters.earth_param_set)
+    Δh = model.boundary_conditions.atmos.h # h_sfc = 0
+    ρ_sfc = @. ClimaLand.compute_ρ_sfc(
+        surface_flux_params,
+        p.drivers.T,
+        p.drivers.P,
+        p.drivers.q,
+        Δh,
+        p.snow.T_sfc,
+    )
+    q_sfc = @. (1 - p.snow.q_l) * Thermodynamics.q_vap_saturation(
+        thermo_params,
+        p.snow.T_sfc,
+        ρ_sfc,
+        Thermodynamics.Ice(),
+    ) +
+       p.snow.q_l * Thermodynamics.q_vap_saturation(
+        thermo_params,
+        p.snow.T_sfc,
+        ρ_sfc,
+        Thermodynamics.Liquid(),
+    )
+    @test p.snow.q_sfc ≈ q_sfc
+    turb_fluxes_copy = copy(p.snow.turbulent_fluxes)
+    ClimaLand.turbulent_fluxes!(
+        turb_fluxes_copy,
+        model.boundary_conditions.atmos,
+        model,
+        Y,
+        p,
+        t0,
+    )
+    @test (@. ClimaLand.Snow.phase_change_flux(
+        Y.snow.U,
+        Y.snow.S,
+        p.snow.q_l,
+        p.snow.applied_energy_flux -
+        _ρ_l * _LH_f0 * p.snow.surf_residual_flux * p.snow.snow_cover_fraction,
+        model.parameters.Δt,
+        model.parameters.ΔS,
+        model.parameters.earth_param_set,
+    )) == p.snow.phase_change_flux
+    @test turb_fluxes_copy.shf == p.snow.turbulent_fluxes.shf
+    @test turb_fluxes_copy.lhf == p.snow.turbulent_fluxes.lhf
+    @test turb_fluxes_copy.vapor_flux == p.snow.turbulent_fluxes.vapor_flux
+    old_ρ = deepcopy(p.snow.ρ_snow)
+    old_z = deepcopy(p.snow.z_snow)
+    Snow.update_density_and_depth!(
+        p.snow.ρ_snow,
+        p.snow.z_snow,
+        model.parameters.density,
+        Y,
+        p,
+        model.parameters.earth_param_set,
+    )
+    @test p.snow.ρ_snow ≈ old_ρ
+    @test p.snow.z_snow ≈ old_z
+
+    # Now compute tendencies and make sure they operate correctly.
+    dY = similar(Y)
+    exp_tendency! = ClimaLand.make_compute_exp_tendency(model)
+    exp_tendency!(dY, Y, p, t0)
+    _ρ_liq = LP.ρ_cloud_liq(model.parameters.earth_param_set)
+    net_water_fluxes = @.(
+        -0.0f0 - 0.0f0 - p.snow.turbulent_fluxes.vapor_flux +
+        p.snow.water_runoff
+    )
+    @test dY.snow.S == net_water_fluxes
+    @test all(parent(p.snow.phase_change_flux) .== 0)
+    @test all(parent(dY.snow.S_l) .> 0)
+    @test dY.snow.S_l ≈ .-p.snow.surf_residual_flux
+    test_dY_U =
+        -1 .* p.snow.turbulent_fluxes.shf .- p.snow.turbulent_fluxes.lhf .-
+        p.snow.R_n .+ p.snow.energy_runoff
+    @test all(parent(dY.snow.U) .≈ parent(test_dY_U))
+    @test isnothing(
+        Snow.compute_extra_prog_tendency!(
+            model.parameters.density,
+            model,
+            dY,
+            Y,
+            p,
+            t0,
+        ),
+    )
+    @test isnothing(
+        Snow.compute_extra_prog_tendency!(
+            model.parameters.α_snow,
+            model,
+            dY,
+            Y,
+            p,
+            t0,
+        ),
+    )
+
+    @test all(
+        ClimaLand.Snow.clip_water_flux.([0.1, 1.0, 2.0], [1.0, 1.0, 1.0], 1.0) .==
+        [0.1, 1.0, 1.0],
+    )
+
+    #Remake model with the BulkSurfaceTemperatureModel now instead:
+    surf_temp_choice = Snow.BulkSurfaceTemperatureModel{FT}()
+    parameters = SnowParameters(toml_dict, Δt, surf_temp = surf_temp_choice)
+    model = ClimaLand.Snow.SnowModel(
+        parameters = parameters,
+        domain = domain,
+        boundary_conditions = ClimaLand.Snow.AtmosDrivenSnowBC(atmos, rad),
+    )
+    drivers = ClimaLand.get_drivers(model)
+    Y, p, coords = ClimaLand.initialize(model)
+    @test (p.snow |> propertynames) == (
+        :q_sfc,
+        :q_l,
+        :κ,
+        :T,
+        :T_sfc,
+        :z_snow,
+        :α_snow,
+        :ρ_snow,
+        :R_n,
+        :phase_change_flux,
+        :energy_runoff,
+        :water_runoff,
+        :liquid_water_flux,
+        :total_energy_flux,
+        :total_water_flux,
+        :applied_energy_flux,
+        :applied_water_flux,
+        :snow_cover_fraction,
+        :turbulent_fluxes,
+    )
+    Y.snow.S .= FT(0.1)
+    Y.snow.S_l .= FT(0.0)
+    Y.snow.U .= ClimaLand.Snow.energy_from_T_and_swe.(
+        Y.snow.S,
+        FT(273.0),
+        model.parameters.ΔS,
+        Ref(model.parameters.earth_param_set),
+    )
+    set_initial_cache! = ClimaLand.make_set_initial_cache(model)
+    t0 = FT(0.0)
+    set_initial_cache!(p, Y, t0)
+    # Check if aux update occurred correctly
+    @test all(parent(p.snow.T_sfc) .== parent(p.snow.T))
+    @test Snow.get_residual_melt_flux(
+        surf_temp_choice,
+        Y,
+        p,
+        model.parameters.earth_param_set,
+    ) == FT(0)
+end
+
+@testset "Surface melt accounting, $FT" for FT in (Float32, Float64)
+    toml_dict = LP.create_toml_dict(FT)
+    Δt = FT(180)
+    parameters = SnowParameters(toml_dict, Δt)
+    earth_param_set = parameters.earth_param_set
+    T_freeze = LP.T_freeze(earth_param_set)
+    ρL_f = LP.ρ_cloud_liq(earth_param_set) * LP.LH_f0(earth_param_set)
+    start_date = DateTime(2005)
+    precip = TimeVaryingInput(t -> FT(0))
+    atmos = ClimaLand.PrescribedAtmosphere(
+        precip,
+        precip,
+        TimeVaryingInput(t -> FT(290)),
+        TimeVaryingInput(t -> FT(10)),
+        TimeVaryingInput(t -> FT(0.003)),
+        TimeVaryingInput(t -> FT(101325)),
+        start_date,
+        FT(3),
+        toml_dict,
+    )
+    rad = ClimaLand.PrescribedRadiativeFluxes(
+        FT,
+        TimeVaryingInput(t -> FT(300)),
+        TimeVaryingInput(t -> FT(350)),
+        start_date,
+    )
+    model = SnowModel(;
+        parameters,
+        domain = Point(; z_sfc = FT(0)),
+        boundary_conditions = Snow.AtmosDrivenSnowBC(atmos, rad),
+    )
+    Y, p, _ = ClimaLand.initialize(model)
+    dY = similar(Y)
+    set_initial_cache! = ClimaLand.make_set_initial_cache(model)
+    exp_tendency! = ClimaLand.make_compute_exp_tendency(model)
+    t = FT(0)
+
+    @testset "Isothermal melt, S=$S, q_l=$q_l" for S in (FT(0.001), FT(0.1)),
+        q_l in (FT(0), FT(0.01))
+
+        Y.snow.S .= S
+        Y.snow.S_l .= S * q_l
+        Y.snow.U .=
+            Snow.energy_from_q_l_and_swe(S, q_l, parameters.ΔS, earth_param_set)
+        set_initial_cache!(p, Y, t)
+        exp_tendency!(dY, Y, p, t)
+        @test all(parent(p.snow.T_sfc) .== T_freeze)
+        @test all(parent(p.snow.water_runoff) .== 0)
+        @test all(parent(p.snow.surf_residual_flux) .< 0)
+        @test all(parent(dY.snow.S_l) .> 0)
+        # Remove evaporation to compare the phase change with its energy supply.
+        melt_energy = @. ρL_f * (
+            dY.snow.S_l +
+            p.snow.turbulent_fluxes.vapor_flux *
+            p.snow.q_l *
+            p.snow.snow_cover_fraction
+        )
+        @test isapprox(melt_energy, dY.snow.U; rtol = FT(1e-4))
+        @test all(
+            abs.(parent(p.snow.phase_change_flux)) .<=
+            FT(1e-4) .* abs.(parent(p.snow.surf_residual_flux)),
+        )
+        S_next = @. Y.snow.S + Δt * dY.snow.S
+        S_l_next = @. Y.snow.S_l + Δt * dY.snow.S_l
+        @test all(0 .<= parent(S_l_next) .<= parent(S_next))
+    end
+
+    @testset "Snow-free column, T=$T" for T in (FT(270), T_freeze)
+        Y.snow.S .= 0
+        Y.snow.S_l .= 0
+        Y.snow.U .=
+            Snow.energy_from_T_and_swe(FT(0), T, parameters.ΔS, earth_param_set)
+        set_initial_cache!(p, Y, t)
+        exp_tendency!(dY, Y, p, t)
+        @test all(iszero, parent(dY.snow.S))
+        @test all(iszero, parent(dY.snow.U))
+        @test all(iszero, parent(dY.snow.S_l))
+        @test all(isfinite, parent(dY))
+    end
+
+    @testset "Residual melt limits" begin
+        p.snow.T_sfc .= T_freeze
+        p.snow.turbulent_fluxes.lhf .= 0
+        p.snow.turbulent_fluxes.shf .= 0
+        p.snow.z_snow .= eps(FT)^2
+        p.snow.T .= T_freeze
+        p.snow.R_n .= FT(-1000)
+        residual = Snow.get_residual_melt_flux(
+            parameters.surf_temp,
+            Y,
+            p,
+            earth_param_set,
+        )
+        @test all(isfinite, parent(residual))
+        @test all(parent(residual) .≈ FT(-1000) / ρL_f)
+    end
+end
