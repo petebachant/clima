@@ -1,0 +1,137 @@
+using Test
+import ClimaCalibrate
+
+@testset "Generate slurm script" begin
+    backend_types = [
+        ClimaCalibrate.GCPBackend,
+        ClimaCalibrate.ClimaGPUBackend,
+        ClimaCalibrate.CaltechHPCBackend,
+    ]
+
+    for backend_type in backend_types
+        time_limit = 1
+        cpus_per_task = 16
+        gpus_per_task = 1
+        config = ClimaCalibrate.Backend.SlurmConfig(
+            directives = [
+                :gpus_per_task => gpus_per_task,
+                :cpus_per_task => cpus_per_task,
+                :time => time_limit,
+            ],
+        )
+        backend = backend_type(config)
+
+        script = """
+        sleep(30)
+        """
+
+        experiment_dir = ClimaCalibrate.project_dir()
+        job_body = """
+        julia --project=$experiment_dir -e '$script'
+        """
+
+        job_name = "slurm_job"
+        output = "output.txt"
+
+        sbatch_string =
+            ClimaCalibrate.make_job_script(backend, job_body; job_name, output)
+
+        module_str = ClimaCalibrate.Backend.module_load_string(backend)
+        mpiexec_string =
+            ClimaCalibrate.Backend._generate_mpiexec_string(backend, 1, output)
+
+        expected_sbatch_contents = """
+        #!/bin/bash
+        #SBATCH --gpus-per-task=$gpus_per_task
+        #SBATCH --cpus-per-task=$cpus_per_task
+        #SBATCH --time=$(ClimaCalibrate.Backend.format_slurm_time(time_limit))
+        #SBATCH --job-name=$job_name
+        #SBATCH --output=$output
+
+        $module_str
+        export CLIMACOMMS_DEVICE="CUDA"
+        export CLIMACOMMS_CONTEXT="MPI"
+
+        $mpiexec_string julia --project=$experiment_dir -e 'sleep(30)
+        '
+
+        """
+
+        @test length(split(sbatch_string, "\n")) ==
+              length(split(expected_sbatch_contents, "\n"))
+        for (generated_str, test_str) in zip(
+            split(sbatch_string, "\n"),
+            split(expected_sbatch_contents, "\n"),
+        )
+            # Test one line at a time to see discrepancies
+            @test generated_str == test_str
+        end
+
+        # The script must not end with `exit 0`: that would give the batch job a
+        # zero exit status even when the forward model inside it crashed, and
+        # sacct would then report the member as COMPLETED
+        @test !occursin(r"exit\s+0", sbatch_string)
+    end
+end
+
+@testset "Generate PBS script" begin
+    time_limit = 1
+    cpus_per_task = 16
+    gpus_per_task = 1
+    ntasks = 2
+    config = ClimaCalibrate.Backend.PBSConfig(
+        directives = [
+            :time => time_limit,
+            :ntasks => ntasks,
+            :cpus_per_task => cpus_per_task,
+            :gpus_per_task => gpus_per_task,
+        ],
+    )
+    backend = ClimaCalibrate.DerechoBackend(config)
+
+    script = """
+    sleep(30)
+    """
+
+    experiment_dir = ClimaCalibrate.project_dir()
+    job_body = """
+    julia --project=$experiment_dir -e '$script'
+    """
+
+    job_name = "pbs_job"
+    output = "output.txt"
+    pbs_string =
+        ClimaCalibrate.make_job_script(backend, job_body; job_name, output)
+
+    module_str = ClimaCalibrate.Backend.module_load_string(backend)
+    expected_pbs_contents = """
+#!/bin/bash
+#PBS -j oe
+#PBS -A UCIT0011
+#PBS -q main@desched1
+#PBS -l job_priority=regular
+#PBS -l walltime=$(ClimaCalibrate.Backend.format_pbs_time(time_limit))
+#PBS -l select=$ntasks:ncpus=$cpus_per_task:ngpus=$gpus_per_task:mpiprocs=1
+#PBS -N $job_name
+#PBS -o $output
+
+$module_str
+
+export JULIA_MPI_HAS_CUDA="true"
+export CLIMACOMMS_DEVICE="CUDA"
+export CLIMACOMMS_CONTEXT="MPI"
+
+cd \$PBS_O_WORKDIR
+\$MPITRAMPOLINE_MPIEXEC -n 2 -ppn 1 $(joinpath(pkgdir(ClimaCalibrate), "src", "backends", "set_gpu_rank.sh")) julia --project=$experiment_dir -e 'sleep(30)
+'
+
+"""
+
+    @test length(split(pbs_string, "\n")) ==
+          length(split(expected_pbs_contents, "\n"))
+    for (generated_str, test_str) in
+        zip(split(pbs_string, "\n"), split(expected_pbs_contents, "\n"))
+        # Test one line at a time to see discrepancies
+        @test generated_str == test_str
+    end
+end
