@@ -1,0 +1,166 @@
+<div align="center">
+  <img src="docs/src/assets/logo.svg" alt="Thermodynamics.jl Logo" width="128" height="128">
+</div>
+
+# Thermodynamics.jl
+
+The `Thermodynamics.jl` package implements the thermodynamic formulation of the [CliMA Earth System Model](https://clima.caltech.edu) ([Yatunin et al., 2026](https://doi.org/10.1029/2025MS005014)). It provides a consistent framework for moist thermodynamics based on the **Rankine-Kirchhoff approximations** ([Romps, 2021](https://doi.org/10.1002/qj.4154)), and thermodynamic functions for moist air including all phases of water (vapor, liquid, and ice).
+
+|||
+|------------------:|:------------------------------------------------------------|
+| **Documentation** | [![stable][docs-stable-img]][docs-stable-url] [![dev][docs-dev-img]][docs-dev-url] |
+| **Version**       | [![version][version-img]][version-url]                      |
+| **License**       | [![license][license-img]][license-url]                      |
+| **Tests**         | [![gha ci][gha-ci-img]][gha-ci-url] [![buildkite][bk-ci-img]][bk-ci-url] |
+| **Code Coverage** | [![codecov][codecov-img]][codecov-url]                      |
+| **Downloads**     | [![Downloads][dlt-img]][dlt-url]                            |
+
+[docs-stable-img]: https://img.shields.io/badge/docs-stable-blue.svg
+[docs-stable-url]: https://CliMA.github.io/Thermodynamics.jl/stable/
+
+[docs-dev-img]: https://img.shields.io/badge/docs-dev-blue.svg
+[docs-dev-url]: https://CliMA.github.io/Thermodynamics.jl/dev/
+
+[version-img]: https://juliahub.com/docs/General/Thermodynamics/stable/version.svg
+[version-url]: https://juliahub.com/ui/Packages/General/Thermodynamics
+
+[license-img]: https://img.shields.io/badge/license-Apache%202.0-blue.svg
+[license-url]: https://github.com/CliMA/Thermodynamics.jl/blob/main/LICENSE
+
+[gha-ci-img]: https://github.com/CliMA/Thermodynamics.jl/actions/workflows/ci.yml/badge.svg
+[gha-ci-url]: https://github.com/CliMA/Thermodynamics.jl/actions/workflows/ci.yml
+
+[bk-ci-img]: https://badge.buildkite.com/f18be4486263f7fbf96811bce17dc5fb84e6af6f154e14c8c6.svg?branch=main
+[bk-ci-url]: https://buildkite.com/clima/thermodynamics-ci/builds?branch=main
+
+[codecov-img]: https://codecov.io/gh/CliMA/Thermodynamics.jl/branch/main/graph/badge.svg
+[codecov-url]: https://codecov.io/gh/CliMA/Thermodynamics.jl
+
+[dlt-img]: https://img.shields.io/badge/dynamic/json?url=http%3A%2F%2Fjuliapkgstats.com%2Fapi%2Fv1%2Ftotal_downloads%2FThermodynamics&query=total_requests&label=Downloads
+[dlt-url]: https://juliapkgstats.com/pkg/Thermodynamics
+
+## Quick Start
+
+### Installation
+
+```julia
+using Pkg
+Pkg.add("Thermodynamics")
+Pkg.add("ClimaParams")
+Pkg.add("RootSolvers")  # needed to select a solver for saturation adjustment
+```
+
+### Basic Usage
+
+Thermodynamics.jl provides a **functional, stateless API**. You import the package (`TD`) and pass a **parameter set** plus **thermodynamic variables** (e.g., density, internal energy, specific humidities) directly to functions.
+
+```julia
+import Thermodynamics as TD
+# Use RootSolvers for the saturation adjustment method
+import RootSolvers as RS
+using ClimaParams
+
+# 1. Create thermodynamic parameters
+#    (requires a definition of the parameter set, e.g. from ClimaParams)
+params = TD.Parameters.ThermodynamicsParameters(Float64)
+
+# 2. Define your thermodynamic variables
+ρ     = 1.1        # Density [kg/m³]
+e_int = -36000.0   # Internal energy [J/kg, can be negative]
+q_tot = 0.015      # Total specific humidity [kg/kg]
+q_liq = 0.005      # Liquid specific humidity [kg/kg]
+q_ice = 0.001      # Ice specific humidity [kg/kg]
+
+# 3. Compute properties directly
+T = TD.air_temperature(params, e_int, q_tot, q_liq, q_ice)
+p = TD.air_pressure(params, T, ρ, q_tot, q_liq, q_ice)
+```
+
+### Saturation Adjustment
+
+To find the phase equilibrium temperature and phase partition from thermodynamic variables (e.g., given `ρ`, `e_int`, `q_tot`), use `saturation_adjustment`:
+
+```julia
+# Solve for phase equilibrium (T, q_liq, q_ice) given (ρ, e_int, q_tot)
+# using SecantMethod
+sol = TD.saturation_adjustment(
+    RS.SecantMethod,        # Root-solving method
+    params,                 # Parameter set
+    TD.ρe(),                # Formulation: Density & Internal Energy
+    ρ, e_int, q_tot,        # Input variables
+    10,                     # Max iterations
+    1e-3                    # Relative tolerance
+)
+
+println("Equilibrium T: ", sol.T)
+println("Liquid q: ",      sol.q_liq)
+println("Ice q: ",         sol.q_ice)
+println("Converged: ",     sol.converged)
+```
+
+## Key Features
+
+### 🌟 **Comprehensive Thermodynamics**
+
+- **Moist air thermodynamics** including all water phases (vapor, liquid, ice).
+- **Stateless, functional API** for flexibility and integration.
+- **Consistent formulation** assuming a **calorically perfect gas** mixture.
+
+### ⚡ **High Performance**
+
+- **Type-stable** and **GPU-compatible** (CUDA.jl, AMDGPU.jl, etc.).
+- **AD-compatible** (ForwardDiff.jl, etc.) for differentiable physics.
+- **Zero-allocation** design for core functions.
+
+### 🔧 **Flexible Design**
+
+- **Six formulations**: Solve for phase equilibrium from `(ρ, e_int)`, `(p, e_int)`, `(p, h)`, `(p, ρ)`, `(p, θ_li)`, or `(ρ, θ_li)`.
+- **Extensible parameters**: Easily adapt to different planetary atmospheres via `ClimaParams`.
+
+## Core Design Principles
+
+### **Functional & Stateless**
+
+Functions in Thermodynamics.jl are stateless. They take a `ThermodynamicsParameters` struct and the necessary thermodynamic variables (e.g., `T`, `ρ`, `q`...) as arguments. This design fits naturally into large-scale simulations (e.g., with `ClimaAtmos.jl`).
+
+### **Working Fluid**
+
+The working fluid is **moist air** (dry air + water vapor + liquid water + ice, which may include precipitation). We treat it as a mixture of ideal gases and condensed phases, ensuring rigorous mass and energy conservation.
+
+### **Consistent Formulation**
+
+All quantities are derived from the **calorically perfect gas** assumption with constant specific heat capacities. This provides a consistent, closed set of equations for saturation vapor pressures (the so-called Rankine-Kirchhoff approximation), latent heats, and other derived quantities.
+
+## Documentation
+
+- **[Mathematical Formulation](https://clima.github.io/Thermodynamics.jl/dev/Formulation/)** - Theoretical background.
+- **[How-To Guide](https://clima.github.io/Thermodynamics.jl/dev/HowToGuide/)** - Recipes and examples.
+- **[API Reference](https://clima.github.io/Thermodynamics.jl/dev/API/)** - Detailed function documentation.
+
+## Contributing
+
+Contributors should follow the shared CliMA engineering standards in [`docs/dev-guides/`](docs/dev-guides/), which cover architecture, performance, code quality, documentation, and workflows. These are vendored from [CliMA/DeveloperGuides](https://github.com/CliMA/DeveloperGuides). The repo's [`AGENTS.md`](AGENTS.md) is a starting point for AI agents with repo-specific guidance.  
+
+## Integration with Climate Models
+
+Thermodynamics.jl is the thermodynamic core for the [CliMA](https://github.com/CliMA) ecosystem, including:
+
+- [ClimaAtmos](https://github.com/CliMA/ClimaAtmos.jl)
+- [ClimaLand](https://github.com/CliMA/ClimaLand.jl)
+- [ClimaOcean](https://github.com/CliMA/ClimaOcean.jl)
+- [ClimaCoupler](https://github.com/CliMA/ClimaCoupler.jl)
+- [CloudMicrophysics](https://github.com/CliMA/CloudMicrophysics.jl)
+- [SurfaceFluxes](https://github.com/CliMA/SurfaceFluxes.jl)
+- [KinematicDriver](https://github.com/CliMA/KinematicDriver.jl)
+
+## Citing
+
+If you use `Thermodynamics.jl` in your research, please cite the paper describing the formulation it implements:
+
+> Yatunin, D., Byrne, S., Kawczynski, C., Kandala, S., Bozzola, G., Sridhar, A., Shen, Z., Jaruga, A., Sloan, J., He, J., Huang, D. Z., Barra, V., Chew, R., Boral, A., Chen, Y.-F., Knoth, O., Ullrich, P., Mbengue, C., and Schneider, T. (2026). The Climate Modeling Alliance Atmosphere Dynamical Core: Concepts, Numerics, and Scaling. *Journal of Advances in Modeling Earth Systems*. doi:[10.1029/2025MS005014](https://doi.org/10.1029/2025MS005014)
+
+Machine-readable metadata is in [`CITATION.cff`](CITATION.cff).
+
+## Getting Help
+
+For questions, check the [documentation](https://clima.github.io/Thermodynamics.jl/dev/) or open an issue on [GitHub](https://github.com/CliMA/Thermodynamics.jl).
