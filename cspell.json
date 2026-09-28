@@ -1,0 +1,10 @@
+{
+  "version": "0.2",
+  "ignorePaths": ["packages/**", "docs/dev/**", "Manifest.toml"],
+  "words": [
+    "Clima", "clima", "CliMA", "CUDA", "RRTMGP", "Registrator", "usecases",
+    "eliminable", "subdir", "subtree", "subtrees", "weakdeps", "Oceananigans",
+    "Documenter", "MultiDocumenter", "TagBot", "AutoMerge", "Buildkite",
+    "buildkite", "juliaup", "calkit", "precompile", "toposort", "semver"
+  ]
+}
