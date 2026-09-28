@@ -1,0 +1,108 @@
+# Packages vendored into this monorepo as git subtrees.
+#
+# `path` is where the package lives in this repo. `upstream` is the
+# standalone repo it is synced from while the monorepo is being evaluated.
+# `tools/subtree.sh` reads this file.
+#
+# Excluded on purpose (high independent traffic / separate communities):
+# Oceananigans, ClimaOcean, ClimaSeaIce, EnsembleKalmanProcesses.
+
+[dev-guides]
+path = "dev-guides"
+upstream = "https://github.com/CliMA/DeveloperGuides.git"
+branch = "main"
+julia = false
+
+# --- Foundations (no in-repo deps) ---
+[ClimaComms]
+path = "packages/ClimaComms"
+upstream = "https://github.com/CliMA/ClimaComms.jl.git"
+branch = "main"
+
+[ClimaParams]
+path = "packages/ClimaParams"
+upstream = "https://github.com/CliMA/ClimaParams.jl.git"
+branch = "main"
+
+[RootSolvers]
+path = "packages/RootSolvers"
+upstream = "https://github.com/CliMA/RootSolvers.jl.git"
+branch = "main"
+
+[ClimaInterpolations]
+path = "packages/ClimaInterpolations"
+upstream = "https://github.com/CliMA/ClimaInterpolations.jl.git"
+branch = "main"
+
+[Insolation]
+path = "packages/Insolation"
+upstream = "https://github.com/CliMA/Insolation.jl.git"
+branch = "main"
+
+[ClimaAnalysis]
+path = "packages/ClimaAnalysis"
+upstream = "https://github.com/CliMA/ClimaAnalysis.jl.git"
+branch = "main"
+
+# --- Physics parameterizations ---
+[Thermodynamics]
+path = "packages/Thermodynamics"
+upstream = "https://github.com/CliMA/Thermodynamics.jl.git"
+branch = "main"
+
+[SurfaceFluxes]
+path = "packages/SurfaceFluxes"
+upstream = "https://github.com/CliMA/SurfaceFluxes.jl.git"
+branch = "main"
+
+[CloudMicrophysics]
+path = "packages/CloudMicrophysics"
+upstream = "https://github.com/CliMA/CloudMicrophysics.jl.git"
+branch = "main"
+
+[RRTMGP]
+path = "packages/RRTMGP"
+upstream = "https://github.com/CliMA/RRTMGP.jl.git"
+branch = "main"
+
+# --- Infrastructure ---
+[ClimaCore]
+path = "packages/ClimaCore"
+upstream = "https://github.com/CliMA/ClimaCore.jl.git"
+branch = "main"
+
+[ClimaTimeSteppers]
+path = "packages/ClimaTimeSteppers"
+upstream = "https://github.com/CliMA/ClimaTimeSteppers.jl.git"
+branch = "main"
+
+[ClimaUtilities]
+path = "packages/ClimaUtilities"
+upstream = "https://github.com/CliMA/ClimaUtilities.jl.git"
+branch = "main"
+
+[ClimaDiagnostics]
+path = "packages/ClimaDiagnostics"
+upstream = "https://github.com/CliMA/ClimaDiagnostics.jl.git"
+branch = "main"
+
+# --- Models ---
+[ClimaAtmos]
+path = "packages/ClimaAtmos"
+upstream = "https://github.com/CliMA/ClimaAtmos.jl.git"
+branch = "main"
+
+[ClimaLand]
+path = "packages/ClimaLand"
+upstream = "https://github.com/CliMA/ClimaLand.jl.git"
+branch = "main"
+
+[ClimaCoupler]
+path = "packages/ClimaCoupler"
+upstream = "https://github.com/CliMA/ClimaCoupler.jl.git"
+branch = "main"
+
+[ClimaCalibrate]
+path = "packages/ClimaCalibrate"
+upstream = "https://github.com/CliMA/ClimaCalibrate.jl.git"
+branch = "main"
