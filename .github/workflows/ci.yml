@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.affected.outputs.matrix }}
+      examples: ${{ steps.affected.outputs.examples }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +47,9 @@ jobs:
           esac
           matrix=$(julia tools/mono.jl affected "$base")
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          # PRs skip examples marked nightly = true; scheduled runs do all.
+          pr_flag=""; [ "$base" = ALL ] || pr_flag="--pr"
+          echo "examples=$(julia tools/mono.jl examples "$base" $pr_flag)" >> "$GITHUB_OUTPUT"
           echo "### Affected packages" >> "$GITHUB_STEP_SUMMARY"
           echo "$matrix" | python3 -c 'import json,sys; [print("-", p["package"]) for p in json.load(sys.stdin)]' >> "$GITHUB_STEP_SUMMARY"
 
@@ -71,6 +75,26 @@ jobs:
       # LTS has no workspaces; mono.jl devs the in-repo deps explicitly.
       - if: matrix.julia == 'lts'
         run: julia --color=yes tools/mono.jl test ${{ matrix.pkg.package }}
+
+  examples:
+    # Cross-package examples/ double as integration tests of the user-facing
+    # workflows. They run whenever any package they use is affected.
+    needs: plan
+    if: needs.plan.outputs.examples != '[]'
+    name: example ${{ matrix.ex.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.ex.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ex: ${{ fromJSON(needs.plan.outputs.examples) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - uses: julia-actions/cache@v2
+      - run: julia --color=yes --project=${{ matrix.ex.path }} ${{ matrix.ex.path }}/run.jl
 
   registered:
     # Would a user who installs this package from General get a working set?

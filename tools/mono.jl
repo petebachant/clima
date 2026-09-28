@@ -11,6 +11,7 @@
 #   julia tools/mono.jl buildkite [BASE]          # emit GPU/MPI pipeline for affected pkgs
 #   julia tools/mono.jl examples [BASE|ALL] [--pr]  # affected cross-package examples (JSON)
 #   julia tools/mono.jl examples --list           # markdown table of examples
+#   julia tools/mono.jl sources DIR               # point DIR/Project.toml's in-repo deps at their paths
 #
 # "In-repo" means listed in packages.toml with a Project.toml at its path.
 
@@ -391,6 +392,44 @@ function cmd_examples(pkgs, base = "origin/main"; pr = false, list = false)
     println("[", join(("{\"name\":\"$(u.name)\",\"path\":\"$(u.path)\",\"timeout\":$(u.timeout_minutes)}" for u in hit), ","), "]")
 end
 
+# For environments kept out of the workspace (experiments/): make every
+# in-repo package it loads, including transitive ones, a direct dep with a
+# [sources] path, so nothing silently comes from the registry (Julia >= 1.11).
+function cmd_sources(pkgs, dir)
+    path = joinpath(ROOT, dir, "Project.toml")
+    direct = filter(in(keys(pkgs)), collect(keys(get(TOML.parsefile(path), "deps", Dict()))))
+    closure = Set(direct)
+    stack = copy(direct)
+    while !isempty(stack)
+        for d in pkgs[pop!(stack)].deps
+            d in closure || (push!(closure, d); push!(stack, d))
+        end
+    end
+    names = sort!(collect(closure))
+    added = setdiff(names, direct)
+    lines = readlines(path)
+    i = findfirst(==("[sources]"), strip.(lines))
+    if i !== nothing  # regenerate [sources] wholesale
+        j = findnext(l -> startswith(strip(l), "["), lines, i + 1)
+        lines = vcat(lines[1:i-1], j === nothing ? String[] : lines[j:end])
+    end
+    if !isempty(added)
+        k = findfirst(==("[deps]"), strip.(lines))
+        uuid(n) = TOML.parsefile(joinpath(ROOT, pkgs[n].path, "Project.toml"))["uuid"]
+        splice!(lines, k+1:k, ["$n = \"$(uuid(n))\"" for n in added])
+    end
+    while !isempty(lines) && isempty(strip(lines[end]))
+        pop!(lines)
+    end
+    push!(lines, "", "[sources]")
+    for n in names
+        push!(lines, "$n = {path = \"$(relpath(joinpath(ROOT, pkgs[n].path), joinpath(ROOT, dir)))\"}")
+    end
+    write(path, join(lines, '\n') * '\n')
+    isempty(added) || println("$dir: added transitive in-repo deps ", join(added, ", "))
+    println("$dir: [sources] for ", length(names), " in-repo packages")
+end
+
 function main(args)
     isempty(args) && return println(read(@__FILE__, String) |> s -> split(s, "\n\n")[1])
     pkgs = load_packages()
@@ -405,6 +444,7 @@ function main(args)
     cmd == "releases" ? cmd_releases(pkgs, pos[1]) :
     cmd == "workspace" ? cmd_workspace(pkgs) :
     cmd == "buildkite" ? cmd_buildkite(pkgs, pos...) :
+    cmd == "sources" ? cmd_sources(pkgs, pos[1]) :
     cmd == "examples" ? cmd_examples(pkgs, pos...; pr = "--pr" in flags, list = "--list" in flags) :
     error("unknown command $cmd")
 end

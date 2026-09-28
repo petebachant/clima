@@ -1,0 +1,59 @@
+# Coarse nightly AMIP, run from the monorepo root.
+#
+# Ported from packages/ClimaCoupler/.buildkite/nightly/pipeline.yml. The only
+# real change: no UPSTREAM_PACKAGES step. experiments/amip/Project.toml points
+# every in-repo package at this checkout via [sources] (`mono.jl sources`), so
+# "test against main of everything" is just "check out main".
+#
+# The driver and configs still live in packages/ClimaCoupler while it is
+# synced from upstream; see experiments/README.md for the move.
+agents:
+  queue: clima
+  slurm_time: 15:00:00
+  modules: climacommon/2025_05_15
+
+env:
+  JULIA_MAX_NUM_PRECOMPILE_FILES: 100
+  GKSwstype: 100
+  SLURM_KILL_BAD_EXIT: 1
+  DRIVER: "packages/ClimaCoupler/experiments/AMIP/run_simulation.jl"
+  CONFIG_PATH: "packages/ClimaCoupler/config/nightly_configs"
+  BENCHMARK_CONFIG_PATH: "packages/ClimaCoupler/config/benchmark_configs"
+
+timeout_in_minutes: 900
+
+steps:
+  - label: "init :GPU:"
+    key: "init_gpu_env"
+    command:
+      - "julia --project=experiments/amip -e 'using Pkg; Pkg.instantiate(; verbose=true); Pkg.precompile(); Pkg.status()'"
+    agents:
+      slurm_gpus: 1
+      slurm_cpus_per_task: 8
+    env:
+      JULIA_NUM_PRECOMPILE_TASKS: 8
+
+  - wait
+
+  - group: "Coarse AMIPs"
+    steps:
+      - label: "Coarse AMIP: progedmf + 0M + integrated land"
+        key: "amip_progedmf_land"
+        command: "julia --threads=3 --color=yes --project=experiments/amip $$DRIVER --config_file $$CONFIG_PATH/amip_coarse_progedmf_land.yml --job_id amip_coarse_progedmf_land"
+        artifact_paths: "output/amip_coarse_progedmf_land/artifacts/*"
+        env: {CLIMACOMMS_DEVICE: CUDA}
+        agents: {slurm_gpus_per_task: 1, slurm_cpus_per_task: 4, slurm_ntasks: 1, slurm_mem: 30GB}
+
+      - label: "Coarse AMIP: progedmf + 1M + integrated land"
+        key: "amip_progedmf_1m_land"
+        command: "julia --threads=3 --color=yes --project=experiments/amip $$DRIVER --config_file $$CONFIG_PATH/amip_coarse_progedmf_1m_land.yml --job_id amip_coarse_progedmf_1m_land"
+        artifact_paths: "output/amip_coarse_progedmf_1m_land/artifacts/*"
+        env: {CLIMACOMMS_DEVICE: CUDA}
+        agents: {slurm_gpus_per_task: 1, slurm_cpus_per_task: 4, slurm_ntasks: 1, slurm_mem: 30GB}
+
+      - label: "Flagship AMIP: progedmf + 1M + integrated land (16 helems)"
+        key: "gpu_amip_progedmf_1M_land_he16"
+        command: "srun julia --threads=3 --color=yes --project=experiments/amip $$DRIVER --config_file $$BENCHMARK_CONFIG_PATH/amip_progedmf_1m_land_he16.yml --job_id gpu_amip_progedmf_1M_land_he16"
+        artifact_paths: "output/gpu_amip_progedmf_1M_land_he16/artifacts/*"
+        env: {CLIMACOMMS_DEVICE: CUDA}
+        agents: {slurm_gpus_per_task: 1, slurm_cpus_per_task: 4, slurm_ntasks: 1, slurm_mem: 16GB}
