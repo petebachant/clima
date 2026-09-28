@@ -1,0 +1,91 @@
+# Tests every package touched by a change, plus everything downstream of it,
+# against the in-repo HEAD of its dependencies. Nightly runs test everything,
+# including against registered dependencies (what users actually install).
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write  # julia-actions/cache prunes its own caches
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.affected.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - name: Compat drift
+        run: julia tools/mono.jl compat --strict
+      - name: Workspace is up to date
+        run: |
+          julia tools/mono.jl workspace
+          git diff --exit-code Project.toml
+      - name: Affected packages
+        id: affected
+        run: |
+          case "${{ github.event_name }}" in
+            pull_request) base="origin/${{ github.base_ref }}" ;;
+            push)         base="${{ github.event.before }}" ;;
+            *)            base="ALL" ;;
+          esac
+          matrix=$(julia tools/mono.jl affected "$base")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "### Affected packages" >> "$GITHUB_STEP_SUMMARY"
+          echo "$matrix" | python3 -c 'import json,sys; [print("-", p["package"]) for p in json.load(sys.stdin)]' >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    needs: plan
+    if: needs.plan.outputs.matrix != '[]'
+    name: ${{ matrix.pkg.package }} (julia ${{ matrix.julia }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        julia: ['1.12', 'lts']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia }}
+      - uses: julia-actions/cache@v2
+      # 1.12+: the root workspace already tracks in-repo packages by path.
+      - if: matrix.julia != 'lts'
+        run: julia --color=yes --project=${{ matrix.pkg.path }} -e 'using Pkg; Pkg.test()'
+      # LTS has no workspaces; mono.jl devs the in-repo deps explicitly.
+      - if: matrix.julia == 'lts'
+        run: julia --color=yes tools/mono.jl test ${{ matrix.pkg.package }}
+
+  registered:
+    # Would a user who installs this package from General get a working set?
+    needs: plan
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: ${{ matrix.pkg.package }} (registered deps)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.12'
+      - uses: julia-actions/cache@v2
+      - run: julia --color=yes tools/mono.jl test ${{ matrix.pkg.package }} --registered

@@ -1,10 +1,11 @@
 # Monorepo helper. Stdlib only, so it runs before anything is instantiated.
 #
 #   julia tools/mono.jl graph                     # packages in dependency order
-#   julia tools/mono.jl affected [BASE]           # changed pkgs + everything downstream (JSON)
+#   julia tools/mono.jl affected [BASE|ALL]       # changed pkgs + everything downstream (JSON)
 #   julia tools/mono.jl compat [--strict]         # in-repo compat drift report
 #   julia tools/mono.jl test PKG [--registered]   # test PKG against in-repo HEAD of its deps
-#   julia tools/mono.jl bump PKG LEVEL            # LEVEL = major|minor|patch; widens dependents' compat
+#   julia tools/mono.jl bump PKG LEVEL [--release-dependents]
+#                                                 # LEVEL = major|minor|patch; widens dependents' compat
 #   julia tools/mono.jl releases BASE             # pkgs whose version changed since BASE (JSON)
 #   julia tools/mono.jl workspace                 # regenerate root Project.toml [workspace]
 #   julia tools/mono.jl buildkite [BASE]          # emit GPU/MPI pipeline for affected pkgs
@@ -109,6 +110,7 @@ end
 git(args...) = readchomp(Cmd(`git -C $ROOT $args`))
 
 function changed_packages(pkgs, base)
+    base == "ALL" && return Set(keys(pkgs))
     files = split(git("diff", "--name-only", "$base...HEAD"), '\n'; keepempty = false)
     hit = Set{String}()
     for f in files, p in values(pkgs)
@@ -222,29 +224,50 @@ function edit_project(f, path)
     write(path, join(lines, '\n') * '\n')
 end
 
-function cmd_bump(pkgs, name, level)
-    p = pkgs[name]
-    new = bump(p.version, level)
+function widen_compat!(path, dep, new)
+    isfile(path) || return nothing
+    spec = get(get(TOML.parsefile(path), "compat", Dict()), dep, nothing)
+    (spec === nothing || new in Pkg.Versions.semver_spec(spec)) && return nothing
+    widened = "$spec, $(compat_entry(new))"
+    edit_project(path) do section, l
+        section == "compat" && occursin(Regex("^\\s*$dep\\s*="), l) ? "$dep = \"$widened\"" : l
+    end
+    return spec => widened
+end
+
+function set_version!(p::Package, new)
     edit_project(joinpath(ROOT, p.path, "Project.toml")) do section, l
         section == "" && startswith(l, "version") ? "version = \"$new\"" : l
     end
-    println("$name: $(p.version) -> $new")
+    println("$(p.name): $(p.version) -> $new")
+end
+
+function cmd_bump(pkgs, name, level, release_dependents = false)
+    p = pkgs[name]
+    new = bump(p.version, level)
+    set_version!(p, new)
     isbreaking(p.version, new) || return
-    # Breaking: widen every in-repo dependent's compat in the same change.
-    for q in values(pkgs)
-        name in q.deps || name in q.weakdeps || continue
-        haskey(q.compat, name) || continue
-        spec = q.compat[name]
-        new in Pkg.Versions.semver_spec(spec) && continue
-        widened = "$spec, $(compat_entry(new))"
-        edit_project(joinpath(ROOT, q.path, "Project.toml")) do section, l
-            section == "compat" && occursin(Regex("^\\s*$name\\s*="), l) ?
-                "$name = \"$widened\"" : l
-        end
-        println("  $(q.name): compat $name \"$spec\" -> \"$widened\"  (run its tests!)")
+    # Breaking: widen every in-repo dependent's compat (package and test env)
+    # in the same change, so the whole graph keeps resolving.
+    touched = String[]
+    for q in values(pkgs), f in ("Project.toml", joinpath("test", "Project.toml"))
+        r = widen_compat!(joinpath(ROOT, q.path, f), name, new)
+        r === nothing && continue
+        println("  $(q.name)/$f: compat $name \"$(r.first)\" -> \"$(r.second)\"")
+        f == "Project.toml" && push!(touched, q.name)
+    end
+    isempty(touched) && return
+    if release_dependents
+        # Users only see widened compat once the dependent is released.
+        foreach(n -> set_version!(pkgs[n], bump(pkgs[n].version, "patch")), sort!(touched))
+    else
+        println("Dependents with widened compat need a release before users can combine them",
+            " with $name $new; pass --release-dependents to patch-bump them.")
     end
 end
 
+# Packages whose version changed since BASE, in dependency order. `waits_for`
+# lists in-repo deps released in the same batch, which must reach General first.
 function cmd_releases(pkgs, base)
     out = String[]
     for n in toposort(pkgs)
@@ -256,7 +279,11 @@ function cmd_releases(pkgs, base)
         end
         old == string(p.version) || push!(out, n)
     end
-    println(json_matrix(pkgs, out))
+    entries = map(out) do n
+        waits = join(("\"$d@$(pkgs[d].version)\"" for d in pkgs[n].deps if d in out), ",")
+        "{\"package\":\"$n\",\"path\":\"$(pkgs[n].path)\",\"version\":\"$(pkgs[n].version)\",\"waits_for\":[$waits]}"
+    end
+    println("[", join(entries, ","), "]")
 end
 
 function cmd_workspace(pkgs)
@@ -316,7 +343,7 @@ function main(args)
     cmd == "affected" ? cmd_affected(pkgs, pos...) :
     cmd == "compat" ? cmd_compat(pkgs, "--strict" in flags) :
     cmd == "test" ? cmd_test(pkgs, pos[1], "--registered" in flags) :
-    cmd == "bump" ? cmd_bump(pkgs, pos[1], pos[2]) :
+    cmd == "bump" ? cmd_bump(pkgs, pos[1], pos[2], "--release-dependents" in flags) :
     cmd == "releases" ? cmd_releases(pkgs, pos[1]) :
     cmd == "workspace" ? cmd_workspace(pkgs) :
     cmd == "buildkite" ? cmd_buildkite(pkgs, pos...) :
