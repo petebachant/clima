@@ -1,0 +1,379 @@
+using ClimaComms
+using ClimaCore
+import Interpolations
+import ClimaUtilities.Regridders: InterpolationsRegridder
+import ClimaUtilities.SpaceVaryingInputs: SpaceVaryingInput
+import ClimaUtilities.ClimaArtifacts: @clima_artifact
+import ClimaLand: Artifacts
+
+zeros_to_val(x, v) = x == 0 ? eltype(x)(v) : x
+
+"""
+    clm_canopy_radiation_parameters(
+        surface_space;
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+        lowres = false
+    )
+
+Reads spatially varying parameters for the canopy radiative transfer schemes,
+from NetCDF files based on CLM and MODIS data, and regrids them to the grid defined by the
+`surface_space` of the Clima simulation. Returns a NamedTuple of ClimaCore
+Fields.
+
+In particular, this file returns a field for
+- clumping index Ω
+- albedo and transmissitivy in PAR and NIR bands
+- leaf angle distribution G function parameter χl
+
+The values correspond to the value of the dominant PFT at each point.
+
+The NetCDF files are stored in ClimaArtifacts and more detail on their origin
+is provided there. The keyword arguments `regridder_type`, `extrapolation_bc`, and
+`regridder_kwargs`
+affect the regridding by (1) changing how we interpolate to ClimaCore points which
+are not in the data, and (2) changing how extrapolate to points beyond the range of the
+data, and (3) changed the spatial interpolation method.
+
+The keyword argument lowres is a flag that determines if the 0.9x1.25 or 0.125x0.125
+resolution CLM data artifact is used.
+
+By default nearest neighbor interpolation is used. This can be changed to linear by passing
+`interpolation_method = Interpolations.Linear()`.
+"""
+function clm_canopy_radiation_parameters(
+    surface_space;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Constant(),
+    lowres = false,
+)
+    context = ClimaComms.context(surface_space)
+    clm_artifact_path = Artifacts.clm_data_folder_path(; context, lowres)
+    # Foliage clumping index data derived from MODIS
+    modis_ci_artifact_path = Artifacts.modis_ci_data_folder_path(; context)
+
+    # TwoStreamModel parameters
+    # Clumping index missing value is NaN - set to 1
+    nans_to_one(x) = isnan(x) ? eltype(x)(1) : x
+    Ω = SpaceVaryingInput(
+        joinpath(modis_ci_artifact_path, "He_et_al_2012_1x1.nc"),
+        "ci",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+        file_reader_kwargs = (; preprocess_func = nans_to_one,),
+    )
+
+    # We run into a small issue where LAI may be nonzero where these plant properties from CLM
+    # are not defined (set to zero)
+    # Here we set them equal to temperature broadleaf deciduous BDT values from CLM5
+    # Values over the ocean will still be zero
+
+    χl = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "xl",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    χl .= zeros_to_val.(χl, 0.25)
+    G_Function = ClimaLand.Canopy.CLMGFunction.(χl)
+    α_PAR_leaf = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "rholvis",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    α_PAR_leaf .= zeros_to_val.(α_PAR_leaf, 0.1)
+
+    τ_PAR_leaf = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "taulvis",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    τ_PAR_leaf .= zeros_to_val.(τ_PAR_leaf, 0.05)
+    α_NIR_leaf = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "rholnir",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    α_NIR_leaf .= zeros_to_val.(α_NIR_leaf, 0.45)
+    τ_NIR_leaf = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "taulnir",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    τ_NIR_leaf .= zeros_to_val.(τ_NIR_leaf, 0.25)
+    return (;
+        Ω = Ω,
+        G_Function = G_Function,
+        α_PAR_leaf = α_PAR_leaf,
+        τ_PAR_leaf = τ_PAR_leaf,
+        α_NIR_leaf = α_NIR_leaf,
+        τ_NIR_leaf = τ_NIR_leaf,
+    )
+end
+
+"""
+    clm_photosynthesis_parameters(
+        surface_space;
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+        lowres = false,
+    )
+
+Reads spatially varying parameters for the canopy, from NetCDF files
+based on CLM data, and regrids them to the grid defined by the
+`surface_space` of the Clima simulation. Returns a NamedTuple of ClimaCore
+Fields.
+
+In particular, this file returns a field for
+- C3 flag
+- VCmax25
+
+The values correspond to the value of the dominant PFT at each point.
+
+The NetCDF files are stored in ClimaArtifacts and more detail on their origin
+is provided there. The keyword arguments `regridder_type`, `extrapolation_bc`, and
+`regridder_kwargs`
+affect the regridding by (1) changing how we interpolate to ClimaCore points which
+are not in the data, and (2) changing how extrapolate to points beyond the range of the
+data, and (3) changed the spatial interpolation method.
+
+The keyword argument lowres is a flag that determines if the 0.9x1.25 or 0.125x0.125
+resolution CLM data artifact is used.
+
+By default nearest neighbor interpolation is used. This can be changed to linear by passing
+`interpolation_method = Interpolations.Linear()`.
+"""
+function clm_photosynthesis_parameters(
+    surface_space;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Constant(),
+    lowres = false,
+)
+    context = ClimaComms.context(surface_space)
+    clm_artifact_path = Artifacts.clm_data_folder_path(; context, lowres)
+    # We run into a small issue where LAI may be nonzero where these plant properties from CLM
+    # are not defined (set to zero)
+    # Here we set Vcmax25 equal to the median value over land.
+    # The missing value for fractional c3 is already 1 
+
+    # vcmax is read in units of umol CO2/m^2/s and then converted to mol CO2/m^2/s
+    Vcmax25 = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "vcmx25",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+        file_reader_kwargs = (; preprocess_func = (data) -> data / 1_000_000,),
+    )
+    Vcmax25 .= zeros_to_val.(Vcmax25, 43 / 1_000_000) # 43 is the median in the nonzero values
+    # photosynthesis mechanism is read as a proportion of c3 plants (0 to 1)
+    # 1.0 indicates all c3 and 0.0 indicates all c4
+    fractional_c3 = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "c3_proportion",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    return (; fractional_c3 = fractional_c3, Vcmax25 = Vcmax25)
+end
+
+
+"""
+    clm_rooting_depth(
+        surface_space;
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+        lowres = false,
+    )
+
+Reads spatially varying rooting depth for the canopy, from a NetCDF file
+based on CLM data, and regrids it to the grid defined by the
+`surface_space` of the Clima simulation. Returns a NamedTuple of ClimaCore
+Fields.
+
+The values correspond to the value of the dominant PFT at each point.
+
+The NetCDF files are stored in ClimaArtifacts and more detail on their origin
+is provided there. The keyword arguments `regridder_type`, `extrapolation_bc`, and
+`regridder_kwargs`
+affect the regridding by (1) changing how we interpolate to ClimaCore points which
+are not in the data, and (2) changing how extrapolate to points beyond the range of the
+data, and (3) changed the spatial interpolation method.
+
+The keyword argument lowres is a flag that determines if the 0.9x1.25 or 0.125x0.125
+resolution CLM data artifact is used.
+
+By default nearest neighbor interpolation is used. This can be changed to linear by passing
+`interpolation_method = Interpolations.Linear()`.
+"""
+function clm_rooting_depth(
+    surface_space;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Constant(),
+    lowres = false,
+)
+    context = ClimaComms.context(surface_space)
+    clm_artifact_path = Artifacts.clm_data_folder_path(; context, lowres)
+    # The missing value for fractional c3 is already something sensible
+    rooting_depth = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "rooting_depth",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    return rooting_depth
+end
+
+
+"""
+    clm_medlyn_g1(
+        surface_space;
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+        lowres = false,
+    )
+
+Reads spatially varying g1 for the canopy, from a NetCDF file
+based on CLM data, and regrids it to the grid defined by the
+`surface_space` of the Clima simulation. Returns a NamedTuple of ClimaCore
+Fields.
+
+The values correspond to the value of the dominant PFT at each point.
+
+The NetCDF files are stored in ClimaArtifacts and more detail on their origin
+is provided there. The keyword arguments `regridder_type`, `extrapolation_bc`, and
+`regridder_kwargs`
+affect the regridding by (1) changing how we interpolate to ClimaCore points which
+are not in the data, and (2) changing how extrapolate to points beyond the range of the
+data, and (3) changed the spatial interpolation method.
+
+The keyword argument lowres is a flag that determines if the 0.9x1.25 or 0.125x0.125
+resolution CLM data artifact is used.
+
+By default nearest neighbor interpolation is used. This can be changed to linear by passing
+`interpolation_method = Interpolations.Linear()`.
+"""
+function clm_medlyn_g1(
+    surface_space;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Constant(),
+    lowres = false,
+)
+    context = ClimaComms.context(surface_space)
+    clm_artifact_path = Artifacts.clm_data_folder_path(; context, lowres)
+    # We run into a small issue where LAI may be nonzero where these plant properties from CLM
+    # are not defined (set to zero)
+    # Here we set g1 equal to the value for BDT: 4.45 sqrt(kPa)
+    # g1 is read in units of sqrt(kPa) and then converted to sqrt(Pa)
+    g1 = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "medlynslope",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+        file_reader_kwargs = (; preprocess_func = (data) -> data * 10^(3 / 2),),
+    )
+    g1 .= zeros_to_val.(g1, 4.45 * 10^(3 / 2)) # 4.45 is BDT g1
+
+    return g1
+end
+
+"""
+    clm_canopy_height(
+        surface_space;
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+        lowres = false,
+        max_height = nothing
+    )
+
+Read spatially-varying canopy height (m) data from CLM vegetation properties onto the `surface_space`.
+
+If max_height is set, the heights are clipped to be <= max_height.
+```
+"""
+function clm_canopy_height(
+    surface_space;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Constant(),
+    lowres = false,
+    max_height = nothing,
+)
+    context = ClimaComms.context(surface_space)
+    clm_artifact_path = Artifacts.clm_data_folder_path(; context, lowres)
+
+    canopy_height = SpaceVaryingInput(
+        joinpath(clm_artifact_path, "vegetation_properties_map.nc"),
+        "z_top",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    if max_height isa Nothing
+        return canopy_height
+    else
+        return min.(canopy_height, max_height)
+    end
+end

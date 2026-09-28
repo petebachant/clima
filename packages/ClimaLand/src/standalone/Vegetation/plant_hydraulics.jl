@@ -1,0 +1,520 @@
+using ClimaLand
+using ClimaLand.Soil
+using ClimaUtilities.TimeVaryingInputs
+import ClimaUtilities.TimeVaryingInputs:
+    TimeVaryingInput, AbstractTimeVaryingInput
+import ClimaUtilities.TimeManager: ITime
+import NCDatasets, ClimaCore, Interpolations # Needed to load TimeVaryingInputs
+using ..ClimaLand.Canopy: AbstractCanopyComponent
+using ClimaLand: PrescribedGroundConditions
+using ClimaCore
+import ClimaLand.Parameters as LP
+import ClimaParams as CP
+using DocStringExtensions
+using LazyBroadcast: lazy
+
+export PlantHydraulicsModel,
+    AbstractPlantHydraulicsModel,
+    water_flux,
+    effective_saturation,
+    augmented_liquid_fraction,
+    water_retention_curve,
+    inverse_water_retention_curve,
+    root_water_flux_per_ground_area!,
+    PlantHydraulicsParameters,
+    AbstractConductivityModel,
+    AbstractRetentionModel,
+    LinearRetentionCurve,
+    Weibull,
+    hydraulic_conductivity
+
+"""
+    AbstractPlantHydraulicsModel{FT} <: AbstractCanopyComponent{FT}
+
+An abstract type for plant hydraulics models.
+"""
+abstract type AbstractPlantHydraulicsModel{FT} <: AbstractCanopyComponent{FT} end
+
+ClimaLand.name(::AbstractPlantHydraulicsModel) = :hydraulics
+
+"""
+    PlantHydraulicsParameters
+
+A struct for holding parameters of the PlantHydraulics Model.
+$(DocStringExtensions.FIELDS)
+"""
+struct PlantHydraulicsParameters{FT <: AbstractFloat, CP, RP}
+    "porosity (m3/m3)"
+    ν::FT
+    "storativity (m3/m3)"
+    S_s::FT
+    "Conductivity model and parameters"
+    conductivity_model::CP
+    "Water retention model and parameters"
+    retention_model::RP
+end
+
+"""
+    PlantHydraulicsParameters(;
+        ν::FT,
+        S_s::FT,
+        conductivity_model,
+        retention_model,
+    )
+
+Constructor for PlantHydraulicsParameters.
+"""
+function PlantHydraulicsParameters(;
+    ν::FT,
+    S_s::FT,
+    conductivity_model,
+    retention_model,
+) where {FT}
+    return PlantHydraulicsParameters{
+        FT,
+        typeof(conductivity_model),
+        typeof(retention_model),
+    }(
+        ν,
+        S_s,
+        conductivity_model,
+        retention_model,
+    )
+end
+
+function PlantHydraulicsParameters(
+    toml_dict::CP.ParamDict;
+    ν = toml_dict["plant_nu"],
+    S_s = toml_dict["plant_S_s"],
+    conductivity_model,
+    retention_model,
+)
+    FT = typeof(ν)
+    return PlantHydraulicsParameters{
+        FT,
+        typeof(conductivity_model),
+        typeof(retention_model),
+    }(
+        ν,
+        S_s,
+        conductivity_model,
+        retention_model,
+    )
+end
+
+
+"""
+    PlantHydraulicsModel{FT, PS} <: AbstractPlantHydraulicsModel{FT}
+
+Defines, and constructs instances of, the PlantHydraulicsModel type, which is used
+for simulation flux of water to/from soil and ultimately being lost from the system by
+transpiration. Note that the canopy height is part of the biomass model.
+
+The model can be used in Canopy standalone mode by prescribing
+the soil matric potential at the root tips or flux in the roots.
+
+$(DocStringExtensions.FIELDS)
+"""
+struct PlantHydraulicsModel{FT, PS} <: AbstractPlantHydraulicsModel{FT}
+    "Parameters required by the Plant Hydraulics model"
+    parameters::PS
+end
+
+PlantHydraulicsModel{FT}(parameters) where {FT} =
+    PlantHydraulicsModel{FT, typeof(parameters)}(parameters)
+
+"""
+    prognostic_vars(model::PlantHydraulicsModel)
+
+A function which returns the names of the prognostic
+variables of the `PlantHydraulicsModel`.
+"""
+prognostic_vars(model::PlantHydraulicsModel) = (:ϑ_l,)
+
+"""
+    auxiliary_vars(model::PlantHydraulicsModel)
+
+A function which returns the names of the auxiliary
+variables of the `PlantHydraulicsModel`,
+the water potential `ψ` (m) and the root water flux per
+unit ground area `fa_roots` (m/s), which is the volume flux
+through the roots multiplied by the harmonic mean of LAI and RAI.
+"""
+auxiliary_vars(model::PlantHydraulicsModel) = (:ψ, :fa_roots)
+
+
+"""
+    ClimaLand.prognostic_types(model::PlantHydraulicsModel{FT}) where {FT}
+
+Defines the prognostic types for the PlantHydraulicsModel.
+"""
+ClimaLand.prognostic_types(model::PlantHydraulicsModel{FT}) where {FT} = (FT,)
+ClimaLand.prognostic_domain_names(::PlantHydraulicsModel) = (:surface,)
+
+"""
+    ClimaLand.auxiliary_types(model::PlantHydraulicsModel{FT}) where {FT}
+
+Defines the auxiliary types for the PlantHydraulicsModel.
+"""
+ClimaLand.auxiliary_types(model::PlantHydraulicsModel{FT}) where {FT} = (FT, FT)
+
+ClimaLand.auxiliary_domain_names(model::PlantHydraulicsModel) =
+    (:surface, :surface)
+
+"""
+    harmonic_mean(x::FT,y::FT) where {FT}
+
+Computes the harmonic mean of x >=0 and y >=0; returns zero if either
+x or y are zero.
+"""
+harmonic_mean(x::FT, y::FT) where {FT} = x * y / max(x + y, eps(FT))
+
+"""
+    water_flux(
+        z1,
+        z2,
+        ψ1,
+        ψ2,
+        K1,
+        K2,
+    ) where {FT}
+
+Computes the water flux given the absolute potential ψ (pressure/(ρg))
+ and the conductivity K (m/s) at the center of the two layers
+with midpoints z1 and z2.
+
+We currently assume a harmonic
+mean for effective conductivity between the two layers.
+
+To account for different path lengths in the two compartments Δz1 and
+Δz2, we would require the following conductance k (1/s)
+k\\_eff = K1/Δz1*K2/Δz2/(K1/Δz1+K2/Δz2)
+and a water flux of
+F = -k\\_eff * (ψ1 +z1 - ψ2 - z2) (m/s).
+
+This currently assumes the path lengths are equal.
+"""
+function water_flux(z1::FT, z2::FT, ψ1::FT, ψ2::FT, K1::FT, K2::FT) where {FT}
+    K_eff = harmonic_mean(K1, K2)
+    flux = -K_eff * ((ψ2 - ψ1) / (z2 - z1) + 1)
+    return flux # (m/s)
+end
+
+"""
+    AbstractConductivityModel{FT <: AbstractFloat}
+
+An abstract type for the plant hydraulics conductivity model.
+"""
+abstract type AbstractConductivityModel{FT <: AbstractFloat} end
+
+Base.broadcastable(x::AbstractConductivityModel) = tuple(x)
+"""
+    AbstractRetentionModel{FT <: AbstractFloat}
+
+An abstract type for the plant retention curve model.
+"""
+abstract type AbstractRetentionModel{FT <: AbstractFloat} end
+
+Base.broadcastable(x::AbstractRetentionModel) = tuple(x)
+
+
+"""
+    Weibull{FT} <: AbstractConductivityModel{FT}
+
+A concrete type specifying that a Weibull conductivity model is to be used;
+the struct contains the required parameters for this model.
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+struct Weibull{FT} <: AbstractConductivityModel{FT}
+    "Maximum Water conductivity in the above-ground plant (m/s) at saturation"
+    K_sat::FT
+    "The absolute water potential in xylem (or xylem water potential) at which ∼63%
+    of maximum xylem conductance is lost (Liu, 2020)."
+    ψ63::FT
+    "Weibull parameter c, which controls the shape of the conductance curve (Sperry, 2016)."
+    c::FT
+end
+
+function Weibull(
+    toml_dict::CP.ParamDict;
+    K_sat_plant = toml_dict["K_sat_plant"],
+    ψ63 = toml_dict["psi_63"],
+    c = toml_dict["Weibull_c"],
+)
+    FT = CP.float_type(toml_dict)
+    return Weibull{FT}(K_sat_plant, ψ63, c)
+end
+
+"""
+    hydraulic_conductivity(conductivity_params::Weibull{FT}, ψ::FT) where {FT}
+
+Computes the hydraulic conductivity at a point, using the
+Weibull formulation, given the potential ψ.
+"""
+function hydraulic_conductivity(
+    conductivity_params::Weibull{FT},
+    ψ::FT,
+) where {FT}
+    (; K_sat, ψ63, c) = conductivity_params
+    if ψ <= FT(0)
+        K = exp(-(ψ / ψ63)^c)
+    else
+        K = FT(1)
+    end
+    return K * K_sat # (m/s)
+end
+
+"""
+    LinearRetentionCurve{FT} <: AbstractRetentionModel{FT}
+
+A concrete type specifying that a linear water retention model is to be used;
+the struct contains the required parameters for this model.
+
+When ψ = 0, the effective saturation is one, so the intercept
+is not a free parameter, and only the slope must be specified.
+
+# Fields
+$(DocStringExtensions.FIELDS)
+"""
+struct LinearRetentionCurve{FT} <: AbstractRetentionModel{FT}
+    "Bulk modulus of elasticity and slope of potential to volume curve. See also Corcuera, 2002, and Christoffersen, 2016."
+    a::FT
+end
+
+function LinearRetentionCurve(toml_dict::CP.ParamDict; a = toml_dict["a"])
+    FT = CP.float_type(toml_dict)
+    return LinearRetentionCurve{FT}(a)
+end
+
+"""
+    water_retention_curve(
+        retention_params::LinearRetentionCurve{FT},
+        S_l::FT,
+        ν::FT,
+        S_s::FT) where {FT}
+
+Returns the potential ψ given the effective saturation S at a point, according
+to a linear model for the retention curve with parameters specified
+by `retention_params`.
+"""
+function water_retention_curve(
+    retention_params::LinearRetentionCurve{FT},
+    S_l::FT,
+    ν::FT,
+    S_s::FT,
+) where {FT}
+    (; a) = retention_params
+    if S_l <= FT(1)
+        ψ = 1 / a * (S_l - 1) # ψ(S_l=1)=0.
+    else
+        ϑ_l = augmented_liquid_fraction(ν, S_l)
+        ψ = (ϑ_l - ν) / S_s
+    end
+    return ψ # (m)
+end
+
+"""
+    inverse_water_retention_curve(
+        retention_params::LinearRetentionCurve{FT},
+        ψ::FT,
+        ν::FT,
+        S_s::FT) where {FT}
+
+Returns the effective saturation given the potential at a point, according
+to the linear retention curve model.
+"""
+function inverse_water_retention_curve(
+    retention_params::LinearRetentionCurve{FT},
+    ψ::FT,
+    ν::FT,
+    S_s::FT,
+) where {FT}
+    (; a) = retention_params
+    if ψ <= FT(0)
+        S_l = ψ * a + 1 # ψ(S_l=1)=0.
+    else
+        ϑ_l = ψ * S_s + ν
+        S_l = effective_saturation(ν, ϑ_l)
+    end
+    return S_l #(m3/m3)
+end
+
+"""
+    augmented_liquid_fraction(
+        ν::FT,
+        S_l::FT) where {FT}
+
+Computes the augmented liquid fraction from porosity and
+effective saturation.
+
+Augmented liquid fraction allows for
+oversaturation: an expansion of the volume of space
+available for storage in a plant compartment.
+"""
+function augmented_liquid_fraction(ν::FT, S_l::FT) where {FT}
+    ϑ_l = S_l * ν # ϑ_l can be > ν
+    safe_ϑ_l = max(ϑ_l, eps(FT))
+    return safe_ϑ_l # (m3 m-3)
+end
+
+"""
+    effective_saturation(
+        ν::FT,
+        ϑ_l::FT) where {FT}
+
+Computes the effective saturation given the augmented liquid fraction.
+"""
+function effective_saturation(ν::FT, ϑ_l::FT) where {FT}
+    S_l = ϑ_l / ν # S_l can be > 1
+    safe_S_l = max(S_l, eps(FT))
+    return safe_S_l # (m3 m-3)
+end
+
+"""
+    make_compute_exp_tendency(model::PlantHydraulicsModel, _)
+
+A function which creates the compute_exp_tendency! function for the PlantHydraulicsModel.
+The compute_exp_tendency! function must comply with a rhs function of ClimaTimeSteppers.jl.
+
+Below, `fa_roots` denotes the root water flux per unit ground area
+(`water_flux * harmonic_mean(LAI, RAI)`), and the transpiration is
+`p.canopy.turbulent_fluxes.vapor_flux`, also per unit ground area. The tendency is
+
+    ∂ϑ/∂t = (fa_roots - transpiration) / (LAI * dz)
+
+where `dz` is the canopy height from the biomass model.
+
+Note that if `LAI` is zero because no plant is present, `LAI * dz` is zero,
+and both fluxes in the numerator are also zero (they are scaled by area indices).
+To prevent dividing by zero, we use `max(LAI * dz, eps(FT))` in the denominator.
+"""
+function make_compute_exp_tendency(
+    model::PlantHydraulicsModel{FT},
+    canopy,
+) where {FT}
+    function compute_exp_tendency!(dY, Y, p, t)
+        LAI = p.canopy.biomass.area_index.leaf
+        fa_roots = p.canopy.hydraulics.fa_roots
+        dz = canopy.biomass.height
+        @. dY.canopy.hydraulics.ϑ_l =
+            1 / max(LAI * dz, eps(FT)) *
+            (fa_roots - p.canopy.turbulent_fluxes.vapor_flux)
+    end
+    return compute_exp_tendency!
+end
+
+"""
+    root_water_flux_per_ground_area!(
+        fa::ClimaCore.Fields.Field,
+        ground::PrescribedGroundConditions,
+        model::PlantHydraulicsModel{FT},
+        canopy,
+        Y::ClimaCore.Fields.FieldVector,
+        p::NamedTuple,
+        t,
+    ) where {FT}
+
+A method which computes the water flux between the soil and the above ground leaves,
+via the roots, and multiplied by `harmonic_mean(LAI, RAI)`, in the case of a model
+running without a prognostic soil model:
+
+Flux = -K_eff x [(ψ_leaf - ψ_soil)/(z_leaf - z_soil) + 1], where
+K_eff = K_soil K_leaf / (K_leaf + K_soil).
+
+Note that in `PrescribedSoil` mode, we compute the flux using K_soil = K_plant(ψ_soil)
+and K_leaf = K_plant(ψ_leaf). In `PrognosticSoil` mode, we compute the flux using
+K_soil = K_soil(ψ_soil) and K_leaf = K_plant(ψ_leaf). The latter is a better model, but
+our `PrescribedSoil` struct does not store K_soil, only θ_soil.
+θ_soil is converted to ψ_soil using the retention curve supplied by hydrology_cm.
+
+The returned flux is per unit ground area.
+"""
+function root_water_flux_per_ground_area!(
+    fa::ClimaCore.Fields.Field,
+    ground::PrescribedGroundConditions,
+    model::PlantHydraulicsModel{FT},
+    canopy,
+    Y::ClimaCore.Fields.FieldVector,
+    p::NamedTuple,
+    t,
+) where {FT}
+    rooting_depth = canopy.biomass.rooting_depth
+    (; conductivity_model,) = model.parameters
+    LAI = p.canopy.biomass.area_index.leaf
+    RAI = p.canopy.biomass.area_index.root
+    ψ = p.canopy.hydraulics.ψ
+
+    # compute the soil water potential from soil water content from retention curve
+    soil_saturation = @. lazy(
+        max(
+            min(
+                Soil.effective_saturation(ground.ν, p.drivers.θ, ground.θ_r),
+                1,
+            ),
+            eps(FT),
+        ),
+    )
+    ψ_soil = @. lazy(matric_potential(ground.hydrology_cm, soil_saturation))
+
+    # since rooting_depth is positive by convention, add the sign in here to
+    # convert it to a coordinate: z_roots = -rooting_depth
+    @. fa =
+        water_flux(
+            -rooting_depth,
+            canopy.biomass.height / 2,
+            ψ_soil,
+            ψ,
+            hydraulic_conductivity(conductivity_model, ψ_soil),
+            hydraulic_conductivity(conductivity_model, ψ),
+        ) * harmonic_mean(LAI, RAI)
+end
+
+"""
+    ClimaLand.total_liq_water_vol_per_area!(
+        surface_field,
+        model::PlantHydraulicsModel,
+        canopy,
+        Y,
+        p,
+        t,
+)
+
+A function which updates `surface_field` in place with the value of
+the plant hydraulic models total water volume.
+"""
+function ClimaLand.total_liq_water_vol_per_area!(
+    surface_field,
+    model::PlantHydraulicsModel,
+    canopy,
+    Y,
+    p,
+    t,
+)
+    LAI = p.canopy.biomass.area_index.leaf
+    dz = canopy.biomass.height
+    @. surface_field = dz * LAI * Y.canopy.hydraulics.ϑ_l
+    return nothing
+end
+
+
+"""
+   update_hydraulics!(p, Y, hydraulics::PlantHydraulicsModel, canopy)
+
+Updates the water potential `p.canopy.hydraulics.ψ` in place using the retention
+curve. Other subtypes of `AbstractPlantHydraulicsModel` may update different cache
+variables.
+"""
+function update_hydraulics!(p, Y, hydraulics::PlantHydraulicsModel, canopy)
+    ψ = p.canopy.hydraulics.ψ
+    ϑ_l = Y.canopy.hydraulics.ϑ_l
+    (; retention_model, S_s, ν) = hydraulics.parameters
+
+    @. ψ = water_retention_curve(
+        retention_model,
+        effective_saturation(ν, ϑ_l),
+        ν,
+        S_s,
+    )
+end

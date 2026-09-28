@@ -1,0 +1,1210 @@
+"""
+    @diagnostic_compute name model compute
+
+Macro generating a function to compute a land diagnostic,
+needed in the ClimaDiagnostics framework.
+
+See the ClimaDiagnostics docmentation for more information.
+
+For example,
+@diagnostic_compute "soil_net_radiation" SoilCanopyModel p.soil.R_n
+
+generates the function
+
+function compute_soil_net_radiation!(out, Y, p, t, land_model::SoilCanopyModel)
+    if isnothing(out)
+        out = zeros(axes(p.soil.R_n)) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        out .= p.soil.R_n # set the land values only since this type of broadcasting respects the mask
+        return out
+    else
+        out .= p.soil.R_n
+    end
+end
+
+Please note that if a land/sea mask is employed, the values
+over the ocean are set to NaN.
+"""
+macro diagnostic_compute(name, model, compute)
+    function_name = Symbol("compute_", name, "!")
+    return esc(
+        quote
+            @with_error function $function_name(
+                out,
+                Y,
+                p,
+                t,
+                land_model::$model,
+            )
+                if isnothing(out)
+                    out = zeros(axes($compute)) # Allocates
+                    fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+                    out .= $compute # set the land values only since this type of broadcasting respects the mask
+                    return out
+                else
+                    out .= $compute
+                end
+            end
+        end,
+    )
+end
+
+## Helper functions so that we can use the same methods for integrated
+## and standalone models
+
+get_canopy(m::Union{SoilCanopyModel, LandModel}) = m.canopy
+get_canopy(m::CanopyModel) = m
+
+get_soil(m::Union{SoilCanopyModel, LandModel, SoilSnowModel}) = m.soil
+get_soil(m::EnergyHydrology) = m
+get_soilco2(m::Union{SoilCanopyModel, LandModel, SoilSnowModel}) = m.soilco2
+get_soilco2(m::SoilCO2Model) = m
+
+get_surface_space(m::Union{SoilCanopyModel, LandModel, SoilSnowModel}) =
+    m.soil.domain.space.surface
+get_surface_space(
+    m::Union{CanopyModel, SoilCO2Model, SnowModel, EnergyHydrology},
+) = m.domain.space.surface
+
+get_z_coordinates(m::Union{SoilCanopyModel, LandModel, SoilSnowModel}) =
+    m.soil.domain.fields.z
+get_z_coordinates(m::Union{SoilCO2Model, EnergyHydrology}) = m.domain.fields.z
+
+@diagnostic_compute "ghf" LandModel p.ground_heat_flux
+
+### Conservation ##
+@diagnostic_compute "water_volume_per_area" EnergyHydrology p.soil.total_water
+@diagnostic_compute "energy_per_area" EnergyHydrology p.soil.total_energy
+@diagnostic_compute "water_volume_per_area_change" EnergyHydrology Y.soil.∫F_vol_liq_water_dt
+@diagnostic_compute "energy_per_area_change" EnergyHydrology Y.soil.∫F_e_dt
+
+
+### BucketModel ###
+
+# variables stored in p (diagnostics variables stored in the cache)
+@diagnostic_compute "sw_albedo" BucketModel p.bucket.α_sfc
+@diagnostic_compute "latent_heat_flux" BucketModel p.bucket.turbulent_fluxes.lhf
+@diagnostic_compute "net_radiation" BucketModel p.bucket.R_n
+@diagnostic_compute "sensible_heat_flux" BucketModel p.bucket.turbulent_fluxes.shf
+@diagnostic_compute "specific_humidity" BucketModel p.bucket.q_sfc
+@diagnostic_compute "surface_temperature" BucketModel p.bucket.T_sfc
+@diagnostic_compute "vapor_flux" BucketModel p.bucket.turbulent_fluxes.vapor_flux
+
+# variables stored in Y (prognostic or state variables)
+@diagnostic_compute "snow_water_equivalent" BucketModel Y.bucket.σS
+@diagnostic_compute "soil_temperature" BucketModel Y.bucket.T
+@diagnostic_compute "subsurface_water_storage" BucketModel Y.bucket.W
+@diagnostic_compute "surface_water_content" BucketModel Y.bucket.Ws
+
+### Union{SoilCanopyModel, LandModel} ###
+
+# variables stored in p (diagnostics variables stored in the cache)
+
+## Canopy Module ##
+
+# Canopy - Solar Induced Fluorescence
+@diagnostic_compute "solar_induced_fluorescence" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.sif.SIF
+
+# Canopy - Autotrophic respiration
+@diagnostic_compute "autotrophic_respiration" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.autotrophic_respiration.Ra
+
+# Net Ecosystem Exchange (NEE = ER - GPP)
+function compute_net_ecosystem_exchange!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    # Compute ER first
+    if isnothing(out)
+        out = zeros(land_model.soil.domain.space.surface)
+        fill!(field_values(out), NaN)
+    end
+    compute_total_respiration!(out, Y, p, t, land_model)
+    out .= out .- get_GPP(p, land_model.canopy.photosynthesis)
+    return out
+end
+
+# Canopy - Conductance
+function compute_stomatal_conductance!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel, LandModel, CanopyModel},
+)
+    canopy = get_canopy(land_model)
+    conductance_model = canopy.conductance
+    compute_stomatal_conductance!(out, Y, p, t, canopy, conductance_model)
+end
+
+
+function compute_stomatal_conductance!(
+    out,
+    Y,
+    p,
+    t,
+    canopy,
+    conductance_model::MedlynConductanceModel,
+)
+    (; g1, g0, Drel) = conductance_model.parameters
+    earth_param_set = canopy.earth_param_set
+    thermo_params = LP.thermodynamic_parameters(earth_param_set)
+    An_leaf = get_An_leaf(p, canopy.photosynthesis)
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = medlyn_conductance(
+            g0,
+            Drel,
+            medlyn_term.(
+                g1,
+                p.drivers.T,
+                p.drivers.P,
+                p.drivers.q,
+                thermo_params,
+            ),
+            An_leaf,
+            p.drivers.c_co2,
+        )
+        return out
+    else
+        @. out = medlyn_conductance(
+            g0,
+            Drel,
+            medlyn_term(
+                g1,
+                p.drivers.T,
+                p.drivers.P,
+                p.drivers.q,
+                thermo_params,
+            ),
+            An_leaf,
+            p.drivers.c_co2,
+        )
+    end
+end
+
+function compute_stomatal_conductance!(
+    out,
+    Y,
+    p,
+    t,
+    canopy,
+    conductance_model::PModelConductance,
+)
+    (; Drel) = conductance_model.parameters
+    gs_co2 = p.canopy.photosynthesis.instantaneous.gs_co2
+    # Divide by LAI to get leaf level, approximately, and multiple by Drel to get for water instead of co2
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out =
+            Drel * gs_co2 /
+            max(p.canopy.biomass.area_index.leaf, sqrt(eps(eltype(gs_co2))))
+        return out
+    else
+        @. out =
+            Drel * gs_co2 /
+            max(p.canopy.biomass.area_index.leaf, sqrt(eps(eltype(gs_co2))))
+    end
+end
+
+function compute_canopy_transpiration!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{CanopyModel, SoilCanopyModel, LandModel},
+)
+    canopy = get_canopy(land_model)
+    # Convert to a mass flux by multiplying by the density of liquid
+    # water
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = p.canopy.turbulent_fluxes.vapor_flux * 1000
+        return out
+    else
+        @. out = p.canopy.turbulent_fluxes.vapor_flux * 1000
+    end
+end
+
+# Canopy - Energy
+@diagnostic_compute "canopy_latent_heat_flux" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.turbulent_fluxes.lhf
+@diagnostic_compute "canopy_sensible_heat_flux" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.turbulent_fluxes.shf
+@diagnostic_compute "latent_heat_flux" CanopyModel p.canopy.turbulent_fluxes.lhf
+@diagnostic_compute "sensible_heat_flux" CanopyModel p.canopy.turbulent_fluxes.shf
+
+# Canopy - Hydraulics
+function compute_leaf_water_potential!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{CanopyModel, SoilCanopyModel, LandModel},
+)
+    canopy = get_canopy(land_model)
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        out .= p.canopy.hydraulics.ψ
+        return out
+    else
+        out .= p.canopy.hydraulics.ψ
+    end
+end
+
+# @diagnostic_compute "flux_per_ground_area" Union{SoilCanopyModel, LandModel} p.canopy.hydraulics.fa # return a Tuple
+@diagnostic_compute "root_flux_per_ground_area" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.hydraulics.fa_roots
+@diagnostic_compute "leaf_area_index" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.biomass.area_index.leaf
+
+# Canopy - Optimal LAI model diagnostics: prognostic time-integrated variables in Y.
+@diagnostic_compute "a0_daily" Union{SoilCanopyModel, LandModel, CanopyModel} Y.canopy.biomass.A0_daily
+
+@diagnostic_compute "a0_annual" Union{SoilCanopyModel, LandModel, CanopyModel} Y.canopy.biomass.A0_annual
+
+@diagnostic_compute "a0c3_annual" Union{SoilCanopyModel, LandModel, CanopyModel} Y.canopy.biomass.A0c3_annual
+
+@diagnostic_compute "a0c4_annual" Union{SoilCanopyModel, LandModel, CanopyModel} Y.canopy.biomass.A0c4_annual
+
+# The C3 fraction may be a scalar, so the output takes the leaf area index's space.
+function compute_fractional_c3!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel, LandModel, CanopyModel},
+)
+    fractional_c3 = get_fractional_c3(p, get_canopy(land_model))
+    if isnothing(out)
+        out = zeros(axes(p.canopy.biomass.area_index.leaf))
+        fill!(field_values(out), NaN)
+        out .= fractional_c3
+        return out
+    else
+        out .= fractional_c3
+    end
+end
+
+# Canopy composition: shares of productivity from C3 trees, C3 grasses and C4 grasses.
+@diagnostic_compute "fraction_tree" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.biomass.composition.tree
+
+@diagnostic_compute "fraction_c3_grass" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.biomass.composition.c3_grass
+
+@diagnostic_compute "fraction_c4_grass" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.biomass.composition.c4_grass
+
+# precip_annual is stored in molar units (mol H2O m^-2 yr^-1) for the Zhou water-
+# limitation formula; report it as an SI depth (m yr^-1) via the molar liquid density.
+function compute_precip_annual!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel, LandModel, CanopyModel},
+)
+    ρ_m_liq = LP.ρ_m_liq(get_canopy(land_model).earth_param_set)  # mol m^-3
+    if isnothing(out)
+        out = zeros(axes(Y.canopy.biomass.precip_annual))
+        fill!(field_values(out), NaN)
+        @. out = Y.canopy.biomass.precip_annual / ρ_m_liq
+        return out
+    else
+        @. out = Y.canopy.biomass.precip_annual / ρ_m_liq
+    end
+end
+
+# Canopy - Soil moisture stress
+@diagnostic_compute "moisture_stress_factor" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.soil_moisture_stress.βm
+
+# Canopy - Photosynthesis
+@diagnostic_compute "photosynthesis_gross_canopy" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} get_GPP(p, get_canopy(land_model).photosynthesis)
+@diagnostic_compute "respiration_canopy" Union{
+    CanopyModel,
+    SoilCanopyModel,
+    LandModel,
+} get_Rd_canopy(p, get_canopy(land_model).photosynthesis)
+@diagnostic_compute "photosynthesis_net_leaf" Union{
+    CanopyModel,
+    SoilCanopyModel,
+    LandModel,
+} get_An_leaf(p, get_canopy(land_model).photosynthesis)
+@diagnostic_compute "respiration_leaf" Union{
+    CanopyModel,
+    SoilCanopyModel,
+    LandModel,
+} get_Rd_leaf(p, get_canopy(land_model).photosynthesis)
+@diagnostic_compute "vcmax25" Union{CanopyModel, SoilCanopyModel, LandModel} get_Vcmax25_canopy(
+    Y,
+    p,
+    get_canopy(land_model).photosynthesis,
+    get_canopy(land_model),
+)
+
+# Canopy - Radiative Transfer
+@diagnostic_compute "near_infrared_radiation_down" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.nir_d
+@diagnostic_compute "near_infrared_radiation_absorbed" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.nir.abs
+@diagnostic_compute "near_infrared_radiation_reflected" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.nir.refl
+@diagnostic_compute "near_infrared_radiation_transmitted" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.nir.trans
+@diagnostic_compute "photosynthetically_active_radiation_down" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.par_d
+@diagnostic_compute "photosynthetically_active_radiation_absorbed" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.par.abs
+@diagnostic_compute "photosynthetically_active_radiation_reflected" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.par.refl
+@diagnostic_compute "photosynthetically_active_radiation_transmitted" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.par.trans
+@diagnostic_compute "radiation_longwave_net" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.LW_n
+@diagnostic_compute "radiation_shortwave_net" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.canopy.radiative_transfer.SW_n
+
+# Vegetation carbon (derived from prescribed biomass)
+function compute_vegetation_carbon!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}, CanopyModel{FT}},
+) where {FT}
+    canopy = get_canopy(land_model)
+
+    # Get parameters
+    σl = canopy.autotrophic_respiration.parameters.σl  # specific leaf density (kg C/m^2 leaf)
+    ηsl = canopy.autotrophic_respiration.parameters.ηsl  # live stem wood coefficient (kg C/m^3)
+
+    # Get area indices
+    LAI = p.canopy.biomass.area_index.leaf
+    SAI = p.canopy.biomass.area_index.stem
+
+    # Get canopy height from biomass model
+    h = canopy.biomass.height
+
+    # Compute vegetation carbon
+    # cLeaf = σl * LAI (kg C/m^2)
+    # cStem = ηsl * h * SAI (kg C/m^2)
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface)
+        fill!(field_values(out), NaN)
+    end
+    @. out = σl * LAI + ηsl * h * SAI
+end
+@diagnostic_compute "pressure" Union{SoilCanopyModel, LandModel, CanopyModel} p.drivers.P
+@diagnostic_compute "rainfall" Union{SoilCanopyModel, LandModel, CanopyModel} p.drivers.P_liq
+@diagnostic_compute "radiation_longwave_down" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.drivers.LW_d
+@diagnostic_compute "radiation_shortwave_down" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.drivers.SW_d
+@diagnostic_compute "snowfall" Union{SoilCanopyModel, LandModel, CanopyModel} p.drivers.P_snow
+@diagnostic_compute "tair" Union{
+    EnergyHydrology,
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.drivers.T
+@diagnostic_compute "specific_humidity" Union{
+    SoilCanopyModel,
+    LandModel,
+    CanopyModel,
+} p.drivers.q
+@diagnostic_compute "wind_speed" Union{SoilCanopyModel, LandModel, CanopyModel} p.drivers.u
+
+function compute_vpd!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel, LandModel, CanopyModel},
+)
+    canopy = get_canopy(land_model)
+    thermo_params = LP.thermodynamic_parameters(canopy.earth_param_set)
+    if isnothing(out)
+        out = zeros(canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = Thermodynamics.vapor_pressure_deficit(
+            thermo_params,
+            p.drivers.T,
+            p.drivers.P,
+            p.drivers.q,
+        )
+        return out
+    else
+        @. out = Thermodynamics.vapor_pressure_deficit(
+            thermo_params,
+            p.drivers.T,
+            p.drivers.P,
+            p.drivers.q,
+        )
+    end
+end
+
+function compute_precip!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, CanopyModel, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = (p.drivers.P_liq + p.drivers.P_snow) * 1000 # density of liquid water (1000kg/m^3)
+        return out
+    else
+        @. out = (p.drivers.P_liq + p.drivers.P_snow) * 1000# density of liquid water (1000kg/m^3)
+    end
+end
+
+## Soil Module ##
+
+@diagnostic_compute "infiltration" Union{
+    EnergyHydrology,
+    SoilCanopyModel,
+    LandModel,
+} p.soil.infiltration
+@diagnostic_compute "soil_hydraulic_conductivity" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.K
+@diagnostic_compute "soil_thermal_conductivity" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.κ
+@diagnostic_compute "soil_water_potential" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.ψ
+@diagnostic_compute "soil_temperature" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.T
+@diagnostic_compute "soil_net_radiation" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.R_n
+
+function compute_10cm_water_mass!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology{FT}, SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    soil = get_soil(land_model)
+    ∫Hθdz = p.soil.sfc_scratch
+    Hθ = p.soil.sub_sfc_scratch
+    z = soil.domain.fields.z
+    depth = FT(-0.1)
+    earth_param_set = soil.parameters.earth_param_set
+    _ρ_liq = LP.ρ_cloud_liq(earth_param_set)
+    _ρ_ice = LP.ρ_cloud_ice(earth_param_set)
+    # Convert from volumetric water content to water mass per unit volume using density
+    @. Hθ = (p.soil.θ_l * _ρ_liq + Y.soil.θ_i * _ρ_ice) * heaviside(z, depth)
+    column_integral_definite!(∫Hθdz, Hθ)
+
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    # The layering of the soil model may not coincide with 10 cm exactly, and this could lead
+    # to the integral above not exactly representing 10cm.
+    # To adjust, divide by the ∫heaviside(z, depth) dz, and then multiply by 10cm.
+    # `Hθ` is no longer needed, so its scratch space holds the heaviside function, and
+    # `out` holds its integral until the final division.
+    H = Hθ
+    @. H = heaviside(z, depth)
+    ∫Hdz = out
+    column_integral_definite!(∫Hdz, H)
+    @. out = ∫Hθdz / ∫Hdz * FT(0.1)
+    return out
+end
+function compute_soil_albedo!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}, EnergyHydrology{FT}},
+) where {FT}
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = (p.soil.PAR_albedo + p.soil.NIR_albedo) / 2
+        return out
+    else
+        @. out = (p.soil.PAR_albedo + p.soil.NIR_albedo) / 2
+    end
+end
+
+# Soil - Turbulent Fluxes
+@diagnostic_compute "soil_latent_heat_flux" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.turbulent_fluxes.lhf
+@diagnostic_compute "soil_sensible_heat_flux" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.turbulent_fluxes.shf
+@diagnostic_compute "vapor_flux" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} p.soil.turbulent_fluxes.vapor_flux_liq # should add ice here
+
+# Soil - SoilCO2
+@diagnostic_compute "soc" Union{SoilCanopyModel, LandModel, SoilCO2Model} Y.soilco2.SOC
+
+@diagnostic_compute "soilco2" Union{SoilCanopyModel, LandModel, SoilCO2Model} Y.soilco2.CO2
+function compute_soilo2!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCO2Model{FT}, SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    T_soil = p.soilco2.T  # soil temperature (K)
+    P_sfc = p.drivers.P   # atmospheric pressure (Pa)
+    soilco2 = get_soilco2(land_model)
+    params = soilco2.parameters
+    if isnothing(out)
+        out = zeros(soilco2.domain.space.subsurface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = ClimaLand.Soil.Biogeochemistry.o2_fraction_from_concentration(
+            max(Y.soilco2.O2, 0) / p.soilco2.θ_eff_o2,
+            T_soil,
+            P_sfc,
+            params,
+        )
+        return out
+    else
+        @. out = ClimaLand.Soil.Biogeochemistry.o2_fraction_from_concentration(
+            max(Y.soilco2.O2, 0) / p.soilco2.θ_eff_o2,
+            T_soil,
+            P_sfc,
+            params,
+        )
+    end
+end #
+@diagnostic_compute "soilco2_diffusivity" Union{
+    SoilCO2Model,
+    SoilCanopyModel,
+    LandModel,
+} p.soilco2.D
+@diagnostic_compute "soilco2_source_microbe" Union{
+    SoilCO2Model,
+    SoilCanopyModel,
+    LandModel,
+} p.soilco2.Sm
+@diagnostic_compute "soilo2_diffusivity" Union{
+    SoilCO2Model,
+    SoilCanopyModel,
+    LandModel,
+} p.soilco2.D_o2
+
+function compute_integrated_soc!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCO2Model{FT}, SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    z = get_z_coordinates(land_model)
+    depth = FT(-1.0)
+    first_meter_SOC = @.lazy(Y.soilco2.SOC * heaviside(z, depth))
+    if isnothing(out)
+        surface_space = get_surface_space(land_model)
+        out = zeros(surface_space) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        column_integral_definite!(out, first_meter_SOC) # updates out in place
+        return out
+    else
+        column_integral_definite!(out, first_meter_SOC) # updates out in place
+    end
+end # Convert from kg C to mol CO2.
+
+function compute_heterotrophic_respiration!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCO2Model{FT}, SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    if isnothing(out)
+        surface_space = get_surface_space(land_model)
+        out = zeros(surface_space) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = p.soilco2.top_bc * FT(83.26)
+        return out
+    else
+        out .= p.soilco2.top_bc .* FT(83.26)
+    end
+end # Convert from kg C to mol CO2.
+# To convert from kg C to mol CO2, we need to multiply by:
+# [3.664 kg CO2/ kg C] x [10^3 g CO2/ kg CO2] x [1 mol CO2/44.009 g CO2] = 83.26 mol CO2/kg C
+
+# Soil CO2 in ppm (for comparison with NEON observations)
+# Converts air-equivalent CO2 concentration to ppm using ideal gas law:
+# ppm = (n_CO2 / n_air) × 10^6 = CO2_air_eq * R * T / (M_C * P) × 10^6
+function compute_soilco2_ppm!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}, SoilCO2Model{FT}},
+) where {FT}
+    params = get_soilco2(land_model).parameters
+    M_C = FT(params.M_C)
+    R = FT(LP.gas_constant(params.earth_param_set))
+
+    T_soil = p.soilco2.T               # K
+    P_sfc = p.drivers.P                # Pa
+
+    if isnothing(out)
+        out = zeros(axes(Y.soilco2.CO2))
+        fill!(field_values(out), NaN)
+        @. out =
+            Y.soilco2.CO2 / p.soilco2.θ_eff * R * T_soil / (M_C * P_sfc) *
+            FT(1e6)
+        return out
+    else
+        @. out =
+            Y.soilco2.CO2 / p.soilco2.θ_eff * R * T_soil / (M_C * P_sfc) *
+            FT(1e6)
+    end
+end
+
+## Other ##
+@diagnostic_compute "sw_albedo" Union{SoilCanopyModel, LandModel} p.α_sfc
+@diagnostic_compute "lw_up" Union{SoilCanopyModel, LandModel} p.LW_u
+@diagnostic_compute "sw_up" Union{SoilCanopyModel, LandModel} p.SW_u
+function compute_sw_up!(out, Y, p, t, land_model::BucketModel)
+    α_sfc = ClimaLand.surface_albedo(land_model, Y, p)
+    SW_d = p.drivers.SW_d
+
+    if isnothing(out)
+        out = zeros(land_model.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = α_sfc * SW_d
+        return out
+    else
+        @. out = α_sfc * SW_d
+    end
+end
+
+function compute_lw_up!(out, Y, p, t, land_model::BucketModel)
+    LW_d = p.drivers.LW_d
+    earth_param_set = land_model.parameters.earth_param_set
+    _σ = LP.Stefan(earth_param_set)
+    T_sfc = ClimaLand.component_temperature(land_model, Y, p)
+    ϵ_sfc = ClimaLand.surface_emissivity(land_model, Y, p)
+    if isnothing(out)
+        out = zeros(land_model.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = (1 - ϵ_sfc) * LW_d + ϵ_sfc * _σ * T_sfc^4
+        return out
+    else
+        @. out = (1 - ϵ_sfc) * LW_d + ϵ_sfc * _σ * T_sfc^4
+    end
+end
+
+function compute_soil_fsat!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    out .= Runoff.get_soil_fsat(
+        soil.boundary_conditions.top.runoff,
+        Y,
+        p,
+        soil.domain.fields.depth,
+    )
+    return out
+end
+
+function compute_surface_runoff!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    out .= Runoff.get_surface_runoff(soil.boundary_conditions.top.runoff, Y, p)
+    return out
+end
+
+function compute_subsurface_runoff!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    out .=
+        Runoff.get_subsurface_runoff(soil.boundary_conditions.top.runoff, Y, p)
+    return out
+end
+
+function compute_total_runoff!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    runoff = soil.boundary_conditions.top.runoff
+    surface = Runoff.get_surface_runoff(runoff, Y, p)
+    subsurface = Runoff.get_subsurface_runoff(runoff, Y, p)
+    if !isnothing(surface) && !isnothing(subsurface)
+        out .= surface .+ subsurface
+    elseif !isnothing(surface)
+        out .= surface
+    elseif !isnothing(subsurface)
+        out .= subsurface
+    else
+        fill!(out, 0)
+    end
+    return out
+end
+
+function compute_saturated_height!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+
+    out .=
+        Runoff.get_saturated_height(soil.boundary_conditions.top.runoff, Y, p)
+    return out
+end
+
+function compute_infiltration_capacity!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{EnergyHydrology, SoilCanopyModel, LandModel},
+)
+    soil = get_soil(land_model)
+    if isnothing(out)
+        out = zeros(soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+    end
+    out .= Runoff.soil_infiltration_capacity(soil, Y, p)
+    return out
+end
+
+@diagnostic_compute "bottom_water_flux" Union{
+    EnergyHydrology,
+    SoilCanopyModel,
+    LandModel,
+} p.soil.bottom_bc.water
+
+function compute_evapotranspiration!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::SoilCanopyModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.soil.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out =
+            (
+                p.soil.turbulent_fluxes.vapor_flux_liq +
+                p.soil.turbulent_fluxes.vapor_flux_ice +
+                p.canopy.turbulent_fluxes.vapor_flux
+            ) * 1000 # density of liquid water (1000kg/m^3)
+        return out
+    else
+        out .=
+            (
+                p.soil.turbulent_fluxes.vapor_flux_liq .+
+                p.soil.turbulent_fluxes.vapor_flux_ice .+
+                p.canopy.turbulent_fluxes.vapor_flux
+            ) .* 1000 # density of liquid water (1000kg/m^3)
+    end
+end
+
+function compute_evapotranspiration!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::LandModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out =
+            (
+                (1 - p.snow.snow_cover_fraction) *
+                p.soil.turbulent_fluxes.vapor_flux_liq +
+                (1 - p.snow.snow_cover_fraction) *
+                p.soil.turbulent_fluxes.vapor_flux_ice +
+                p.canopy.turbulent_fluxes.vapor_flux +
+                p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.vapor_flux
+            ) * 1000 # density of liquid water (1000kg/m^3)
+        return out
+    else
+        @. out =
+            (
+                (1 - p.snow.snow_cover_fraction) *
+                p.soil.turbulent_fluxes.vapor_flux_liq +
+                (1 - p.snow.snow_cover_fraction) *
+                p.soil.turbulent_fluxes.vapor_flux_ice +
+                p.canopy.turbulent_fluxes.vapor_flux +
+                p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.vapor_flux
+            ) * 1000 # density of liquid water (1000kg/m^3)
+    end
+end
+@diagnostic_compute "evapotranspiration" CanopyModel p.canopy.turbulent_fluxes.vapor_flux
+
+function compute_total_respiration!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        if isnothing(land_model.soilco2)
+            @. out = p.canopy.autotrophic_respiration.Ra
+        else
+            @. out =
+                p.soilco2.top_bc * FT(83.26) +
+                p.canopy.autotrophic_respiration.Ra # [3.664 kg CO2/ kg C] x [10^3 g CO2/ kg CO2] x [1 mol CO2/44.009 g CO2] = 83.26 mol CO2/kg C
+        end
+        return out
+    else
+        if isnothing(land_model.soilco2)
+            @. out = p.canopy.autotrophic_respiration.Ra
+
+        else
+            out .=
+                p.soilco2.top_bc .* FT(83.26) .+
+                p.canopy.autotrophic_respiration.Ra
+        end
+    end
+end
+@diagnostic_compute "total_respiration" CanopyModel p.canopy.autotrophic_respiration.Ra
+
+function compute_latent_heat_flux!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::SoilCanopyModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = p.soil.turbulent_fluxes.lhf + p.canopy.turbulent_fluxes.lhf
+        return out
+    else
+        out .= p.soil.turbulent_fluxes.lhf .+ p.canopy.turbulent_fluxes.lhf
+    end
+end
+
+function compute_sensible_heat_flux!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::SoilCanopyModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = p.soil.turbulent_fluxes.shf + p.canopy.turbulent_fluxes.shf
+        return out
+    else
+        out .= p.soil.turbulent_fluxes.shf .+ p.canopy.turbulent_fluxes.shf
+    end
+end
+
+function compute_latent_heat_flux!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::LandModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out =
+            p.soil.turbulent_fluxes.lhf * p.bare_soil_fraction +
+            p.canopy.turbulent_fluxes.lhf +
+            p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.lhf
+        if !(land_model.lake isa Nothing)
+            @. out += p.lake_fraction * p.lake.turbulent_fluxes.lhf
+        end
+        return out
+    else
+        @. out =
+            p.soil.turbulent_fluxes.lhf * p.bare_soil_fraction +
+            p.canopy.turbulent_fluxes.lhf +
+            p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.lhf
+        if !(land_model.lake isa Nothing)
+            @. out += p.lake_fraction * p.lake.turbulent_fluxes.lhf
+        end
+    end
+end
+
+function compute_sensible_heat_flux!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::LandModel{FT},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out =
+            p.soil.turbulent_fluxes.shf * p.bare_soil_fraction +
+            p.canopy.turbulent_fluxes.shf +
+            p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.shf
+        if !(land_model.lake isa Nothing)
+            @. out += p.lake_fraction * p.lake.turbulent_fluxes.shf
+        end
+        return out
+    else
+        @. out =
+            p.soil.turbulent_fluxes.shf * p.bare_soil_fraction +
+            p.canopy.turbulent_fluxes.shf +
+            p.snow.snow_cover_fraction * p.snow.turbulent_fluxes.shf
+        if !(land_model.lake isa Nothing)
+            @. out += p.lake_fraction * p.lake.turbulent_fluxes.shf
+        end
+    end
+end
+
+function compute_net_radiation!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        @. out = p.drivers.LW_d - p.LW_u + p.drivers.SW_d - p.SW_u
+        return out
+
+    else
+        out .= p.drivers.LW_d .- p.LW_u .+ p.drivers.SW_d .- p.SW_u
+
+    end
+end
+
+# variables stored in Y (prognostic or state variables)
+nan_if_no_canopy(T::FT, PAI::FT) where {FT <: Real} = PAI > 0 ? T : FT(NaN)
+function compute_canopy_temperature!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::Union{SoilCanopyModel{FT}, LandModel{FT}},
+) where {FT}
+    PAI = p.scratch1
+    @. PAI = p.canopy.biomass.area_index.leaf + p.canopy.biomass.area_index.stem
+    if isnothing(out)
+        out = zeros(land_model.canopy.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        out .= nan_if_no_canopy.(
+            canopy_temperature(land_model.canopy.energy, land_model, Y, p),
+            PAI,
+        )
+        return out
+    else
+        out .= nan_if_no_canopy.(
+            canopy_temperature(land_model.canopy.energy, land_model, Y, p),
+            PAI,
+        )
+    end
+end
+function compute_canopy_temperature!(
+    out,
+    Y,
+    p,
+    t,
+    land_model::CanopyModel{FT},
+) where {FT}
+    PAI = p.canopy.biomass.area_index.leaf .+ p.canopy.biomass.area_index.stem # Allocates
+    if isnothing(out)
+        out = zeros(land_model.domain.space.surface) # Allocates
+        fill!(field_values(out), NaN) # fill with NaNs, even over the ocean
+        out .= nan_if_no_canopy.(
+            canopy_temperature(land_model.energy, land_model, Y, p),
+            PAI,
+        )
+        return out
+    else
+        out .= nan_if_no_canopy.(
+            canopy_temperature(land_model.energy, land_model, Y, p),
+            PAI,
+        )
+    end
+end
+
+@diagnostic_compute "soil_water_content" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} Y.soil.ϑ_l
+@diagnostic_compute "soil_ice_content" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} Y.soil.θ_i
+@diagnostic_compute "soil_internal_energy" Union{
+    SoilCanopyModel,
+    LandModel,
+    EnergyHydrology,
+} Y.soil.ρe_int
+
+@diagnostic_compute "snow_water_equivalent" Union{LandModel, SnowModel} Y.snow.S
+@diagnostic_compute "snow_depth" Union{LandModel, SnowModel} p.snow.z_snow
+@diagnostic_compute "snow_cover_fraction" Union{LandModel, SnowModel} p.snow.snow_cover_fraction
+@diagnostic_compute "snow_sfc_temp" Union{LandModel, SnowModel} p.snow.T_sfc
+@diagnostic_compute "snow_bot_temp" LandModel p.snow_T_bot
+@diagnostic_compute "snowk" LandModel p.snow.κ
+@diagnostic_compute "snow_bulk_temp" Union{LandModel, SnowModel} p.snow.T
+@diagnostic_compute "evapotranspiration" EnergyHydrology p.soil.turbulent_fluxes.vapor_flux_liq
+
+
+### Slab Lake ###
+@diagnostic_compute "lake_internal_energy" Union{SlabLakeModel, LandModel} Y.lake.U
+@diagnostic_compute "lake_temperature" Union{SlabLakeModel, LandModel} p.lake.T
+@diagnostic_compute "lake_liquid_fraction" Union{SlabLakeModel, LandModel} p.lake.q_l
+@diagnostic_compute "lake_sw_albedo" Union{SlabLakeModel, LandModel} p.lake.albedo
+@diagnostic_compute "lake_lhf" Union{SlabLakeModel, LandModel} p.lake.turbulent_fluxes.lhf
+@diagnostic_compute "lake_shf" Union{SlabLakeModel, LandModel} p.lake.turbulent_fluxes.shf
+@diagnostic_compute "lake_rn" Union{SlabLakeModel, LandModel} p.lake.R_n

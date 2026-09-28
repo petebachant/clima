@@ -1,0 +1,1127 @@
+module Snow
+import ClimaParams as CP
+using DocStringExtensions
+import ...Parameters as LP
+using ClimaCore
+using LazyBroadcast: lazy
+using Thermodynamics
+using SurfaceFluxes
+using NVTX
+using ClimaLand
+using ClimaLand:
+    AbstractAtmosphericDrivers,
+    AbstractRadiativeDrivers,
+    turbulent_fluxes!,
+    net_radiation!,
+    AbstractModel,
+    heaviside
+
+import ClimaLand:
+    AbstractBC,
+    make_update_aux,
+    make_compute_exp_tendency,
+    make_update_boundary_fluxes,
+    prognostic_vars,
+    auxiliary_vars,
+    name,
+    prognostic_types,
+    prognostic_domain_names,
+    auxiliary_types,
+    auxiliary_domain_names,
+    component_temperature,
+    component_specific_humidity,
+    surface_height,
+    surface_albedo,
+    surface_emissivity,
+    surface_roughness_model,
+    get_drivers,
+    total_energy_per_area!,
+    total_liq_water_vol_per_area!
+export SnowParameters,
+    SnowModel,
+    AtmosDrivenSnowBC,
+    snow_boundary_fluxes!,
+    ConstantAlbedoModel,
+    ZenithAngleAlbedoModel,
+    WuWuSnowCoverFractionModel,
+    SturmSnowConductivityModel,
+    JordanSnowConductivityModel,
+    maximum_snow_cover_fraction!
+
+"""
+    AbstractSnowModel{FT} <: ClimaLand.AbstractExpModel{FT}
+
+Defines a new type of abstract explicit model for snow modeling.
+Currently, the only supported concrete example is called `SnowModel`
+and is used as a bulk snow model.
+"""
+abstract type AbstractSnowModel{FT} <: ClimaLand.AbstractExpModel{FT} end
+
+"""
+    AbstractDensityModel{FT}
+
+Defines the model type for density and depth parameterizations
+for use within an `AbstractSnowModel` type. Currently we support a
+`MinimumDensityModel` model and the `NeuralDepthModel`.
+
+Since depth and bulk density are related via SWE, and SWE is a prognostic variable
+of the snow model, only depth or bulk density can be independently modeled at one time.
+This is why they are treated as a single "density model" even if the parameterization is actually
+a model for snow depth. One must also account for Y.snow.S and p.snow.z_snow within ClimaLand.Snow as representing the
+SWE (or z) over the whole grid cell area (ground-area) instead of just the snow-covered area itself, when building density/depth models.
+The snow depth/density model can be diagnostic or introduce additional prognostic variables.
+
+"""
+abstract type AbstractDensityModel{FT <: AbstractFloat} end
+
+"""
+    MinimumDensityModel{FT <: AbstractFloat} <: AbstractDensityModel{FT}
+
+Establishes the density parameterization where snow density is estimated
+using a linear interpolation between the minimum density and the density
+of liquid water, based on the mass fraction of liquid water.
+"""
+struct MinimumDensityModel{FT} <: AbstractDensityModel{FT}
+    "Minimum density of snow (kg/m^3)"
+    ρ_min::FT
+end
+
+"""
+    AbstractAlbedoModel{FT}
+
+Defines the model type for albedo parameterization
+for use within an `AbstractSnowModel` type.
+
+These parameterizations are stored in parameters.α_snow, and
+are used to update the value of p.snow.α_snow (the broadband
+albedo of the snow at a point).
+stored
+"""
+abstract type AbstractAlbedoModel{FT <: AbstractFloat} end
+
+"""
+    ConstantAlbedoModel{FT <: AbstractFloat} <: AbstractAlbedoModel{FT}
+
+Establishes the albedo parameterization where albedo is treated as a
+constant spatially and temporally.
+"""
+struct ConstantAlbedoModel{FT} <: AbstractAlbedoModel{FT}
+    "Albedo of snow (unitless)"
+    α::FT
+end
+
+"""
+    ZenithAngleAlbedoModel{FT <: AbstractFloat} <: AbstractAlbedoModel{FT}
+
+Establishes the albedo parameterization where albedo
+depends on the cosine of the zenith angle of the sun, as
+
+``\\alpha = f(x) [\\alpha_0 + \\Delta\\alpha \\cdot \\text{exp}(-k\\cos(\\theta s))]``
+
+where cos θs is the cosine of the zenith angle, α\\_0, Δα, and k
+are free parameters. The factor out front is a function of
+x = ρ\\_snow/ρ\\_liq, of the form f(x) = min(1 - β(x-x0), 1). The parameters
+x0 ∈ [0,1] and β ∈ [0,1] are free. Choose β = 0 to remove this dependence on snow density.
+
+Note: If this choice is used, the field cosθs must appear in the cache
+p.drivers. This is available through the PrescribedRadiativeFluxes object.
+"""
+struct ZenithAngleAlbedoModel{FT} <: AbstractAlbedoModel{FT}
+    "Free parameter controlling the minimum snow albedo"
+    α_0::FT
+    "Free parameter controlling the snow albedo when cosθs = 0"
+    Δα::FT
+    "Rate at which albedo drops to its minimum value with zenith angle"
+    k::FT
+    "Rate governing how snow albedo changes with snow density, a proxy for grain size and liquid water content, ∈ [0,1]"
+    β::FT
+    "Value of relative snow density ρ_snow/ρ_liq at which snow density begins to decrease albedo, ∈ [0,1]"
+    x0::FT
+end
+
+function ZenithAngleAlbedoModel(
+    α_0::FT,
+    Δα::FT,
+    k::FT;
+    β = FT(0),
+    x0 = FT(0.2),
+) where {FT}
+    @assert 0 ≤ x0 ≤ 1
+    @assert 0 ≤ β ≤ 1
+    ZenithAngleAlbedoModel(α_0, Δα, k, β, x0)
+end
+
+function ZenithAngleAlbedoModel(
+    toml_dict::CP.ParamDict;
+    α_0 = toml_dict["alpha_0"],
+    Δα = toml_dict["delta_alpha"],
+    k = toml_dict["k"],
+    β = toml_dict["beta"],
+    x0 = toml_dict["x0"],
+)
+    return ZenithAngleAlbedoModel(α_0, Δα, k, β = β, x0 = x0)
+end
+
+"""
+    AbstractSnowCoverFractionModel{FT}
+
+Defines the model type for snow cover parameterization
+for use within an `AbstractSnowModel` type.
+
+These parameterizations are stored in parameters.scf, and
+are used to update the value of p.snow.snow_cover_fraction.
+"""
+abstract type AbstractSnowCoverFractionModel{FT <: AbstractFloat} end
+
+"""
+    WuWuSnowCoverFractionModel{FT <: AbstractFloat} <: AbstractSnowCoverFractionModel{FT}
+
+Establishes the snow cover parameterization of Wu, Tongwen, and
+Guoxiong Wu. "An empirical formula to compute
+snow cover fraction in GCMs." Advances in Atmospheric Sciences
+21 (2004): 529-535,
+    scf = min(β\\_scf * z̃ / (z̃ + 1), 1),
+
+where z̃ = snow depth per ground area / 0.106 m, and β\\_scf is computed using a
+resolution dependent formula: β\\_scf = max(β0 - γ(horz\\_degree\\_res - 1.5),
+β\\_min), where horz\\_degree\\_res is the horizontal resolution of the
+simulation, in degrees, and β0, β\\_min and γ are unitless. It is correct to
+think of β0, β\\_min, γ, and z0 as the free parameters, while
+horz\\_degree\\_res is provided and β\\_scf is determined.
+
+β0, β\\_min, γ, and β\\_scf must be > 0.
+
+From Wu and Wu et al, β0 ∼ 1.77 and γ ∼ 0.08, over a range of 1.5-4.5∘
+"""
+struct WuWuSnowCoverFractionModel{FT} <: AbstractSnowCoverFractionModel{FT}
+    "The value used to normalize snow depth when computing snow cover fraction (m)"
+    z0::FT
+    "The value of β_scf (unitless; computed from other parameters)"
+    β_scf::FT
+    "Free parameter controlling the snow cover scaling change with resolution (1/degrees)"
+    γ::FT
+    "The value of β_scf at 1.5∘ horizontal resolution (unitless)"
+    β0::FT
+    "The minimum of β_scf as horizontal resolution gets coarser (unitless)"
+    β_min::FT
+    "The horizontal resolution of the model, in degrees"
+    horz_degree_res::FT
+    function WuWuSnowCoverFractionModel(
+        z0::FT,
+        β_scf::FT,
+        γ::FT,
+        β0::FT,
+        β_min::FT,
+        horz_degree_res::FT,
+    ) where {FT}
+        expected_β_scf = max(β0 - γ * (horz_degree_res - FT(1.5)), β_min)
+        @assert z0 > eps(FT)
+        @assert expected_β_scf ≈ β_scf
+        @assert β0 > eps(FT)
+        @assert β_min > eps(FT)
+        @assert γ > eps(FT)
+        @assert horz_degree_res > eps(FT)
+        new{FT}(z0, β_scf, γ, β0, β_min, horz_degree_res)
+    end
+end
+
+function WuWuSnowCoverFractionModel(
+    γ::FT,
+    β0::FT,
+    β_min::FT,
+    horz_degree_res::FT;
+    z0 = FT(0.106),
+) where {FT}
+    @assert β_min > eps(FT)
+    @assert β0 > eps(FT)
+    @assert γ > eps(FT)
+    @assert z0 > eps(FT)
+    @assert horz_degree_res > eps(FT)
+    β_scf = max(β0 - γ * (horz_degree_res - FT(1.5)), β_min)
+    return WuWuSnowCoverFractionModel(z0, β_scf, γ, β0, β_min, horz_degree_res)
+end
+
+function WuWuSnowCoverFractionModel(
+    toml_dict::CP.ParamDict,
+    horz_degree_res;
+    γ = toml_dict["gamma"],
+    β0 = toml_dict["beta_0"],
+    β_min = toml_dict["beta_min"],
+    z0 = toml_dict["z0"],
+)
+    return WuWuSnowCoverFractionModel(γ, β0, β_min, horz_degree_res; z0)
+end
+
+"""
+    AbstractSnowSurfaceTemperatureModel{FT}
+
+Defines the model type for snow surface temperature parameterization
+for use within an `AbstractSnowModel` type.
+
+Presently, the two options are for a BulkSurfaceTemperatureModel model and an
+EquilibriumGradientTemperatureModel model.
+"""
+abstract type AbstractSnowSurfaceTemperatureModel{FT <: AbstractFloat} end
+
+Base.broadcastable(ps::AbstractSnowSurfaceTemperatureModel) = tuple(ps)
+
+"""
+    BulkSurfaceTemperatureModel{FT <: AbstractFloat} <: AbstractSnowSurfaceTemperatureModel{FT}
+
+Establishes the snow surface temperature parameterization where snow surface temperature
+is identical to the bulk temperature of the snow.
+"""
+struct BulkSurfaceTemperatureModel{FT} <:
+       AbstractSnowSurfaceTemperatureModel{FT} end
+
+"""
+    EquilibriumGradientTemperatureModel{FT <: AbstractFloat} <: AbstractSnowSurfaceTemperatureModel{FT}
+
+Establishes the snow surface temperature parameterization where snow surface temperature
+is diagnosed by approximating the energy flux as a gradient between the surface temperature and the average temperature of
+snow over an effective distance scale. The gradient is determined by iteratively solving a consistent surface temperature
+to satisfy Fourier's Law - that the sum of energy fluxes at the surface should equal the gradient of the temperature at the
+snow surface, i.e. Σ(F(T_sfc)) = -κ ∂T/∂x|ₓ₌ₛᵤᵣ, except for once the surface temperature reaches T_freeze, at which point
+leftover energy flux serves to warm up the bulk snow temperature.
+"""
+struct EquilibriumGradientTemperatureModel{FT} <:
+       AbstractSnowSurfaceTemperatureModel{FT} end
+
+"""
+    AbstractSnowConductivityModel{FT}
+
+Defines the model type for snow thermal conductivity parameterization
+for use within an `AbstractSnowModel` type.
+
+These parameterizations are stored in parameters.κ_snow, and
+are used to update the value of p.snow.κ_snow.
+"""
+abstract type AbstractSnowConductivityModel{FT <: AbstractFloat} end
+Base.broadcastable(ps::AbstractSnowConductivityModel) = tuple(ps)
+
+"""
+    JordanSnowConductivityModel{FT} <: AbstractSnowConductivityModel{FT}
+
+A parameterization for the snow thermal conductivity based on Jordan, Rachel E.
+ "A one-dimensional temperature model for a snow cover: Technical
+documentation for SNTHERM. 89." (1991).
+"""
+struct JordanSnowConductivityModel{FT} <: AbstractSnowConductivityModel{FT}
+    κ_ice::FT
+    linear_coeff::FT
+    quadratic_coeff::FT
+end
+
+function JordanSnowConductivityModel(toml_dict)
+    κ_ice = toml_dict["thermal_conductivity_of_water_ice"]
+    l_coeff = toml_dict["jordan_linear_snow_thermal_conductivity"]
+    q_coeff = toml_dict["jordan_quadratic_snow_thermal_conductivity"]
+    return JordanSnowConductivityModel(κ_ice, l_coeff, q_coeff)
+end
+
+"""
+    SturmSnowConductivityModel{FT} <: AbstractSnowConductivityModel{FT}
+
+A parameterization for the snow thermal conductivity based on Sturm, M.,
+Holmgren, J., König, M.,  and Morris, K.: The thermal conductivity of
+seasonal snow, J. Glaciol., 43, 26–41,
+https://doi.org/10.3189/S0022143000002781, 1997.
+"""
+struct SturmSnowConductivityModel{FT} <: AbstractSnowConductivityModel{FT}
+    threshold::FT
+    max::FT
+    m1::FT
+    b1::FT
+    m2::FT
+    b2::FT
+    q2::FT
+end
+
+function SturmSnowConductivityModel(toml_dict)
+    threshold = toml_dict["sturm_threshold_snow_thermal_conductivity"]
+    m1 = toml_dict["sturm_m1_snow_thermal_conductivity"]
+    m2 = toml_dict["sturm_m2_snow_thermal_conductivity"]
+    b1 = toml_dict["sturm_b1_snow_thermal_conductivity"]
+    b2 = toml_dict["sturm_b2_snow_thermal_conductivity"]
+    q2 = toml_dict["sturm_q2_snow_thermal_conductivity"]
+    max_density = toml_dict["sturm_maxrho_snow_thermal_conductivity"]
+    return SturmSnowConductivityModel(
+        threshold,
+        max_density,
+        m1,
+        b1,
+        m2,
+        b2,
+        q2,
+    )
+end
+
+"""
+    SnowParameters{FT <: AbstractFloat, PSE}
+
+A struct for storing parameters of the `SnowModel`.
+
+Note that in our current implementation of runoff, a physical timescale is
+required and computed using Ksat and the depth of the snow. For shallow
+snowpacks, this will fall below the timestep of the model. For that reason, we
+pass the timestep of the model as a parameter, and take the larger of the
+timestep and the physical timescale as the value used in the model. Future
+implementations will revisit this.
+
+$(DocStringExtensions.FIELDS)
+"""
+Base.@kwdef struct SnowParameters{
+    FT <: AbstractFloat,
+    KM <: AbstractSnowConductivityModel,
+    DM <: AbstractDensityModel,
+    AM <: AbstractAlbedoModel,
+    SCFM <: AbstractSnowCoverFractionModel,
+    STM <: AbstractSnowSurfaceTemperatureModel,
+    PSE,
+}
+    "Choice of parameterization for snow density"
+    density::DM
+    "Roughness length over snow for momentum (m)"
+    z_0m::FT
+    "Roughness length over snow for scalars (m)"
+    z_0b::FT
+    "Albedo parameterization for snow"
+    α_snow::AM
+    "Emissivity of snow (unitless)"
+    ϵ_snow::FT
+    "Volumetric holding capacity of water in snow (unitless)"
+    θ_r::FT
+    "Hydraulic conductivity of wet snow (m/s)"
+    Ksat::FT
+    "Thermal conductivity of snow"
+    κ_snow::KM
+    "Timestep of the model (s)"
+    Δt::FT
+    "Parameter to prevent dividing by zero when computing snow temperature (m)"
+    ΔS::FT
+    "Snow cover fraction parameterization"
+    scf::SCFM
+    "Snow surface temperature parameterization"
+    surf_temp::STM
+    "Clima-wide parameters"
+    earth_param_set::PSE
+end
+
+## For interfacing with ClimaParams
+"""
+    function SnowParameters(
+        toml_dict::CP.ParamDict,
+        Δt;
+        ρ_snow = toml_dict["snow_density"],
+        α_snow_param = toml_dict["snow_albedo"],
+        density::DM = MinimumDensityModel(ρ_snow),
+        α_snow::AM = ZenithAngleAlbedoModel(toml_dict),
+        scf::SCFM = WuWuSnowCoverFractionModel(
+            toml_dict,
+            CP.float_type(toml_dict)(1.0),
+        ),
+        κ_snow::KM = SturmSnowConductivityModel(toml_dict),
+        surf_temp::STM = EquilibriumGradientTemperatureModel{CP.float_type(toml_dict)}(),
+        z_0m = toml_dict["snow_momentum_roughness_length"],
+        z_0b = toml_dict["snow_scalar_roughness_length"],
+        ϵ_snow = toml_dict["snow_emissivity"],
+        θ_r = toml_dict["holding_capacity_of_water_in_snow"],
+        Ksat = toml_dict["wet_snow_hydraulic_conductivity"],
+        ΔS = toml_dict["delta_S"],
+    ) where {KM, DM, AM, SCFM}
+
+TOML dictionary constructor for the `SnowParameters`` struct.
+```julia
+Δt = 450.0
+# TOML Dictionary:
+import ClimaParams as CP
+toml_dict = CP.create_toml_dict(Float32);
+ClimaLand.Canopy.SnowParameters(toml_dict, Δt; ϵ_snow = Float32(0.99), Ksat = Float32(1e-4))
+```
+"""
+function SnowParameters(
+    toml_dict::CP.ParamDict,
+    Δt;
+    ρ_snow = toml_dict["snow_density"],
+    α_snow_param = toml_dict["snow_albedo"],
+    density::DM = MinimumDensityModel(ρ_snow),
+    α_snow::AM = ConstantAlbedoModel(α_snow_param),
+    scf::SCFM = WuWuSnowCoverFractionModel(
+        toml_dict,
+        CP.float_type(toml_dict)(1.0),
+    ),
+    κ_snow::KM = SturmSnowConductivityModel(toml_dict),
+    surf_temp::STM = EquilibriumGradientTemperatureModel{
+        CP.float_type(toml_dict),
+    }(),
+    z_0m = toml_dict["snow_momentum_roughness_length"],
+    z_0b = toml_dict["snow_scalar_roughness_length"],
+    ϵ_snow = toml_dict["snow_emissivity"],
+    θ_r = toml_dict["holding_capacity_of_water_in_snow"],
+    Ksat = toml_dict["wet_snow_hydraulic_conductivity"],
+    ΔS = toml_dict["delta_S"],
+) where {DM, KM, AM, SCFM, STM}
+    Δt = float(Δt)
+    FT = CP.float_type(toml_dict)
+    earth_param_set = LP.LandParameters(toml_dict)
+    return SnowParameters{FT, KM, DM, AM, SCFM, STM, typeof(earth_param_set)}(;
+        Δt,
+        earth_param_set,
+        z_0m,
+        z_0b,
+        ϵ_snow,
+        θ_r,
+        Ksat,
+        κ_snow,
+        ΔS,
+        density,
+        α_snow,
+        scf,
+        surf_temp,
+    )
+end
+
+function SnowParameters{FT}(
+    Δt;
+    density::DM,
+    z_0m,
+    z_0b,
+    α_snow::AM,
+    ϵ_snow,
+    θ_r,
+    Ksat,
+    κ_snow::KM,
+    ΔS = FT(0.1),
+    scf::SCFM,
+    surf_temp::STM = EquilibriumGradientTemperatureModel{FT}(),
+    earth_param_set::PSE,
+) where {
+    FT <: AbstractFloat,
+    KM <: AbstractSnowConductivityModel,
+    DM <: AbstractDensityModel,
+    AM <: AbstractAlbedoModel,
+    SCFM <: AbstractSnowCoverFractionModel,
+    STM <: AbstractSnowSurfaceTemperatureModel,
+    PSE,
+}
+    return SnowParameters{FT, KM, DM, AM, SCFM, PSE}(
+        density,
+        z_0m,
+        z_0b,
+        α_snow,
+        ϵ_snow,
+        θ_r,
+        Ksat,
+        κ_snow,
+        float(Δt),
+        ΔS,
+        scf,
+        surf_temp,
+        earth_param_set,
+    )
+end
+
+Base.broadcastable(ps::SnowParameters) = tuple(ps)
+
+"""
+    struct SnowModel{
+        FT,
+        PS <: SnowParameters{FT},
+        BC,
+        D,
+    } <: AbstractSnowModel{FT}
+
+A container/type for the bulk snow model, based on the UEB snow model
+of Tarboton et al. (1995) and Tarboton and Luce (1996).
+"""
+struct SnowModel{FT, PS <: SnowParameters{FT}, BC, D} <: AbstractSnowModel{FT}
+    "Parameters required by the snow model"
+    parameters::PS
+    "Boundary conditions"
+    boundary_conditions::BC
+    "The domain of the model"
+    domain::D
+end
+
+"""
+    SnowModel(;
+        parameters::SnowParameters{FT},
+        domain::ClimaLand.Domains.AbstractDomain,
+        boundary_conditions::BC
+    ) where {FT, DM, PSE, BC}
+
+Construct a `SnowModel` with `parameters`, `domain`, and `boundary_conditions`.
+"""
+function SnowModel(;
+    parameters::SnowParameters{FT},
+    domain::ClimaLand.Domains.AbstractDomain,
+    boundary_conditions::BC,
+) where {FT, BC}
+    args = (parameters, boundary_conditions, domain)
+    SnowModel{FT, typeof.(args)...}(args...)
+end
+
+"""
+    SnowModel(
+        FT,
+        domain,
+        forcing,
+        toml_dict::CP.ParamDict,
+        Δt;
+        prognostic_land_components = (:snow,),
+        z_0m = toml_dict["snow_momentum_roughness_length"],
+        z_0b = toml_dict["snow_scalar_roughness_length"],
+        ϵ_snow = toml_dict["snow_emissivity"],
+        α_snow = ConstantAlbedoModel(toml_dict["snow_albedo"]),
+        κ_snow = SturmSnowConductivityModel(toml_dict),
+        density = MinimumDensityModel(toml_dict["snow_density"]),
+        scf = WuWuSnowCoverFractionModel(toml_dict, sum(ClimaLand.Domains.average_horizontal_resolution_degrees(domain)) / 2),
+        surf_temp = EquilibriumGradientTemperatureModel{FT}(),
+        θ_r = toml_dict["holding_capacity_of_water_in_snow"],
+        Ksat = toml_dict["wet_snow_hydraulic_conductivity"],
+        ΔS = toml_dict["delta_S"],
+    )
+
+Creates a SnowModel model with the given float type FT, domain, toml_dict, forcing, and prognostic land components.
+
+When running the snow model in standalone mode, provide `prognostic_land_components = (:snow,)`, while for running integrated
+land models, this should be a list of the component models. This value of this argument must be the same across all
+components in the integrated land model.
+
+Default parameterizations and parameters can be overwritten using keyword arguments.
+"""
+function SnowModel(
+    FT,
+    domain,
+    forcing,
+    toml_dict::CP.ParamDict,
+    Δt;
+    prognostic_land_components = (:snow,),
+    z_0m = toml_dict["snow_momentum_roughness_length"],
+    z_0b = toml_dict["snow_scalar_roughness_length"],
+    ϵ_snow = toml_dict["snow_emissivity"],
+    α_snow = ZenithAngleAlbedoModel(toml_dict),
+    density = MinimumDensityModel(toml_dict["snow_density"]),
+    κ_snow = SturmSnowConductivityModel(toml_dict),
+    scf = WuWuSnowCoverFractionModel(
+        toml_dict,
+        sum(ClimaLand.Domains.average_horizontal_resolution_degrees(domain)) /
+        2,
+    ),
+    surf_temp = EquilibriumGradientTemperatureModel{CP.float_type(toml_dict)}(),
+    θ_r = toml_dict["holding_capacity_of_water_in_snow"],
+    Ksat = toml_dict["wet_snow_hydraulic_conductivity"],
+    ΔS = toml_dict["delta_S"],
+)
+    parameters = SnowParameters(
+        toml_dict,
+        Δt;
+        scf,
+        surf_temp,
+        α_snow,
+        ϵ_snow,
+        density,
+        z_0m,
+        z_0b,
+        θ_r,
+        Ksat,
+        κ_snow,
+        ΔS,
+    )
+    boundary_conditions = AtmosDrivenSnowBC(
+        forcing.atmos,
+        forcing.radiation;
+        prognostic_land_components,
+    )
+    return SnowModel(; boundary_conditions, domain, parameters)
+end
+
+"""
+    prognostic_vars(::SnowModel)
+
+Returns the prognostic variable names of the snow model.
+
+For this model, we track the snow water equivalent S in meters (liquid
+water volume per ground area) and
+the energy per unit ground area U [J/m^2] prognostically.
+
+Note - this/below would need to change if model choices share variables,
+this assumes no overlap between parameterizations.
+"""
+prognostic_vars(m::SnowModel) = (
+    :S,
+    :S_l,
+    :U,
+    extra_prog_vars(m.parameters.density)...,
+    extra_prog_vars(m.parameters.α_snow)...,
+)
+
+"""
+    extra_prog_vars(::Union{AbstractDensityModel, AbstractAlbedoModel})
+
+A default method for adding prognostic variables to the snow model as required
+by the density and albedo model choices.
+"""
+extra_prog_vars(::Union{AbstractDensityModel, AbstractAlbedoModel}) = ()
+
+"""
+    prognostic_types(::SnowModel{FT})
+
+Returns the prognostic variable types of the snow model;
+both snow water equivalent and energy per unit ground area
+are scalars.
+"""
+prognostic_types(m::SnowModel{FT}) where {FT} = (
+    FT,
+    FT,
+    FT,
+    extra_prog_types(m.parameters.density)...,
+    extra_prog_types(m.parameters.α_snow)...,
+)
+
+"""
+    extra_prog_types(::Union{AbstractDensityModel, AbstractAlbedoModel})
+
+A default method for specifying variable types of the prognostic variables required
+by the density and albedo model choices, similar to `prognostic_types()`.
+"""
+extra_prog_types(
+    ::Union{AbstractDensityModel{FT}, AbstractAlbedoModel{FT}},
+) where {FT} = ()
+
+"""
+    prognostic_domain_names(::SnowModel)
+
+Returns the prognostic variable domain names of the snow model;
+both snow water equivalent and energy per unit ground area
+are modeling only as a function of (x,y), and not as a function
+of depth. Therefore their domain name is ":surface".
+"""
+prognostic_domain_names(m::SnowModel) = (
+    :surface,
+    :surface,
+    :surface,
+    extra_prog_domain_names(m.parameters.density)...,
+    extra_prog_domain_names(m.parameters.α_snow)...,
+)
+
+"""
+    extra_prog_domain_names(::Union{AbstractDensityModel, AbstractAlbedoModel})
+
+A default method for specifying variable domain names of the prognostic variables required
+by the density and albedo model choices, similar to `prognostic_domain_names()`.
+"""
+extra_prog_domain_names(::Union{AbstractDensityModel, AbstractAlbedoModel}) = ()
+
+"""
+    auxiliary_vars(::SnowModel)
+
+Returns the auxiliary variable names for the snow model. These
+include
+- the specific humidity at the surface of the snow (`q_sfc`, unitless),
+- the mass fraction in liquid water (`q_l`, unitless),
+- the thermal conductivity (`κ`, W/m/K),
+- the bulk temperature (`T`, K),
+- the surface temperature (`T_sfc`, K),
+- the snow depth (averaged over the ground area, like Y.snow.S) (`z_snow`, m),
+- the bulk snow density (`ρ_snow`, kg/m^3)
+- the SHF, LHF, and vapor flux (`turbulent_fluxes.shf`, etc),
+- the net radiation (`R_n, J/m^2/s)`,
+- the energy flux in liquid water runoff (`energy_runoff`, J/m^2/s),
+- the water volume in runoff (`water_runoff`, m/s),
+and the total energy and water fluxes applied to the snowpack.
+
+Since the snow can melt completely in one timestep, we clip the water and energy fluxes
+such that SWE cannot become negative and U cannot become unphysical. The
+clipped values are what are actually applied as boundary fluxes, and are stored in
+`applied_` fluxes.
+"""
+auxiliary_vars(snow::SnowModel) = (
+    :q_sfc,
+    :q_l,
+    :κ,
+    :T,
+    :T_sfc,
+    :z_snow,
+    :α_snow,
+    :ρ_snow,
+    :R_n,
+    :phase_change_flux,
+    :energy_runoff,
+    :water_runoff,
+    :liquid_water_flux,
+    :total_energy_flux,
+    :total_water_flux,
+    :applied_energy_flux,
+    :applied_water_flux,
+    :snow_cover_fraction,
+    surf_temp_auxiliary_vars(snow.parameters.surf_temp)...,
+    boundary_vars(snow.boundary_conditions, ClimaLand.TopBoundary())...,
+)
+
+auxiliary_types(snow::SnowModel{FT}) where {FT} = (
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    FT,
+    surf_temp_auxiliary_types(snow.parameters.surf_temp)...,
+    boundary_var_types(
+        snow,
+        snow.boundary_conditions,
+        ClimaLand.TopBoundary(),
+    )...,
+)
+
+auxiliary_domain_names(snow::SnowModel) = (
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    surf_temp_auxiliary_domain_names(snow.parameters.surf_temp)...,
+    boundary_var_domain_names(
+        snow.boundary_conditions,
+        ClimaLand.TopBoundary(),
+    )...,
+)
+
+"""
+    surf_temp_auxiliary_vars(::AbstractSnowSurfaceTemperatureModel)
+
+A default method for adding auxiliary variables to the snow model as required
+by the surface temperature parmaeterization choice.
+"""
+surf_temp_auxiliary_vars(m::AbstractSnowSurfaceTemperatureModel) = ()
+
+surf_temp_auxiliary_vars(m::EquilibriumGradientTemperatureModel) =
+    (:surf_residual_flux,)
+
+"""
+    surf_temp_auxiliary_types(::AbstractSnowSurfaceTemperatureModel)
+
+A default method for specifying variable types of the auxiliary variables required
+by the surface temperature parameterization choice, similar to `auxiliary_types()`.
+"""
+surf_temp_auxiliary_types(
+    m::AbstractSnowSurfaceTemperatureModel{FT},
+) where {FT} = ()
+
+surf_temp_auxiliary_types(
+    m::EquilibriumGradientTemperatureModel{FT},
+) where {FT} = (FT,)
+
+"""
+    surf_temp_auxiliary_domain_names(::AbstractSnowSurfaceTemperatureModel)
+
+A default method for specifying variable domain names of the auxiliary variables required
+by the surface temperature parameterization choice, similar to `auxiliary_domain_names()`.
+"""
+surf_temp_auxiliary_domain_names(m::AbstractSnowSurfaceTemperatureModel) = ()
+
+surf_temp_auxiliary_domain_names(m::EquilibriumGradientTemperatureModel) =
+    (:surface,)
+
+ClimaLand.name(::SnowModel) = :snow
+
+function ClimaLand.make_update_aux(model::SnowModel{FT}) where {FT}
+    NVTX.@annotate function update_aux!(p, Y, t)
+        parameters = model.parameters
+        # The ordering is important here
+        @. p.snow.q_l = liquid_mass_fraction(Y.snow.S, Y.snow.S_l)
+
+        update_density_and_depth!(
+            p.snow.ρ_snow,
+            p.snow.z_snow,
+            parameters.density,
+            Y,
+            p,
+            parameters.earth_param_set,
+        )
+
+        update_snow_albedo!(
+            p.snow.α_snow,
+            parameters.α_snow,
+            Y,
+            p,
+            t,
+            parameters.earth_param_set,
+        ) # This could depend on ρ_snow
+
+        @. p.snow.κ = snow_thermal_conductivity(
+            parameters.κ_snow,
+            p.snow.ρ_snow,
+            parameters.earth_param_set,
+        )
+
+        @. p.snow.T = snow_bulk_temperature(
+            Y.snow.U,
+            Y.snow.S,
+            p.snow.q_l,
+            parameters.ΔS,
+            parameters.earth_param_set,
+        )
+
+        @. p.snow.water_runoff = compute_water_runoff(
+            Y.snow.S,
+            Y.snow.S_l,
+            p.snow.T,
+            p.snow.ρ_snow,
+            p.snow.z_snow,
+            parameters.Ksat,
+            parameters.Δt,
+            parameters.θ_r,
+            parameters.earth_param_set,
+        )
+
+        @. p.snow.energy_runoff =
+            p.snow.water_runoff *
+            volumetric_internal_energy_liq(p.snow.T, parameters.earth_param_set)
+        update_snow_cover_fraction!(
+            p,
+            parameters.scf,
+            Y,
+            t,
+            parameters.earth_param_set,
+            model.boundary_conditions.prognostic_land_components,
+        ) # This depends on z_snow
+    end
+end
+
+function ClimaLand.make_update_boundary_fluxes(model::SnowModel{FT}) where {FT}
+    NVTX.@annotate function update_boundary_fluxes!(p, Y, t)
+        # First compute the boundary fluxes
+        snow_boundary_fluxes!(model.boundary_conditions, model, Y, p, t)
+        # Next, clip them in case the snow will melt in this timestep
+        @. p.snow.applied_water_flux = clip_water_flux(
+            Y.snow.S,
+            p.snow.total_water_flux,
+            model.parameters.Δt,
+        )
+
+        @. p.snow.applied_energy_flux = clip_total_snow_energy_flux(
+            Y.snow.U,
+            Y.snow.S,
+            p.snow.total_energy_flux,
+            p.snow.total_water_flux,
+            model.parameters.Δt,
+        )
+        # We now estimate the phase change flux: if the applied energy flux is such that T > T_f on the next step, use the residual after warming to T_f to melt snow
+        # This estimate uses the current S and q_l.
+        earth_param_set = model.parameters.earth_param_set
+        residual_melt_flux = get_residual_melt_flux(
+            model.parameters.surf_temp,
+            Y,
+            p,
+            earth_param_set,
+        )
+        _ρ_l = LP.ρ_cloud_liq(earth_param_set)
+        _LH_f0 = LP.LH_f0(earth_param_set)
+        # Energy already used for surface melt cannot also melt the bulk snow.
+        @. p.snow.phase_change_flux = phase_change_flux(
+            Y.snow.U,
+            Y.snow.S,
+            p.snow.q_l,
+            p.snow.applied_energy_flux -
+            _ρ_l * _LH_f0 * residual_melt_flux * p.snow.snow_cover_fraction,
+            model.parameters.Δt,
+            model.parameters.ΔS,
+            earth_param_set,
+        )
+        @. p.snow.liquid_water_flux +=
+            p.snow.phase_change_flux +
+            residual_melt_flux * p.snow.snow_cover_fraction
+        @. p.snow.liquid_water_flux = clip_liquid_water_flux(
+            Y.snow.S_l,
+            Y.snow.S,
+            p.snow.liquid_water_flux,
+            p.snow.applied_water_flux,
+            model.parameters.Δt,
+        )
+    end
+end
+
+function ClimaLand.make_compute_exp_tendency(model::SnowModel{FT}) where {FT}
+    NVTX.@annotate function compute_exp_tendency!(dY, Y, p, t)
+        # positive fluxes are TOWARDS atmos; negative fluxes increase quantity in snow
+        @. dY.snow.S = -p.snow.applied_water_flux
+        @. dY.snow.S_l = -p.snow.liquid_water_flux
+        @. dY.snow.U = -p.snow.applied_energy_flux
+        compute_extra_prog_tendency!(
+            model.parameters.density,
+            model,
+            dY,
+            Y,
+            p,
+            t,
+        )
+        compute_extra_prog_tendency!(
+            model.parameters.α_snow,
+            model,
+            dY,
+            Y,
+            p,
+            t,
+        )
+    end
+    return compute_exp_tendency!
+end
+
+"""
+    clip_water_flux(S, total_water_flux, Δt)
+
+A helper function which clips the total water flux so that
+snow water equivalent S will not become negative in a timestep Δt.
+"""
+function clip_water_flux(S::FT, total_water_flux::FT, Δt::FT) where {FT}
+    if S - total_water_flux * Δt < 0
+        return S / Δt
+    else
+        return total_water_flux
+    end
+end
+
+"""
+    clip_liquid_water_flux(S_l::FT, S::FT, liquid_water_flux::FT, applied_water_flux::FT, Δt::FT) where {FT}
+
+A helper function which clips the liquid water flux so that
+snow liquid water S_l will not become negative or exceed S in a timestep Δt.
+"""
+function clip_liquid_water_flux(
+    S_l::FT,
+    S::FT,
+    liquid_water_flux::FT,
+    applied_water_flux::FT,
+    Δt::FT,
+) where {FT}
+    predicted_S = S - applied_water_flux * Δt
+    predicted_S_l = S_l - liquid_water_flux * Δt
+    if predicted_S_l < 0
+        return S_l / Δt
+    elseif predicted_S_l > predicted_S
+        return (S_l - predicted_S) / Δt
+    else
+        return liquid_water_flux
+    end
+end
+
+"""
+     clip_total_snow_energy_flux(U, S, total_energy_flux, total_water_flux, Δt)
+
+A helper function which clips the total energy flux such that
+snow energy per unit ground area U will not become positive, and
+which ensures that if the snow water equivalent S goes to zero in a step,
+U will too.
+"""
+function clip_total_snow_energy_flux(
+    U,
+    S,
+    total_energy_flux,
+    total_water_flux,
+    Δt,
+)
+    if (U - total_energy_flux * Δt) > 0
+        return U / Δt
+    elseif S - total_water_flux * Δt < 0
+        return U / Δt
+    else
+        return total_energy_flux
+    end
+end
+
+"""
+    ClimaLand.get_drivers(model::SnowModel)
+
+Returns the driver variable symbols for the SnowModel.
+"""
+function ClimaLand.get_drivers(model::SnowModel)
+    return (
+        model.boundary_conditions.atmos,
+        model.boundary_conditions.radiation,
+    )
+end
+
+include("./snow_parameterizations.jl")
+include("./boundary_fluxes.jl")
+
+"""
+    ClimaLand.total_liq_water_vol_per_area!(
+        surface_field,
+        model::SnowModel,
+        Y,
+        p,
+        t,
+    )
+
+A function which updates `surface_field` in place with the value for
+the total liquid water volume per unit ground area for the `SnowModel`.
+
+This has already accounted for the area fraction of snow in the definition
+of S; it also accounts for both liquid and frozen water present in the snow,
+as the snow water equivalent is already the total liquid water volume present in the snow
+if all the snow melted, per unit ground area.
+"""
+function ClimaLand.total_liq_water_vol_per_area!(
+    surface_field,
+    model::SnowModel,
+    Y,
+    p,
+    t,
+)
+    surface_field .= Y.snow.S
+    return nothing
+end
+
+"""
+    ClimaLand.total_energy_per_area!(
+        surface_field,
+        model::SnowModel,
+        Y,
+        p,
+        t,
+    )
+
+A function which updates `surface_field` in place with the value for
+the total energy per unit ground area for the `SnowModel`.
+
+This has already accounted for the area fraction of snow in the definition
+of S.
+"""
+function ClimaLand.total_energy_per_area!(
+    surface_field,
+    model::SnowModel,
+    Y,
+    p,
+    t,
+)
+    surface_field .= Y.snow.U
+    return nothing
+end
+
+end

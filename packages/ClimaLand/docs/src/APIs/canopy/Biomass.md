@@ -1,0 +1,37 @@
+# Biomass
+
+```@meta
+CurrentModule = ClimaLand.Canopy
+```
+## Parameterizations
+
+```@docs
+ClimaLand.Canopy.PrescribedBiomassModel
+ClimaLand.Canopy.PrescribedBiomassModel{FT}(
+    domain,
+    LAI::AbstractTimeVaryingInput,
+    toml_dict::CP.ParamDict;
+    SAI::FT = toml_dict["SAI"],
+    RAI::FT = toml_dict["RAI"],
+    rooting_depth = clm_rooting_depth(domain.space.surface),
+    height = toml_dict["canopy_height"]
+) where {FT <: AbstractFloat}
+ClimaLand.Canopy.PrescribedBiomassModel{FT}(; LAI, SAI::FT, RAI::FT, rooting_depth, height::FT) where {FT}
+ClimaLand.Canopy.PrescribedAreaIndices
+ClimaLand.Canopy.PrescribedAreaIndices(
+    LAI::AbstractTimeVaryingInput,
+    SAI,
+    RAI,
+)
+ClimaLand.Canopy.prescribed_lai_era5
+ClimaLand.Canopy.prescribed_lai_modis
+ClimaLand.Canopy.prescribed_climatological_lai_modis
+ClimaLand.Canopy.update_biomass!
+ClimaLand.Canopy.mask_biomass!(p, prognostic_land_components)
+ClimaLand.Canopy.mask_biomass!(
+    p,
+    prognostic_land_components::Union{
+        Val{(:canopy, :lake, :snow, :soil, :soilco2)},
+        Val{(:canopy, :lake, :snow, :soil)},},
+)
+```

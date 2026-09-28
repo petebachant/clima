@@ -1,0 +1,1346 @@
+import ClimaUtilities.SpaceVaryingInputs: SpaceVaryingInput
+import ClimaUtilities.Regridders: InterpolationsRegridder
+import Interpolations
+using ClimaCore
+
+export make_set_initial_state_from_file,
+    make_set_initial_state_from_era5land,
+    make_set_initial_state_from_atmos_and_parameters
+
+regridder_type = :InterpolationsRegridder
+extrapolation_bc =
+    (Interpolations.Periodic(), Interpolations.Flat(), Interpolations.Flat())
+interpolation_method = Interpolations.Constant()
+"""
+    set_soil_initial_conditions!(Y, subsurface_space, soil_ic_path, soil; enforce_constraints = false, T_bounds = nothing)
+
+Sets the soil initial conditions, stored in `Y.soil.ϑ_l`, `Y.soil.θ_i`,
+`Y.soil.ρe_int`, and defined on the `subsurface_space`, using the values
+in the net cdf file stored at `soil_ic_path`.
+
+Since the values in the netcdf file have been interpolated once (to save the output),
+and interpolated again (onto the model grid), there is no guarantee that the liquid water
+content is above the residual, or that the total water is below porosity.
+ Although our model can simulate oversaturated soils, there
+is no guarantee that the initial conditions read in will be stable. Because of this, you
+can optionally enforce the constraint of ϑ_l > θ_r and θ_i + ϑ_l < ν
+by setting `enforce_constraints = true`. This will also clip the temperature to be
+in the range of `T_bounds`.
+"""
+function set_soil_initial_conditions!(
+    Y,
+    subsurface_space,
+    soil_ic_path,
+    soil,
+    ;
+    regridder_type = regridder_type,
+    extrapolation_bc = extrapolation_bc,
+    interpolation_method = interpolation_method,
+    enforce_constraints = false,
+    T_bounds = nothing,
+)
+    (; ν, θ_r) = soil.parameters
+
+    Y.soil.ϑ_l .= SpaceVaryingInput(
+        soil_ic_path,
+        "swc",
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    Y.soil.θ_i .= SpaceVaryingInput(
+        soil_ic_path,
+        "si",
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    Y.soil.ρe_int .= SpaceVaryingInput(
+        soil_ic_path,
+        "sie",
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    if enforce_constraints
+        Y.soil.ϑ_l .= enforce_residual_constraint.(Y.soil.ϑ_l, θ_r)
+        Y.soil.ϑ_l .= enforce_porosity_constraint.(Y.soil.ϑ_l, ν)
+        Y.soil.θ_i .=
+            enforce_residual_constraint.(Y.soil.θ_i, eltype(Y.soil.θ_i)(0))
+        Y.soil.θ_i .= enforce_porosity_constraint.(Y.soil.ϑ_l, Y.soil.θ_i, ν)
+        ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+            Y.soil.ϑ_l,
+            Y.soil.θ_i,
+            soil.parameters.ρc_ds,
+            soil.parameters.earth_param_set,
+        )
+        if ~isnothing(T_bounds)
+            T = ClimaLand.Soil.temperature_from_ρe_int.(
+                Y.soil.ρe_int,
+                Y.soil.θ_i,
+                ρc_s,
+                soil.parameters.earth_param_set,
+            )
+            T .= clip_to_bounds.(T, T_bounds[1], T_bounds[2])
+            Y.soil.ρe_int .= ClimaLand.Soil.volumetric_internal_energy.(
+                Y.soil.θ_i,
+                ρc_s,
+                T,
+                soil.parameters.earth_param_set,
+            )
+        end
+    end
+    return nothing
+end
+
+"""
+    set_soilco2_initial_conditions!(Y, p, land)
+
+Initialize soil CO2 state to be consistent with atmospheric CO2 and soil state.
+CO2 is stored as carbon mass per soil volume (kg C m⁻³ soil).
+
+This assumes that the soil moisture state (`Y.soil.ϑ_l` and `Y.soil.θ_i`)
+has already been set.
+"""
+function set_soilco2_initial_conditions!(Y, p, land)
+    FT = eltype(Y.soilco2.CO2)
+    soil = land.soil
+    soilco2 = land.soilco2
+    params = soilco2.parameters
+
+    θ_i = Y.soil.θ_i
+    ν = soil.parameters.ν
+    # Clip ϑ_l so total water θ_l + θ_i ≤ ν; otherwise effective_porosity
+    # is computed from unphysical θ_l.
+    θ_l = min.(Y.soil.ϑ_l, ν .- θ_i)
+    θ_w = θ_l .+ θ_i
+
+    ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+        θ_l,
+        θ_i,
+        soil.parameters.ρc_ds,
+        soil.parameters.earth_param_set,
+    )
+    T_soil = ClimaLand.Soil.temperature_from_ρe_int.(
+        Y.soil.ρe_int,
+        θ_i,
+        ρc_s,
+        soil.parameters.earth_param_set,
+    )
+
+    θ_a = ClimaLand.Soil.Biogeochemistry.volumetric_air_content.(θ_w, ν)
+    R = ClimaLand.Parameters.gas_constant(params.earth_param_set)
+    M_C = params.M_C
+
+    K_H = @. ClimaLand.Soil.Biogeochemistry.henry_constant(
+        params.K_H_co2_298,
+        params.dln_K_H_co2_dT,
+        T_soil,
+        params.T_ref_henry,
+    )
+    β = @. ClimaLand.Soil.Biogeochemistry.beta_gas(K_H, R, T_soil)
+    θ_eff = @. ClimaLand.Soil.Biogeochemistry.effective_porosity(θ_a, θ_l, β)
+    @. Y.soilco2.CO2 =
+        θ_eff * p.drivers.c_co2 * p.drivers.P * M_C / (R * T_soil)
+    # Exponential O2 profile: 0.21 at z=0, 0.15 at z=-1 m (k = ln(0.21/0.15)).
+    # Soil O2 decreases with depth as roots and microbes consume it; the exact
+    # profile depends on porosity, biological activity, and water content, but a
+    # decaying profile is a more realistic starting point than uniform atmospheric
+    # 0.21.
+    z = soil.domain.fields.z
+    k_o2 = FT(log(0.21 / 0.15))
+    @. Y.soilco2.O2 =
+        θ_eff * FT(0.21) * p.drivers.P * params.M_O2 / (R * T_soil) *
+        exp(k_o2 * z)
+
+    set_soilco2_SOC_from_soilgrids!(Y.soilco2.SOC)
+    return nothing
+end
+
+"""
+    set_soilco2_SOC_from_soilgrids!(SOC_field)
+
+Initialize the prognostic soil organic carbon field `SOC_field` (kgC m⁻³)
+using the SoilGrids organic carbon density dataset.
+
+The data is regridded onto the 3D subsurface space of `SOC_field`. Above
+the shallowest data level (-0.025 m) values are extrapolated flat in depth,
+matching the convention used for the SoilGrids-based soil composition
+parameters. Below the deepest data level (-1.5 m) the regridder also holds
+the value flat; we then apply an exponential decay with e-folding depth
+`L_decay` to better represent the typical decline of SOC at depth (e.g.
+Jobbágy & Jackson, 2000). Ocean / missing-data grid points are zero in the
+source file and therefore come through as zero.
+"""
+function set_soilco2_SOC_from_soilgrids!(SOC_field)
+    FT = eltype(SOC_field)
+    subsurface_space = axes(SOC_field)
+    path = ClimaLand.Artifacts.soil_grids_ocd_artifact_path(;
+        context = ClimaComms.context(subsurface_space),
+    )
+    SOC_field .= SpaceVaryingInput(
+        path,
+        "ocd",
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    z = ClimaCore.Fields.coordinate_field(subsurface_space).z
+    z_data_bottom = FT(-1.5)
+    L_decay = FT(0.5)
+    @. SOC_field = ifelse(
+        z < z_data_bottom,
+        SOC_field * exp((z - z_data_bottom) / L_decay),
+        SOC_field,
+    )
+    return nothing
+end
+
+"""
+    clip_to_bounds(
+    T::FT,
+    lb::FT,
+    ub::FT,
+) where {FT <: AbstractFloat}
+
+Clips `T` to be in the bounds [lb, ub].
+
+In our initial condition function, this is used to ensure that the temperature of the soil
+is within a physical range.
+"""
+function clip_to_bounds(T::FT, lb::FT, ub::FT) where {FT <: AbstractFloat}
+    if T > ub
+        return ub
+    elseif T < lb
+        return lb
+    else
+        return T
+    end
+end
+
+"""
+     enforce_residual_constraint(ϑ_l::FT ,θ_r::FT)
+
+Enforces the constraint that ϑ_l > θ_r by returning 1.1 θ_r
+if ϑ_l < θ_r, and ϑ_l otherwise.
+"""
+function enforce_residual_constraint(ϑ_l::FT, θ_r::FT) where {FT}
+    if ϑ_l < θ_r * FT(1.05)
+        return θ_r * FT(1.05)
+    else
+        return ϑ_l
+    end
+end
+
+
+"""
+    enforce_porosity_constraint(ϑ_l::FT, ν::FT)
+
+Enforces the constraint that ϑ_l <= ν.
+"""
+function enforce_porosity_constraint(ϑ_l::FT, ν::FT) where {FT}
+    if ϑ_l > ν * FT(0.95) # if we exceed porosity
+        return FT(0.95) * ν # clip water content to 95% of available pore space
+    else
+        return ϑ_l
+    end
+end
+"""
+        enforce_porosity_constraint(ϑ_l::FT, θ_i::FT, ν::FT, θ_r::FT)
+
+Enforces the constraint that ϑ_l + θ_i <= ν, by clipping the ice content to be
+95% (ν-ϑ_l), or leaving it unchanged if the constraint is already satisfied.
+"""
+function enforce_porosity_constraint(ϑ_l::FT, θ_i::FT, ν::FT) where {FT}
+    if ϑ_l + θ_i > FT(0.95) * ν # if we exceed porosity
+        return FT(0.95) * (ν - ϑ_l) # clip ice content to 95% of available pore space
+    else
+        return θ_i
+    end
+end
+
+
+"""
+    set_snow_initial_conditions!(Y, p, surface_space, snow_ic_path, params)
+
+Sets the snow initial conditions, stored in `Y.snow.S`, `Y.snow.S_l`,
+`Y.snow.U`, and defined on the `surface_space`, using the values
+in the net cdf file stored at `snow_ic_path`.
+
+We assume that S_l = 0 and that the temperature of the snow has been updated
+in p.snow.T.
+"""
+function set_snow_initial_conditions!(
+    Y,
+    p,
+    surface_space,
+    snow_ic_path,
+    params;
+    regridder_type = regridder_type,
+    extrapolation_bc = extrapolation_bc,
+    interpolation_method = interpolation_method,
+)
+    Y.snow.S .= SpaceVaryingInput(
+        snow_ic_path,
+        "swe",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    Y.snow.S_l .= 0
+    p.snow.T .= enforce_snow_temperature_constraint.(Y.snow.S, p.snow.T)
+    Y.snow.U .= ClimaLand.Snow.energy_from_T_and_swe.(
+        Y.snow.S,
+        p.snow.T,
+        params.ΔS,
+        params.earth_param_set,
+    )
+    FT = eltype(Y.snow.U)
+    if :Z in propertynames(Y.snow)
+        #no depth field in spin-up file: start with reasonable guess (snow density 333 kg/m^3)
+        Y.snow.Z .= FT(3) .* Y.snow.S
+    end
+    if :A in propertynames(Y.snow)
+        FT = eltype(Y.snow.S)
+        #no albedo field in spin-up file: start with reasonable guess
+        Y.snow.A .= FT(0.8)
+    end
+    return nothing
+end
+
+"""
+    enforce_snow_temperature_constraint(S::FT, T::FT)
+
+Enforces the constraint that T < 273.15 if S > 0.
+"""
+function enforce_snow_temperature_constraint(S::FT, T::FT) where {FT}
+    if S > sqrt(eps(FT)) # if snow is on the ground
+        return min(T, FT(273.15))
+    else
+        return FT(273.16)
+    end
+end
+
+"""
+    set_canopy_component_initial_conditions!(Y, p, model::ClimaLand.Canopy.AbstractCanopyComponent, canopy)
+
+Sets the initial state of the canopy component in `Y`.
+"""
+set_canopy_component_initial_conditions!(
+    Y,
+    p,
+    model::ClimaLand.Canopy.AbstractCanopyComponent,
+    canopy,
+) = nothing
+
+"""
+    set_canopy_component_initial_conditions!(Y, p, model::ClimaLand.Canopy.BigLeafEnergyModel, canopy)
+
+Sets the initial state of the canopy energy component in `Y` using the air temperature.
+"""
+function set_canopy_component_initial_conditions!(
+    Y,
+    p,
+    model::ClimaLand.Canopy.BigLeafEnergyModel,
+    canopy,
+)
+    Y.canopy.energy.T .= p.drivers.T
+end
+
+
+"""
+    optimal_lai_initial_conditions(
+        surface_space,
+        data_path = ClimaLand.Artifacts.optimal_lai_initial_conditions_path(; context = ClimaComms.context(surface_space));
+        regridder_type = :InterpolationsRegridder,
+        extrapolation_bc = (
+            Interpolations.Periodic(),
+            Interpolations.Flat(),
+        ),
+        interpolation_method = Interpolations.Constant(),
+    )
+
+Reads the optimal-LAI climatology from a NetCDF file and regrids it to
+`surface_space`, returning a NamedTuple of ClimaCore Fields. It is read once, by
+`set_canopy_component_initial_conditions!`, to set the optimal-LAI prognostic state;
+the tendencies do not use it.
+
+This function returns fields for:
+- `GSL`: Growing season length (days)
+- `A0_annual`: Annual potential GPP (mol CO2 m^-2 yr^-1)
+- `precip_annual`: Mean annual precipitation (mol H2O m^-2 yr^-1)
+- `vpd_gs`: Average VPD during growing season (Pa)
+- `lai_init`: Initial LAI from MODIS (m^2 m^-2)
+- `f0`: Spatially varying fraction of precipitation for transpiration (dimensionless)
+
+The NetCDF file should contain variables `gsl`, `a0_annual`, `precip_annual`, `vpd_gs`,
+`lai_init`, and `f0` on a (lon, lat) grid.
+
+# Arguments
+- `surface_space`: The ClimaCore surface space to regrid to
+- `data_path`: Path to the NetCDF file containing the data (default: from ClimaArtifacts)
+
+# Keyword Arguments
+- `regridder_type`: Type of regridder to use (default: `:InterpolationsRegridder`)
+- `extrapolation_bc`: Boundary conditions for extrapolation (default: Periodic in lon, Flat in lat)
+- `interpolation_method`: Interpolation method (default: `Interpolations.Constant()`)
+
+# Example
+```julia
+ic_data = optimal_lai_initial_conditions(surface_space)
+lai_init = ic_data.lai_init
+```
+
+# Notes
+- The file is expected to have lon and lat coordinates
+- All variables (gsl, a0_annual, precip_annual, vpd_gs, lai_init, f0) are required
+"""
+function optimal_lai_initial_conditions(
+    surface_space,
+    data_path::AbstractString = ClimaLand.Artifacts.optimal_lai_initial_conditions_path(;
+        context = ClimaComms.context(surface_space),
+    );
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (Interpolations.Periodic(), Interpolations.Flat()),
+    interpolation_method = Interpolations.Constant(),
+)
+    GSL = SpaceVaryingInput(
+        data_path,
+        "gsl",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    A0_annual = SpaceVaryingInput(
+        data_path,
+        "a0_annual",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    precip_annual = SpaceVaryingInput(
+        data_path,
+        "precip_annual",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    vpd_gs = SpaceVaryingInput(
+        data_path,
+        "vpd_gs",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    lai_init = SpaceVaryingInput(
+        data_path,
+        "lai_init",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    f0 = SpaceVaryingInput(
+        data_path,
+        "f0",
+        surface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+
+    return (;
+        GSL = GSL,
+        A0_annual = A0_annual,
+        precip_annual = precip_annual,
+        vpd_gs = vpd_gs,
+        lai_init = lai_init,
+        f0 = f0,
+    )
+end
+
+"""
+    set_canopy_component_initial_conditions!(
+        Y,
+        p,
+        model::ClimaLand.Canopy.ZhouOptimalLAIModel{FT},
+        canopy,
+        ic_path = ClimaLand.Artifacts.optimal_lai_initial_conditions_path(;
+            context = ClimaComms.context(axes(Y.canopy.biomass.LAI)),
+        ),
+        max_lai = ClimaLand.Canopy.modis_max_lai(axes(Y.canopy.biomass.LAI)),
+        fractional_c3 = ClimaLand.Canopy.static_fractional_c3(canopy.photosynthesis),
+        Mc = canopy.photosynthesis.constants.Mc,
+    ) where {FT}
+
+Sets the optimal-LAI prognostic state in `Y.canopy.biomass` (`LAI`, `A0_daily`,
+`A0_annual`, `precip_annual`, `PET_annual`, `VPDA0_annual`, `growing_days`,
+`A0c3_annual`, `A0c4_annual`, `GPPc3_annual`) from the netCDF file at `ic_path`,
+which must contain `lai_init`, `a0_annual`, `precip_annual`, `vpd_gs`, `gsl` and `f0`
+on a (lon, lat) grid.
+
+With the default path, `LAI` starts from the MODIS observation, which shortens the
+spin-up. The annual totals start at their climatological values, which are their
+steady state whatever `tau_long_term`; `A0_daily` starts at the daily share of
+`A0_annual`.
+
+`PET_annual`, `VPDA0_annual` and `growing_days` are seeded so that `f0`, `vpd_gs`
+and `GSL` start at the artifact values they replace, then relax to the simulated
+climate over `tau_long_term`. Since `f0(AI)` peaks at `f0_max`, the `f0` seed uses
+the arid branch of the inverse, and a cell whose artifact `f0` exceeds the peak
+seeds to the peak.
+
+Where the file has no data (over ocean, which a coastal cell can pick up, and `f0`
+south of 60°S), the state starts from a bare canopy with no climate history: `LAI`
+and the annual totals are zero, and `f0` is seeded at `f0_max`.
+
+`A0c3_annual` starts at `a0_annual`. `GPPc3_annual`, the realized C3 GPP the tree
+cover is estimated from, is seeded as `A0c3_annual` scaled by the fAPAR of the MODIS
+annual maximum LAI (`max_lai`) rather than of `lai_init`, a single-date snapshot: over
+a year the potential GPP is concentrated in the leafy season, so the peak fAPAR is the
+closer estimate of the GPP-weighted annual value.
+
+No per-pathway climatology exists, so `A0c4_annual` is seeded by inverting the C3/C4
+competition (`c4_advantage_for_c3_fraction`): given that tree share, it is the C4
+potential GPP at which the competition returns the static C3 map `fractional_c3` (the
+photosynthesis model's; `Mc` is the molar mass of carbon). Where the map is pure C3 the
+seed is `A0c4_annual = 0`, which leaves a small C4 grass share in the open canopy.
+"""
+function set_canopy_component_initial_conditions!(
+    Y,
+    p,
+    model::ClimaLand.Canopy.ZhouOptimalLAIModel{FT},
+    canopy,
+    ic_path = ClimaLand.Artifacts.optimal_lai_initial_conditions_path(;
+        context = ClimaComms.context(axes(Y.canopy.biomass.LAI)),
+    ),
+    max_lai = ClimaLand.Canopy.modis_max_lai(axes(Y.canopy.biomass.LAI)),
+    fractional_c3 = ClimaLand.Canopy.static_fractional_c3(
+        canopy.photosynthesis,
+    ),
+    Mc = canopy.photosynthesis.constants.Mc,
+) where {FT}
+    ic = optimal_lai_initial_conditions(axes(Y.canopy.biomass.LAI), ic_path)
+    nan_to_zero(x) = ifelse(isnan(x), zero(x), x)
+    Y.canopy.biomass.LAI .= nan_to_zero.(ic.lai_init)
+    Y.canopy.biomass.A0_annual .= nan_to_zero.(ic.A0_annual)
+    Y.canopy.biomass.precip_annual .= nan_to_zero.(ic.precip_annual)
+    Y.canopy.biomass.A0_daily .= Y.canopy.biomass.A0_annual ./ FT(365)
+
+    # Seed PET so the online f0 starts at the artifact value it replaces.
+    f0_max = model.parameters.f0_max
+    AI_seed = @. ClimaLand.Canopy.aridity_from_f0(
+        ifelse(isnan(ic.f0), f0_max, ic.f0),
+        f0_max,
+    )
+    Y.canopy.biomass.PET_annual .= AI_seed .* Y.canopy.biomass.precip_annual
+    # vpd_gs is recovered as VPDA0_annual / A0_annual.
+    Y.canopy.biomass.VPDA0_annual .=
+        nan_to_zero.(ic.vpd_gs) .* Y.canopy.biomass.A0_annual
+    Y.canopy.biomass.growing_days .= nan_to_zero.(ic.GSL)
+    Y.canopy.biomass.A0c3_annual .= Y.canopy.biomass.A0_annual
+    k = model.parameters.k
+    @. Y.canopy.biomass.GPPc3_annual =
+        Y.canopy.biomass.A0c3_annual * (1 - exp(-k * nan_to_zero(max_lai)))
+    parameters = model.parameters
+    @. Y.canopy.biomass.A0c4_annual =
+        Y.canopy.biomass.A0c3_annual * (
+            1 + ClimaLand.Canopy.c4_advantage_for_c3_fraction(
+                fractional_c3,
+                ClimaLand.Canopy.tree_share_from_gpp(
+                    Y.canopy.biomass.GPPc3_annual,
+                    Mc,
+                    parameters,
+                ),
+                parameters,
+            )
+        )
+    return nothing
+end
+
+"""
+    set_canopy_component_initial_conditions!(
+        Y,
+        p,
+        model::ClimaLand.Canopy.PModel{FT},
+        canopy,
+    ) where {FT}
+
+Sets the PModel initial conditions: the acclimated capacities are those optimal for
+the initial atmospheric state under a nominal midday light level, rather than under
+the instantaneous one, so that a simulation starting at night does not begin with
+zero capacities and spend ~1 month (two e-folding timescales of α) climbing out of
+them.
+
+The capacities are canopy-level and linear in absorbed light, so the nominal light
+level is scaled by the vegetated fraction of the column: over an inland water cell,
+where the canopy area indices are masked to zero, the acclimated capacities start at
+zero as well, and no phantom canopy respiration is carried into the run.
+
+An alternative to this approach is to initialize the initial optimal values to some reasonable values
+based on a spun-up simulation.
+"""
+function set_canopy_component_initial_conditions!(
+    Y,
+    p,
+    model::ClimaLand.Canopy.PModel{FT},
+    canopy,
+) where {FT}
+    parameters = model.parameters
+    constants = model.constants
+    # drivers
+    P_air = p.drivers.P
+    T_air = p.drivers.T
+    q_air = p.drivers.q
+    c_co2_air = p.drivers.c_co2
+    T_canopy = T_air
+    thermo_params = LP.thermodynamic_parameters(canopy.earth_param_set)
+    βm = FT(1)
+    # nominal midday light (mol/m^2/s, from 1000 μmol/m^2/s) over the vegetated
+    # fraction of the column. This allocates, but only on initialization.
+    APAR_canopy_moles =
+        hasproperty(p, :lake_fraction) ? FT(1e-3) .* (1 .- p.lake_fraction) :
+        FT(1e-3)
+    @. Y.canopy.photosynthesis.acclimated =
+        ClimaLand.Canopy.compute_optimal_capacities(
+            parameters,
+            constants,
+            thermo_params,
+            T_canopy,
+            T_air,
+            P_air,
+            q_air,
+            c_co2_air,
+            βm,
+            APAR_canopy_moles,
+        )
+
+    return nothing
+end
+
+"""
+    make_set_initial_state_from_file(ic_path, land::LandModel{FT}; enforce_constraints=false) where {FT}
+
+Returns a function which takes (Y,p,t0,land) as arguments, and updates
+the state Y in place with initial conditions from `ic_path`, a netCDF file.
+Fields in the cache `p` are used as pre-allocated memory and are updated as
+well, but this does not mean that the cache state is consitent with Y and t entirely.
+
+Currently only tested and used for global simulations, but the same returned
+function should work for column simulations.
+
+The returned function is a closure for `ic_path`. It could also be for `land`, as
+many other ClimaLand functions are, but we wish to preserve the argument `land`
+in `set_ic!` for users who wish to define their own initial condition function,
+which may require parameters, etc, stored in `land`.
+
+If `enforce_constraints = true`, we ensure the soil water content is between porosity and the
+residual value, and that the temperature is bounded to be within the extrema of the air temperature
+at the surface.
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers` has
+been updated already.
+"""
+function make_set_initial_state_from_file(
+    ic_path,
+    land::LandModel{FT};
+    enforce_constraints = false,
+) where {FT}
+    function set_land_ic!(Y, p, t0, land)
+        atmos = land.soil.boundary_conditions.top.atmos
+        if atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, atmos.T, t0)
+            evaluate!(p.drivers.P, atmos.P, t0)
+            evaluate!(p.drivers.q, atmos.q, t0)
+            evaluate!(p.drivers.c_co2, atmos.c_co2, t0)
+        end
+        # Soil IC
+        if enforce_constraints
+            # get only the values over land
+            T_atmos = Array(parent(p.drivers.T))[:]
+            T_bounds = extrema(T_atmos[T_atmos .> sqrt(eps(FT))])
+        else
+            T_bounds = nothing
+        end
+
+        set_soil_initial_conditions!(
+            Y,
+            land.soil.domain.space.subsurface,
+            ic_path,
+            land.soil;
+            T_bounds,
+            enforce_constraints,
+        )
+
+        # SoilCO2 IC (requires soil state)
+        if !isnothing(land.soilco2)
+            set_soilco2_initial_conditions!(Y, p, land)
+        end
+
+        # Snow IC
+        # Use soil temperature at top to set IC
+        soil = land.soil
+        ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+            min.(Y.soil.ϑ_l, soil.parameters.ν .- Y.soil.θ_i), # θ_l
+            Y.soil.θ_i,
+            soil.parameters.ρc_ds,
+            soil.parameters.earth_param_set,
+        )
+        p.soil.T .= ClimaLand.Soil.temperature_from_ρe_int.(
+            Y.soil.ρe_int,
+            Y.soil.θ_i,
+            ρc_s,
+            soil.parameters.earth_param_set,
+        )
+        T_sfc = ClimaLand.Domains.top_center_to_surface(p.soil.T)
+        p.snow.T .= T_sfc
+        set_snow_initial_conditions!(
+            Y,
+            p,
+            land.snow.domain.space.surface,
+            ic_path,
+            land.snow.parameters,
+        )
+
+        # Canopy component IC
+        # The lake fraction is needed by the canopy ICs, which must not seed
+        # canopy state where the canopy is masked out; the cache update sets it
+        # again later.
+        ClimaLand.set_lake_fraction!(p, land)
+        # First determine if leaf water potential is in the file. If so, use
+        # that to set the IC; otherwise choose steady state with the soil water.
+        ds = NCDataset(ic_path, "r")
+        variable_names = keys(ds)
+        close(ds)
+        if land.canopy.hydraulics isa ClimaLand.Canopy.PlantHydraulicsModel
+            if "lwp" ∈ variable_names
+                ψ_roots = SpaceVaryingInput(
+                    ic_path,
+                    "lwp",
+                    land.canopy.domain.space.surface;
+                    regridder_type,
+                    regridder_kwargs = (;
+                        extrapolation_bc,
+                        interpolation_method,
+                    ),
+                )
+                Y.canopy.hydraulics.ϑ_l .=
+                    ClimaLand.Canopy.inverse_water_retention_curve.(
+                        land.canopy.hydraulics.parameters.retention_model,
+                        ψ_roots,
+                        land.canopy.hydraulics.parameters.ν,
+                        land.canopy.hydraulics.parameters.S_s,
+                    ) .* land.canopy.hydraulics.parameters.ν
+            else
+                @. p.soil.ψ = ClimaLand.Soil.pressure_head(
+                    land.soil.parameters.hydrology_cm,
+                    land.soil.parameters.θ_r,
+                    Y.soil.ϑ_l,
+                    land.soil.parameters.ν - Y.soil.θ_i,
+                    land.soil.parameters.S_s,
+                )
+                ψ_roots = ClimaCore.Fields.zeros(axes(Y.canopy.hydraulics.ϑ_l))
+                z = land.soil.domain.fields.z
+                tmp = @. ClimaLand.Canopy.root_distribution(
+                    z,
+                    land.canopy.biomass.rooting_depth,
+                ) * p.soil.ψ / land.soil.domain.fields.depth
+                ClimaCore.Operators.column_integral_definite!(ψ_roots, tmp)
+            end
+        end
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.energy,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.biomass,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.photosynthesis,
+            land.canopy,
+        )
+
+        # Lake IC
+        if !isnothing(land.lake)
+            set_lake_initial_conditions!(Y, p, t0, land.lake)
+        end
+    end
+    return set_land_ic!
+end
+
+"""
+    make_set_initial_state_from_file(ic_path, land::SoilCanopyModel{FT}; enforce_constraints = false) where {FT}
+
+Returns a function which takes (Y,p,t0,land) as arguments, and updates
+the state Y in place with initial conditions from `ic_path`, a netCDF file.
+Fields in the cache `p` are used as pre-allocated memory and are updated as
+well, but this does not mean that the cache state is consitent with Y and t entirely.
+
+Currently only tested and used for global simulations, but the same returned
+function should work for column simulations.
+
+The returned function is a closure for `ic_path`. It could also be for `land`, as
+many other ClimaLand functions are, but we wish to preserve the argument `land`
+in `set_ic!` for users who wish to define their own initial condition function,
+which may require parameters, etc, stored in `land`.
+
+If `enforce_constraints = true`, we ensure the soil water content is between porosity and the
+residual value, and that the temperature is bounded to be within the extrema of the air temperature
+at the surface.
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers` has
+been updated already.
+"""
+function make_set_initial_state_from_file(
+    ic_path,
+    land::SoilCanopyModel{FT};
+    enforce_constraints = false,
+) where {FT}
+    function set_ic!(Y, p, t0, land)
+        atmos = land.soil.boundary_conditions.top.atmos
+        if atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, atmos.T, t0)
+            evaluate!(p.drivers.P, atmos.P, t0)
+            evaluate!(p.drivers.q, atmos.q, t0)
+            evaluate!(p.drivers.c_co2, atmos.c_co2, t0)
+        end
+
+        if enforce_constraints
+            # get only the values over land
+            T_atmos = Array(parent(p.drivers.T))[:]
+            T_bounds = extrema(T_atmos[T_atmos .> sqrt(eps(FT))])
+        else
+            T_bounds = nothing
+        end
+
+        set_soil_initial_conditions!(
+            Y,
+            land.soil.domain.space.subsurface,
+            ic_path,
+            land.soil;
+            T_bounds,
+            enforce_constraints,
+        )
+
+        # SoilCO2 IC (requires soil state)
+        if !isnothing(land.soilco2)
+            set_soilco2_initial_conditions!(Y, p, land)
+        end
+
+        # Canopy IC
+        # First determine if leaf water potential is in the file. If so, use
+        # that to set the IC; otherwise choose steady state with the soil water.
+        ds = NCDataset(ic_path, "r")
+        variable_names = keys(ds)
+        close(ds)
+        if land.canopy.hydraulics isa ClimaLand.Canopy.PlantHydraulicsModel
+            if "lwp" ∈ variable_names
+                ψ_roots = SpaceVaryingInput(
+                    ic_path,
+                    "lwp",
+                    land.canopy.domain.space.surface;
+                    regridder_type,
+                    regridder_kwargs = (;
+                        extrapolation_bc,
+                        interpolation_method,
+                    ),
+                )
+                Y.canopy.hydraulics.ϑ_l .=
+                    ClimaLand.Canopy.inverse_water_retention_curve.(
+                        land.canopy.hydraulics.parameters.retention_model,
+                        ψ_roots,
+                        land.canopy.hydraulics.parameters.ν,
+                        land.canopy.hydraulics.parameters.S_s,
+                    ) .* land.canopy.hydraulics.parameters.ν
+            else
+                @. p.soil.ψ = ClimaLand.Soil.pressure_head(
+                    land.soil.parameters.hydrology_cm,
+                    land.soil.parameters.θ_r,
+                    Y.soil.ϑ_l,
+                    land.soil.parameters.ν - Y.soil.θ_i,
+                    land.soil.parameters.S_s,
+                )
+                ψ_roots = ClimaCore.Fields.zeros(axes(Y.canopy.hydraulics.ϑ_l))
+                z = land.soil.domain.fields.z
+                tmp = @. ClimaLand.Canopy.root_distribution(
+                    z,
+                    land.canopy.biomass.rooting_depth,
+                ) * p.soil.ψ / land.soil.domain.fields.depth
+                ClimaCore.Operators.column_integral_definite!(ψ_roots, tmp)
+            end
+        end
+        # Canopy component IC
+        # The lake fraction is needed by the canopy ICs, which must not seed
+        # canopy state where the canopy is masked out; the cache update sets it
+        # again later.
+        ClimaLand.set_lake_fraction!(p, land)
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.energy,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.biomass,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.photosynthesis,
+            land.canopy,
+        )
+    end
+    return set_ic!
+end
+
+"""
+    make_set_initial_state_from_file(ic_path, model::ClimaLand.Soil.EnergyHydrology{FT}; enforce_constraints = false) where {FT}
+
+Returns a function which takes (Y,p,t0,model) as arguments, and updates
+the state Y in place with initial conditions from `ic_path`, a netCDF file.
+Fields in the cache `p` are used as pre-allocated memory and are updated as
+well, but this does not mean that the cache state is consitent with Y and t entirely.
+
+Currently only tested and used for global simulations, but the same returned
+function should work for column simulations.
+
+The returned function is a closure for `ic_path`. It could also be for `model`, as
+many other ClimaLand functions are, but we wish to preserve the argument `model`
+in `set_ic!` for users who wish to define their own initial condition function,
+which may require parameters, etc, stored in `model`.
+
+If `enforce_constraints = true`, we ensure the soil water content is between porosity and the
+residual value, and that the temperature is bounded to be within the extrema of the air temperature
+at the surface.
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers.T` has
+been updated already.
+"""
+function make_set_initial_state_from_file(
+    ic_path,
+    model::ClimaLand.Soil.EnergyHydrology{FT};
+    enforce_constraints = false,
+) where {FT}
+    function set_ic!(Y, p, t0, model)
+        atmos = model.boundary_conditions.top.atmos
+        if atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, atmos.T, t0)
+        end
+        if enforce_constraints
+            # get only the values over land
+            T_atmos = Array(parent(p.drivers.T))[:]
+            T_bounds = extrema(T_atmos[T_atmos .> sqrt(eps(FT))])
+        else
+            T_bounds = nothing
+        end
+        set_soil_initial_conditions!(
+            Y,
+            model.domain.space.subsurface,
+            ic_path,
+            model;
+            T_bounds,
+            enforce_constraints,
+        )
+    end
+    return set_ic!
+end
+
+"""
+     make_set_initial_state_from_era5land(ic_path)
+
+Creates and returns a function `set_ic!(Y,p,t,model)` which updates `Y` in place with
+the initial conditions from the file `ic_path`, which is assumed to be an nc file
+using the naming convention of ERA5 Land.
+These initial conditions are analytical for some variables and read in from file for others.
+
+The input file `ic_path` is expected to contain the following variables:
+- "tsn": snow temperature
+- "swe": snow water equivalent
+- "swvl": soil total water content
+- "stl": soil temperature
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers` has
+been updated already.
+"""
+function make_set_initial_state_from_era5land(
+    ic_path;
+    regridder_type = :InterpolationsRegridder,
+    extrapolation_bc = (
+        Interpolations.Periodic(),
+        Interpolations.Flat(),
+        Interpolations.Flat(),
+    ),
+    interpolation_method = Interpolations.Linear(),
+)
+    function set_ic!(Y, p, t, land)
+        atmos = ClimaLand.get_drivers(land)[1]
+        if atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, atmos.T, t)
+            evaluate!(p.drivers.P, atmos.P, t)
+            evaluate!(p.drivers.q, atmos.q, t)
+            evaluate!(p.drivers.c_co2, atmos.c_co2, t)
+        end
+        domain = ClimaLand.get_domain(land)
+        surface_space = domain.space.surface
+        subsurface_space = domain.space.subsurface
+        FT = eltype(Y.soil.ϑ_l)
+
+        # Set initial conditions that aren't read in from file.
+        # Y.soilco2.CO2 stores total CO₂ as carbon mass per soil volume
+        # (kg C m⁻³ soil) = θ_eff · c_g; the value below is a representative
+        # atmospheric-equilibrium initial guess (~412 ppm at 1 atm, 283 K,
+        # θ_eff ≈ 0.3) and is rapidly replaced by the diffusive boundary
+        # condition on the first time step.
+        if !isnothing(land.soilco2)
+            # Bulk densities: storage = θ_eff · gas-phase concentration, with
+            # θ_eff = θ_a + β·θ_l (air-filled pores + dissolved in pore water).
+            Y.soilco2.CO2 .= FT(6e-5)   # kg C m⁻³ soil (≈ θ_eff · c_atm · P·M_C/(R·T))
+            Y.soilco2.O2 .= FT(0.08)    # kg O₂ m⁻³ soil (≈ θ_eff · 0.21 · P·M_O2/(R·T))
+            set_soilco2_SOC_from_soilgrids!(Y.soilco2.SOC)
+        end
+        Y.canopy.hydraulics.ϑ_l .= land.canopy.hydraulics.parameters.ν
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.energy,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.biomass,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.photosynthesis,
+            land.canopy,
+        )
+        # Set snow T first to use in computing snow internal energy from IC file
+        p.snow.T .= SpaceVaryingInput(
+            ic_path,
+            "tsn",
+            surface_space;
+            regridder_type,
+            regridder_kwargs = (; extrapolation_bc, interpolation_method),
+        )
+
+        set_snow_initial_conditions!(
+            Y,
+            p,
+            surface_space,
+            ic_path,
+            land.snow.parameters;
+            regridder_type = regridder_type,
+            extrapolation_bc = extrapolation_bc,
+            interpolation_method = interpolation_method,
+        )
+
+        set_soil_initial_conditions_from_temperature_and_total_water!(
+            Y,
+            subsurface_space,
+            ic_path,
+            land.soil;
+            regridder_type = regridder_type,
+            extrapolation_bc = extrapolation_bc,
+            interpolation_method = interpolation_method,
+        )
+    end
+    return set_ic!
+end
+
+function set_soil_initial_conditions_from_temperature_and_total_water!(
+    Y,
+    subsurface_space,
+    soil_ic_path,
+    soil;
+    water_varname = "swvl",
+    temp_varname = "stl",
+    regridder_type = regridder_type,
+    extrapolation_bc = extrapolation_bc,
+    interpolation_method = interpolation_method,
+)
+    total_water_content = SpaceVaryingInput(
+        soil_ic_path,
+        water_varname,
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    temperature = SpaceVaryingInput(
+        soil_ic_path,
+        temp_varname,
+        subsurface_space;
+        regridder_type,
+        regridder_kwargs = (; extrapolation_bc, interpolation_method),
+    )
+    # The interpolation of gridded date to field is not mask aware.
+    # This results in unphysical values along the coast.
+    # To mitigate, we find the bounds of the land values in the data
+    # (ocean values assumed set to zero),
+    # and clip the interpolated field to lie within those bounds.
+    raw_data = NCDataset(soil_ic_path)
+    raw_temp_data = raw_data[temp_varname][:]
+    FT = eltype(Y.soil.ϑ_l)
+    T_bounds = FT.(extrema(raw_temp_data[raw_temp_data .> 0]))
+    close(raw_data)
+    temperature .= clip_to_bounds.(temperature, T_bounds[1], T_bounds[2])
+    (; θ_r, ν, ρc_ds, earth_param_set) = soil.parameters
+    _T_freeze = LP.T_freeze(earth_param_set)
+    function liquid_soil_water(twc, T, θ_r, ν)
+        if T > _T_freeze
+            return twc
+        else
+            return θ_r
+        end
+    end
+
+    Y.soil.ϑ_l .= liquid_soil_water.(total_water_content, temperature, θ_r, ν)
+    Y.soil.θ_i .= total_water_content .- Y.soil.ϑ_l
+
+    Y.soil.ϑ_l .= enforce_residual_constraint.(Y.soil.ϑ_l, θ_r)
+    Y.soil.ϑ_l .= enforce_porosity_constraint.(Y.soil.ϑ_l, ν)
+    Y.soil.θ_i .=
+        enforce_residual_constraint.(Y.soil.θ_i, eltype(Y.soil.θ_i)(0))
+    Y.soil.θ_i .= enforce_porosity_constraint.(Y.soil.ϑ_l, Y.soil.θ_i, ν)
+    ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+        Y.soil.ϑ_l,
+        Y.soil.θ_i,
+        ρc_ds,
+        earth_param_set,
+    )
+    Y.soil.ρe_int .= ClimaLand.Soil.volumetric_internal_energy.(
+        Y.soil.θ_i,
+        ρc_s,
+        temperature,
+        earth_param_set,
+    )
+    return nothing
+end
+
+"""
+    make_set_initial_state_from_file(ic_path, model::ClimaLand.Bucket.BucketModel)
+
+Returns a function which takes (Y,p,t0,model) as arguments, and updates
+the state Y of the `BucketModel` in place with initial conditions from
+`ic_path`, a path to a netCDF file with variables `W`, `Ws`, `T`, and `S`.
+
+The returned function is a closure for `ic_path` and `model`.
+"""
+function make_set_initial_state_from_file(
+    ic_path,
+    land::ClimaLand.Bucket.BucketModel,
+)
+    function set_ic!(Y, p, t0, land)
+        ds = NCDataset(ic_path)
+        has_all_variables = all(key -> haskey(ds, key), ["W", "Ws", "T", "S"])
+        @assert has_all_variables "The bucket iniital condition file is expected to contain the variables W, Ws, T, and S (read documentation about requirements)."
+        close(ds)
+
+        domain = land.domain
+        surface_space = domain.space.surface
+        subsurface_space = domain.space.subsurface
+
+        Y.bucket.W .= SpaceVaryingInput(
+            ic_path,
+            "W",
+            surface_space;
+            regridder_type,
+            regridder_kwargs = (; extrapolation_bc,),
+        )
+        Y.bucket.Ws .= SpaceVaryingInput(
+            ic_path,
+            "Ws",
+            surface_space;
+            regridder_type,
+            regridder_kwargs = (; extrapolation_bc,),
+        )
+        Y.bucket.T .= SpaceVaryingInput(
+            ic_path,
+            "T",
+            subsurface_space;
+            regridder_type,
+            regridder_kwargs = (; extrapolation_bc,),
+        )
+        Y.bucket.σS .= SpaceVaryingInput(
+            ic_path,
+            "S",
+            surface_space;
+            regridder_type,
+            regridder_kwargs = (; extrapolation_bc,),
+        )
+        FT = eltype(Y.bucket.W)
+        # clip negative values from horizontal regridding
+        Y.bucket.σS .= max.(Y.bucket.σS, FT(0))
+        Y.bucket.W .= max.(Y.bucket.W, FT(0))
+        Y.bucket.Ws .= max.(Y.bucket.Ws, FT(0))
+        # ensure initial storage < bucket capacity
+        Y.bucket.W .= min.(Y.bucket.W, land.parameters.W_f)
+    end
+    return set_ic!
+end
+
+
+"""
+    make_set_initial_state_from_atmos_and_parameters(
+               land::ClimaLand.Bucket.BucketModel
+    )
+
+Returns a function set_ic!(Y,p,t0,bucket) which sets the bucket initial conditions like:
+Y.bucket.W .= bucket.parameters.W_f
+Y.bucket.Ws .= 0
+Y.bucket.σS .= 0
+Y.bucket.T .= p.drivers.T # at every level
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers.T` has
+been updated already.
+"""
+function make_set_initial_state_from_atmos_and_parameters(
+    land::ClimaLand.Bucket.BucketModel,
+)
+    function set_ic!(Y, p, t0, land)
+        if land.atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, land.atmos.T, t0)
+        end
+        Y.bucket.W .= land.parameters.W_f
+        Y.bucket.Ws .= 0
+        Y.bucket.σS .= 0
+        # Broadcasting over the data extrudes the surface temperature over every
+        # level in one kernel. The `zero` term contributes nothing but makes the
+        # spaces match
+        ClimaCore.Fields.field_values(Y.bucket.T) .=
+            ClimaCore.Fields.field_values(p.drivers.T) .+
+            zero.(ClimaCore.Fields.field_values(Y.bucket.T))
+    end
+    return set_ic!
+end
+
+
+"""
+    make_set_initial_state_from_atmos_and_parameters(land::LandModel{FT}) where {FT}
+
+Returns a function which takes (Y,p,t0,land) as arguments, and updates
+the state Y in place with initial conditions from parameter values and the
+atmospheric temperature.
+
+It is assumed that in CoupledAtmosphere simulations that `p.drivers.T` has
+been updated already.
+"""
+function make_set_initial_state_from_atmos_and_parameters(
+    land::LandModel{FT},
+) where {FT}
+    function set_ic!(Y, p, t0, land)
+        atmos = ClimaLand.get_drivers(land)[1]
+        earth_param_set = ClimaLand.get_earth_param_set(land.soil)
+        if atmos isa ClimaLand.PrescribedAtmosphere
+            evaluate!(p.drivers.T, atmos.T, t0)
+            evaluate!(p.drivers.P, atmos.P, t0)
+            evaluate!(p.drivers.q, atmos.q, t0)
+            evaluate!(p.drivers.c_co2, atmos.c_co2, t0)
+        end
+        (; θ_r, ν, ρc_ds) = land.soil.parameters
+        @. Y.soil.ϑ_l = θ_r + (ν - θ_r) / 2
+        Y.soil.θ_i .= FT(0.0)
+        ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+            Y.soil.ϑ_l,
+            Y.soil.θ_i,
+            ρc_ds,
+            earth_param_set,
+        )
+        Y.soil.ρe_int .= ClimaLand.Soil.volumetric_internal_energy.(
+            Y.soil.θ_i,
+            ρc_s,
+            p.drivers.T,
+            earth_param_set,
+        )
+
+        # SoilCO2 IC (requires soil state). Y.soilco2.CO2 and Y.soilco2.O2 store
+        # total mass per unit bulk soil volume (kg C m⁻³ soil and kg O₂ m⁻³ soil),
+        # i.e. storage = θ_eff · gas-phase concentration, with θ_eff = θ_a + β·θ_l
+        # accounting for the air-filled pore space plus gas dissolved in pore water.
+        # The values below are representative atmospheric-equilibrium initial guesses
+        # (θ_eff ≈ 0.3 at standard T, P) and are rapidly replaced by the diffusive
+        # boundary condition on the first time step.
+        if !isnothing(land.soilco2)
+            Y.soilco2.CO2 .= FT(6e-5)   # ≈ θ_eff · c_atm · P·M_C/(R·T)
+            Y.soilco2.O2 .= FT(0.08)    # ≈ θ_eff · 0.21 · P·M_O2/(R·T)
+            set_soilco2_SOC_from_soilgrids!(Y.soilco2.SOC)
+        end
+
+        Y.snow.S .= FT(0)
+        Y.snow.S_l .= FT(0)
+        Y.snow.U .= FT(0)
+
+        # Canopy component IC
+        # The lake fraction is needed by the canopy ICs, which must not seed
+        # canopy state where the canopy is masked out; the cache update sets it
+        # again later.
+        ClimaLand.set_lake_fraction!(p, land)
+        Y.canopy.hydraulics.ϑ_l .= land.canopy.hydraulics.parameters.ν
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.energy,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.biomass,
+            land.canopy,
+        )
+        set_canopy_component_initial_conditions!(
+            Y,
+            p,
+            land.canopy.photosynthesis,
+            land.canopy,
+        )
+
+        # Lake IC
+        if !isnothing(land.lake)
+            set_lake_initial_conditions!(Y, p, t0, land.lake)
+        end
+    end
+    return set_ic!
+end
+
+"""
+    set_lake_initial_conditions!(Y, p, t0, model::ClimaLand.InlandWater.SlabLakeModel{FT}) where {FT}
+
+Set initial conditions for the slab lake model.
+
+The lake energy is initialised using the atmospheric temperature (`p.drivers.T`),
+We assume that this has already
+been updated in the case where the atmosphere model is a CoupledAtmosphere.
+"""
+function set_lake_initial_conditions!(
+    Y,
+    p,
+    t0,
+    model::ClimaLand.InlandWater.SlabLakeModel{FT},
+) where {FT}
+    atmos = model.boundary_conditions.atmos
+    if atmos isa ClimaLand.PrescribedAtmosphere
+        evaluate!(p.drivers.T, atmos.T, t0)
+    end
+    @. Y.lake.U = ClimaLand.InlandWater.lake_energy_from_temperature(
+        p.drivers.T,
+        model.parameters,
+    )
+    return nothing
+end

@@ -1,0 +1,599 @@
+export SoilSnowModel
+using ClimaCore.Operators: column_integral_definite!
+using NVTX
+
+
+"""
+    struct SoilSnowModel{
+        FT,
+        SnM <: Snow.SnowModel{FT},
+        SoM <: Soil.EnergyHydrology{FT},
+    } <: AbstractLandModel{FT}
+        "The snow model to be used"
+        snow::SnM
+        "The soil model to be used"
+        soil::SoM
+    end
+
+A concrete type of land model used for simulating systems with
+snow and soil.
+
+The inner constructor checks that the two models are consistent with
+respect to the forcing (atmos, radiation), the parameters, the domain,
+and the prognostic land components of the model.
+$(DocStringExtensions.FIELDS)
+"""
+struct SoilSnowModel{
+    FT,
+    SnM <: Snow.SnowModel{FT},
+    SoM <: Soil.EnergyHydrology{FT},
+} <: AbstractLandModel{FT}
+    "The snow model to be used"
+    snow::SnM
+    "The soil model to be used"
+    soil::SoM
+    function SoilSnowModel{FT}(; snow, soil) where {FT <: AbstractFloat}
+        prognostic_land_components = (:snow, :soil)
+        top_soil_bc = soil.boundary_conditions.top
+        snow_bc = snow.boundary_conditions
+        @assert top_soil_bc.prognostic_land_components ==
+                prognostic_land_components
+        @assert snow_bc.prognostic_land_components == prognostic_land_components
+
+        @assert top_soil_bc.atmos == snow_bc.atmos
+        @assert top_soil_bc.radiation == snow_bc.radiation
+
+        @assert Domains.obtain_surface_domain(soil.domain) == snow.domain
+
+        @assert soil.parameters.earth_param_set ==
+                snow.parameters.earth_param_set
+        new{FT, typeof(snow), typeof(soil)}(snow, soil)
+    end
+
+end
+
+"""
+    SoilSnowModel{FT}(
+        forcing,
+        toml_dict::CP.ParamDict,
+        domain::Union{ClimaLand.Domains.Column, ClimaLand.Domains.SphericalShell},
+        Δt;
+        soil = Soil.EnergyHydrology{FT}(
+            domain,
+            forcing,
+            toml_dict;
+            prognostic_land_components = (:snow, :soil),
+            additional_sources = (),
+        ),
+        snow = Snow.SnowModel(
+            FT,
+            ClimaLand.Domains.obtain_surface_domain(domain),
+            forcing,
+            toml_dict,
+            Δt;
+            prognostic_land_components = (:snow, :soil,),
+        ),
+    ) where {FT}
+
+A convenience constructor for setting up the default `SoilSnowModel`,
+where all the parameterizations and parameter values are set to default values
+or passed in via the `toml_dict`. The boundary conditions of all models
+correspond to `forcing` with the atmosphere, as specified by `forcing`, a NamedTuple
+of the form (;atmos, radiation), with `atmos` an `AbstractAtmosphericDriver` and `radiation`
+an `AbstractRadiativeDriver`. The domain must be a ClimaLand domain with a vertical extent.
+Finally, since the snow model requires the timestep, that is a required argument as well.
+"""
+function SoilSnowModel{FT}(
+    forcing,
+    toml_dict::CP.ParamDict,
+    domain::Union{
+        ClimaLand.Domains.Column,
+        ClimaLand.Domains.SphericalShell,
+        ClimaLand.Domains.HybridBox,
+    },
+    Δt;
+    soil = Soil.EnergyHydrology{FT}(
+        domain,
+        forcing,
+        toml_dict;
+        prognostic_land_components = (:snow, :soil),
+        additional_sources = (),
+    ),
+    snow = Snow.SnowModel(
+        FT,
+        ClimaLand.Domains.obtain_surface_domain(domain),
+        forcing,
+        toml_dict,
+        Δt;
+        prognostic_land_components = (:snow, :soil),
+    ),
+) where {FT}
+    return SoilSnowModel{FT}(; snow, soil)
+end
+
+"""
+    lsm_aux_vars(m::SoilSnowModel)
+
+The names of the additional auxiliary variables that are
+included in the integrated Soil-Snow model.
+"""
+lsm_aux_vars(m::SoilSnowModel) = (
+    :excess_water_flux,
+    :excess_heat_flux,
+    :ground_heat_flux,
+    :snow_T_bot,
+    :effective_soil_sfc_T,
+    :sfc_scratch,
+    :subsfc_scratch,
+    :effective_soil_sfc_depth,
+    :bare_soil_fraction,
+)
+"""
+    lsm_aux_types(m::SoilSnowModel)
+
+The types of the additional auxiliary variables that are
+included in the integrated Soil-Snow model.
+"""
+lsm_aux_types(m::SoilSnowModel{FT}) where {FT} =
+    (FT, FT, FT, FT, FT, FT, FT, FT, FT)
+
+"""
+    lsm_aux_domain_names(m::SoilSnowModel)
+
+The domain names of the additional auxiliary variables that are
+included in the integrated Soil-Snow model.
+"""
+lsm_aux_domain_names(m::SoilSnowModel) = (
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :surface,
+    :subsurface,
+    :surface,
+    :surface,
+)
+
+"""
+    make_update_boundary_fluxes(
+        land::SoilSnowModel{FT, SnM, SoM},
+    ) where {
+        FT,
+        SnM <: Snow.SnowModel{FT},
+        SoM <: Soil.EnergyHydrology{FT},
+        }
+
+A method which makes a function; the returned function updates the additional
+auxiliary variables for the integrated model, as well as updates the boundary
+auxiliary variables for all component models.
+
+This function is called each ode function evaluation, prior to the tendency function
+evaluation.
+
+In this method, we
+1. Compute the ground heat flux between soil and snow. This is required to update the snow and soil boundary fluxes
+2. Update the snow boundary fluxes, which also computes any excess flux of energy or water which occurs when the snow
+completely melts in a step. In this case, that excess must go to the soil for conservation
+3. Update the soil boundary fluxes use precomputed ground heat flux and excess fluxes from snow.
+4. Compute the net flux for the atmosphere, which is useful for assessing conservation.
+"""
+function make_update_boundary_fluxes(
+    land::SoilSnowModel{FT, SnM, SoM},
+) where {FT, SnM <: Snow.SnowModel{FT}, SoM <: Soil.EnergyHydrology{FT}}
+    update_soil_bf! = make_update_boundary_fluxes(land.soil)
+    update_snow_bf! = make_update_boundary_fluxes(land.snow)
+    NVTX.@annotate function update_boundary_fluxes!(p, Y, t)
+        @. p.bare_soil_fraction = 1 .- p.snow.snow_cover_fraction
+        # First compute the ground heat flux in place:
+        update_soil_snow_ground_heat_flux!(
+            p,
+            Y,
+            land.soil.parameters,
+            land.snow.parameters,
+            land.soil.domain,
+            FT,
+        )
+        #Now update snow boundary conditions, which rely on the ground heat flux
+        update_snow_bf!(p, Y, t)
+        # Now we have access to the actual applied and initially computed fluxes for snow
+        @. p.excess_water_flux =
+            (p.snow.total_water_flux - p.snow.applied_water_flux)
+        @. p.excess_heat_flux =
+            (p.snow.total_energy_flux - p.snow.applied_energy_flux)
+        # Now we can update the soil BC, and use the excess fluxes there in order
+        # to conserve energy and water
+        update_soil_bf!(p, Y, t)
+        return nothing
+    end
+    return update_boundary_fluxes!
+end
+
+"""
+    update_soil_snow_ground_heat_flux!(p, Y, soil_params, snow_params, soil_domain, FT)
+
+Computes and updates `p.ground_heat_flux` with the ground heat flux. We approximate this
+as
+    F_g = - g_eff (T_snow_bottom - T_soil_sfc)
+
+where:
+    g_eff = κ_soil * κ_snow / (κ_snow * Δz_soil / 2 + κ_soil * Δz_snow / 2).
+
+Here `T_snow_bottom` is the temperature at the base of the snowpack 
+ and `T_soil_sfc` is the temperature of the top soil layer. The flux
+is positive when energy flows from the soil up into the snowpack.
+
+For simplicit, we assume that the thickness of the bottom layer of the
+snowpack is the same as the thickness of the soil top layer.
+When the snowpack is less than this 
+thickness in height, we use the thickness the snowpack directly.
+"""
+NVTX.@annotate function update_soil_snow_ground_heat_flux!(
+    p,
+    Y,
+    soil_params,
+    snow_params,
+    soil_domain,
+    FT,
+)
+    κ_snow = p.snow.κ
+    κ_soil = ClimaLand.Domains.top_center_to_surface(p.soil.κ)
+    Δz_soil = soil_domain.fields.Δz_top
+    Δz_snow = Δz_soil
+    T̄ = p.snow.T
+    T_sfc = p.snow.T_sfc
+    T_soil = ClimaLand.Domains.top_center_to_surface(p.soil.T)
+    @. p.snow_T_bot = snow_T_bottom(
+        κ_snow,
+        κ_soil * κ_snow /
+        (κ_snow * Δz_soil / 2 + κ_soil * min(p.snow.z_snow, Δz_snow) / 2), # g_eff
+        T_soil,
+        T̄,
+        T_sfc,
+        max(p.snow.z_snow, eps(FT)),
+        p.snow.ρ_snow,
+        snow_params.earth_param_set,
+    )
+    # compute the flux
+    # g_eff = κ_soil * κ_snow / (κ_snow * Δz_soil / 2 + κ_soil * Δz_snow / 2)
+    @. p.ground_heat_flux =
+        -κ_soil * κ_snow /
+        (κ_snow * Δz_soil / 2 + κ_soil * min(p.snow.z_snow, Δz_snow) / 2) *
+        (p.snow_T_bot - T_soil)
+    return nothing
+end
+
+"""
+    snow_T_bottom(
+        κ::FT,
+        g_eff::FT,
+        T_soil::FT,
+        T̄::FT,
+        T_sfc::FT,
+        z::FT,
+        ρ::FT,
+        earth_param_set,
+    ) where {FT}
+
+A parameterization for the temperature at the bottom of the snowpack.
+
+The arguments are the snow thermal conductivity `κ`, the effective snow-soil
+conductance `g_eff`, the top soil temperature `T_soil`, the bulk snow temperature `T̄`,
+the snow surface temperature `T_sfc`, the snow depth `z`, the snow density `ρ`, and the
+`earth_param_set`. The skin-layer depth `d = surface_temp_scaling_length(κ, ρ, z, …)` is
+the same length scale used to diagnose the surface temperature (if that parameterization
+is chosen).
+
+We assume a piecewise-linear temperature profile within the snowpack, with `x` measured
+upward from the base (`x = 0` at the bottom, `x = z` at the surface):
+
+```
+T(x) = T_bot + (T(d) - T_bot) / (z - d) * x           for 0   <= x <= z-d
+T(x) = T(d)  + (T_sfc - T(d)) / d * (x - (z - d))      for z-d <= x <= z
+```
+
+subject to the following constraints:
+
+```
+(1) ∑F(T_sfc) = -κ (T_sfc - T(d)) / d   OR   T_sfc = T̄    # surface energy balance, or T_sfc set to the bulk temp
+(2) T̄ = 1/2 [ (T_sfc + T(d)) (d/z) + (T(d) + T_bot) (z-d)/z ]   # profile average equals the bulk temperature
+(3) -κ/(z-d) (T(d) - T_bot) = -g_eff (T_bot - T_soil)          # flux continuity at the snow-soil interface
+```
+
+Constraint (1) determines `T_sfc` (an input here); solving (2) and (3) for `T_bot` gives
+the formula below. The result is capped at the freezing temperature.
+
+Limiting behavior:
+- if `d << z` (deep snow), `T_bot` satisfies `-κ/(z/2) (T̄ - T_bot) = -g_eff (T_bot - T_soil)`;
+- if `d -> z` (shallow snow), `T_bot = 2 T̄ - T_sfc`, and since `T̄ = 1/2 (T(d) + T_sfc)`
+  this gives `T(d) = T_bot`.
+
+Both limits are physically reasonable.
+"""
+function snow_T_bottom(
+    κ::FT,
+    g_eff::FT,
+    T_soil::FT,
+    T̄::FT,
+    T_sfc::FT,
+    z::FT,
+    ρ::FT,
+    earth_param_set,
+) where {FT}
+    d = Snow.surface_temp_scaling_length(κ, ρ, z, earth_param_set)
+    _T_freeze = LP.T_freeze(earth_param_set)
+    return min(
+        (2 * T̄ - d / z * T_sfc + g_eff * (z - d) / κ * T_soil) /
+        (g_eff / κ * (z - d) + 1 + (z - d) / z),
+        _T_freeze,
+    )
+end
+
+
+### Extensions of existing functions to account for prognostic soil/snow
+"""
+    snow_boundary_fluxes!(
+        bc::AtmosDrivenSnowBC,
+        prognostic_land_components::Val{(:snow, :soil)},
+        model::SnowModel{FT},
+        Y,
+        p,
+        t,
+    ) where {FT}
+
+A method of `snow_boundary_fluxes!` which computes the boundary fluxes for the
+snow model accounting for a heat flux between the soil and snow.
+
+The snow surface is assumed to be bare (no vegetation).
+
+Currently this is almost identical to the method for snow alone, except for the
+inclusion of the ground heat flux (precomputed by the integrated land model).
+However, this will change more if e.g. we allow for transmission of radiation
+through the snowpack.
+"""
+NVTX.@annotate function snow_boundary_fluxes!(
+    bc::Snow.AtmosDrivenSnowBC,
+    prognostic_land_components::Val{(:snow, :soil)},
+    model::SnowModel{FT},
+    Y,
+    p,
+    t,
+) where {FT}
+
+    SW_net = @. lazy((p.snow.α_snow - 1) * p.drivers.SW_d) #match sign convention in ./shared_utilities/drivers.jl
+    Snow.update_surf_temp!(
+        model,
+        model.parameters.surf_temp,
+        SW_net,
+        p.drivers.LW_d,
+        Y,
+        p,
+        t,
+    )
+    _σ = LP.Stefan(model.parameters.earth_param_set)
+    ϵ_snow = model.parameters.ϵ_snow
+    LW_net = @. lazy(-ϵ_snow * (p.drivers.LW_d - _σ * p.snow.T_sfc^4)) #match sign convention in ./shared_utilities/drivers.jl
+    p.snow.R_n .= SW_net .+ LW_net
+
+    turbulent_fluxes!(p.snow.turbulent_fluxes, bc.atmos, model, Y, p, t)
+    P_snow = p.drivers.P_snow
+    P_liq = p.drivers.P_liq
+
+    @. p.snow.total_water_flux =
+        P_snow +
+        (P_liq + p.snow.turbulent_fluxes.vapor_flux - p.snow.water_runoff) *
+        p.snow.snow_cover_fraction
+    @. p.snow.liquid_water_flux =
+        (
+            P_liq + p.snow.turbulent_fluxes.vapor_flux * p.snow.q_l -
+            p.snow.water_runoff
+        ) * p.snow.snow_cover_fraction
+
+    e_flux_falling_snow = Snow.energy_flux_falling_snow(
+        bc.atmos,
+        p,
+        model.parameters.earth_param_set,
+    )
+    e_flux_falling_rain = Snow.energy_flux_falling_rain(
+        bc.atmos,
+        p,
+        model.parameters.earth_param_set,
+    )
+
+    # positive fluxes are TOWARDS atmos
+    p.snow.total_energy_flux .=
+        e_flux_falling_snow .+
+        (
+            p.snow.turbulent_fluxes.lhf .+ p.snow.turbulent_fluxes.shf .+
+            p.snow.R_n .- p.snow.energy_runoff .- p.ground_heat_flux .+
+            e_flux_falling_rain
+        ) .* p.snow.snow_cover_fraction
+end
+
+"""
+    soil_boundary_fluxes!(
+        bc::AtmosDrivenFluxBC{<:PrescribedAtmosphere, <:PrescribedRadiativeFluxes},
+         prognostic_land_components::Val{(:snow, :soil)},
+        soil::EnergyHydrology,
+        Y,
+        p,
+        t,
+    )
+
+A method of `ClimaLand.Soil.soil_boundary_fluxes!` which is used for
+integrated land surface models; this computes and returns the net
+energy and water flux at the surface of the soil for use as boundary
+conditions, taking into account the presence of snow on the surface.
+"""
+NVTX.@annotate function soil_boundary_fluxes!(
+    bc::AtmosDrivenFluxBC,
+    prognostic_land_components::Val{(:snow, :soil)},
+    soil::EnergyHydrology,
+    Y,
+    p,
+    t,
+)
+    turbulent_fluxes!(p.soil.turbulent_fluxes, bc.atmos, soil, Y, p, t)
+    net_radiation!(p.soil.R_n, bc.radiation, soil, Y, p, t)
+    # Liquid influx is a combination of precipitation and snowmelt in general
+    liquid_influx =
+        Soil.compute_liquid_influx(p, soil, prognostic_land_components)
+    # This partitions the influx into runoff and infiltration
+    Soil.update_infiltration_water_flux!(
+        p,
+        bc.runoff,
+        liquid_influx,
+        Y,
+        t,
+        soil,
+    )
+    # This computes the energy of the infiltrating water
+    infiltration_energy_flux = Soil.compute_infiltration_energy_flux(
+        p,
+        bc.runoff,
+        bc.atmos,
+        prognostic_land_components,
+        liquid_influx,
+        soil,
+        Y,
+        t,
+    )
+    # The actual boundary condition is a mix of liquid water infiltration and
+    # evaporation. The infiltration already has accounted for snow cover fraction,
+    # because the influx it is computed from has accounted for that.
+    # The last term, `excess water flux`, arises when snow melts in a timestep but
+    # has a nonzero sublimation which was applied for the entire step.
+    @. p.soil.top_bc.water =
+        p.soil.infiltration +
+        p.excess_water_flux +
+        p.bare_soil_fraction * p.soil.turbulent_fluxes.vapor_flux_liq
+    @. p.soil.top_bc.heat =
+        p.bare_soil_fraction * (
+            p.soil.R_n +
+            p.soil.turbulent_fluxes.lhf +
+            p.soil.turbulent_fluxes.shf
+        ) +
+        p.excess_heat_flux +
+        p.snow.snow_cover_fraction * p.ground_heat_flux +
+        infiltration_energy_flux
+
+    return nothing
+end
+
+"""
+   compute_liquid_influx(p,
+                         model,
+                         prognostic_land_components::Val{(:snow, :soil,)},
+    )
+
+Returns the liquid water volume flux at the surface of the soil,
+accounting for snowmelt and rainfall.
+"""
+NVTX.@annotate function Soil.compute_liquid_influx(
+    p,
+    model,
+    prognostic_land_components::Val{(:snow, :soil)},
+)
+    return @. lazy(
+        p.snow.water_runoff * p.snow.snow_cover_fraction +
+        p.bare_soil_fraction * p.drivers.P_liq,
+    )
+end
+
+"""
+    compute_infiltration_energy_flux(
+        p,
+        runoff,
+        atmos,
+        prognostic_land_components::Val{(::snow, :soil,)},
+        liquid_influx,
+        model::EnergyHydrology,
+        Y,
+        t,
+    )
+
+Computes the energy associated with infiltration of
+liquid water into the soil.
+
+For a mix of snowmelt and rainfall, we compute the energy flux fraction due to each like:
+Infiltration * (P_liq*(1-σ)/Influx * ρe(T_air)+snowmelt_water_flux *σ/Influx * ρe(T_snow))
+i.e.,
+Infiltration * (f_rain * ρe(T_air) + f_snow * ρe(T_snow)), where f_rain  = 1- f_snow, since
+Influx = P_liq * (1-σ) + snowmelt * σ. Here, σ is the snow cover fraction, and ρe(T) refers
+to the volumetric internal energy of liquid water at temperature T.
+"""
+NVTX.@annotate function Soil.compute_infiltration_energy_flux(
+    p,
+    runoff,
+    atmos,
+    prognostic_land_components::Val{(:snow, :soil)},
+    liquid_influx,
+    model::EnergyHydrology,
+    Y,
+    t,
+)
+    earth_param_set = model.parameters.earth_param_set
+    infiltration_fraction = @. lazy(
+        Soil.compute_infiltration_fraction(p.soil.infiltration, liquid_influx),
+    )
+    return @. lazy(
+        infiltration_fraction * (
+            p.drivers.P_liq *
+            p.bare_soil_fraction *
+            Soil.volumetric_internal_energy_liq(p.drivers.T, earth_param_set) +
+            p.snow.energy_runoff * p.snow.snow_cover_fraction
+        ),
+    )
+end
+
+function ClimaLand.Soil.sublimation_source(::Val{(:snow, :soil)}, FT)
+    return PartialAreaSoilSublimation{FT}()
+end
+
+"""
+    PartialAreaSoilSublimation{FT} <: AbstractSoilSource{FT}
+
+Soil Sublimation source type. Used to defined a method
+of `ClimaLand.source!` for soil sublimation with snow or lakes present.
+"""
+@kwdef struct PartialAreaSoilSublimation{FT} <:
+              ClimaLand.Soil.AbstractSoilSource{FT}
+    explicit::Bool = true
+end
+
+"""
+    source!(dY::ClimaCore.Fields.FieldVector,
+            src::PartialAreaSoilSublimation{FT},
+            Y::ClimaCore.Fields.FieldVector,
+            p::NamedTuple,
+            model
+            )
+
+Updates `dY.soil.θ_i` in place with a term due to sublimation; this only affects
+the surface layer of soil.
+"""
+NVTX.@annotate function ClimaLand.source!(
+    dY::ClimaCore.Fields.FieldVector,
+    src::PartialAreaSoilSublimation{FT},
+    Y::ClimaCore.Fields.FieldVector,
+    p::NamedTuple,
+    model,
+) where {FT}
+    _ρ_i = FT(LP.ρ_cloud_ice(model.parameters.earth_param_set))
+    _ρ_l = FT(LP.ρ_cloud_liq(model.parameters.earth_param_set))
+    z = model.domain.fields.z
+    Δz_top = model.domain.fields.Δz_top # this returns the center-face distance, not layer thickness
+    @. dY.soil.θ_i +=
+        -p.soil.turbulent_fluxes.vapor_flux_ice * p.bare_soil_fraction * _ρ_l /
+        _ρ_i * heaviside(z + 2 * Δz_top) / (2 * Δz_top) # only apply to top layer, recall that z is negative
+    @. dY.soil.∫F_vol_liq_water_dt +=
+        -p.soil.turbulent_fluxes.vapor_flux_ice * p.bare_soil_fraction # The integral of the source is designed to be this
+    return nothing
+end
+
+function ClimaLand.get_drivers(model::SoilSnowModel)
+    return (
+        model.snow.boundary_conditions.atmos,
+        model.snow.boundary_conditions.radiation,
+    )
+end

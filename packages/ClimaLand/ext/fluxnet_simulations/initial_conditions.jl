@@ -1,0 +1,300 @@
+"""
+    FluxnetSimulations.make_set_fluxnet_initial_conditions(
+        site_ID,
+        start_date,
+        hour_offset_from_UTC,
+        model,
+    )
+
+Creates and returns a function `set_ic!(Y,p,t,model)` which
+updates `Y` in place with an estimated set of initial conditions
+based on the fluxnet observations at `site_ID` at the `start_date` in UTC,
+and the type of the `model`.
+In order to convert between local time and UTC, the hour offset from
+UTC is required.
+"""
+function FluxnetSimulations.make_set_fluxnet_initial_conditions(
+    site_ID,
+    start_date,
+    hour_offset_from_UTC,
+    model,
+)
+    set_ic!(Y, p, t, model) =
+        set_fluxnet_ic!(Y, site_ID, start_date, hour_offset_from_UTC, model)
+    return set_ic!
+end
+
+
+"""
+     set_fluxnet_ic!(
+        Y,
+        site_ID,
+        start_date,
+        hour_offset_from_UTC,
+        model::ClimaLand.AbstractLandModel,
+    )
+
+Sets the initial conditions of `Y` using observations from the site `site_ID`, if available,
+using the observations closest to the start_date (in UTC). Since the data from Fluxnet sites
+is provided in local time, we require the offset from UTC in hours `hour_offset_from_UTC`.
+The `model` indicates which how to update it `Y` from these observations,
+via different methods of `set_fluxnet_ic!`.
+"""
+function set_fluxnet_ic!(
+    Y,
+    site_ID,
+    start_date,
+    hour_offset_from_UTC,
+    model::ClimaLand.AbstractLandModel,
+)
+    fluxnet_csv_path = ClimaLand.Artifacts.experiment_fluxnet_data_path(site_ID)
+
+    # Read the data and get the column name map
+    (data, columns) = readdlm(fluxnet_csv_path, ','; header = true)
+
+    # Get the UTC datetimes of the data
+    varnames = ("TIMESTAMP_START",)
+    column_name_map =
+        get_column_name_map(varnames, columns; error_on_missing = true)
+    UTC_datetimes = get_UTC_datetimes(
+        hour_offset_from_UTC,
+        data,
+        column_name_map;
+        timestamp_name = "TIMESTAMP_START",
+    )
+    Δ_date = UTC_datetimes .- start_date
+    for component in ClimaLand.land_components(model)
+        set_fluxnet_ic!(Y, data, columns, Δ_date, getproperty(model, component))
+    end
+end
+
+"""
+     set_fluxnet_ic!(Y, data, columns, Δ_date, model::ClimaLand.Soil.EnergyHydrology)
+
+Sets the values of Y.soil in place with:
+- \vartheta_l: observed value of SWC at the surface at the observation date closest to the start date, unless this is larger than 90% of porosity.
+- θ_i: no ice (θ_i = 0)
+- \rho e_int: an internal energy computed using the above θ_l, θ_i, and the temperature of the soil
+  in the first layer, at the observation date closest to the start date. If the soil
+  temperature is not available, the air temperature is used.
+
+Here, `Y` is the prognostic field vector, `data` is the raw data for the site read from
+a CSV file, `columns` is the list of column names,
+`Δ_date` is the vector of date differences between the observations (in UTC) and the
+start date (in UTC), and `model` indicates which part of `Y` we are updating, and how to update it,
+via different methods of `set_fluxnet_ic!`.
+"""
+function set_fluxnet_ic!(
+    Y,
+    data,
+    columns,
+    Δ_date,
+    model::ClimaLand.Soil.EnergyHydrology;
+    val = -9999,
+)
+    # Determine which column index corresponds to which varname
+    varnames = ("SWC_F_MDS_1", "TS_F_MDS_1", "TA_F")
+    column_name_map = Dict(
+        varname => findfirst(columns[:] .== varname) for varname in varnames
+    )
+    FT = eltype(Y.soil.ρe_int)
+    tmp_ic = @. model.parameters.θ_r +
+       (model.parameters.ν - model.parameters.θ_r) * FT(0.95)
+    if isnothing(column_name_map["SWC_F_MDS_1"])
+        θ_l_0 = tmp_ic
+    elseif unique(data[:, column_name_map["SWC_F_MDS_1"]]) == val
+        θ_l_0 = tmp_ic
+    else
+        θ_l_0 = min.(
+            FT(
+                get_data_at_start_date(
+                    data[:, column_name_map["SWC_F_MDS_1"]],
+                    Δ_date;
+                    preprocess_func = x -> x / 100,
+                    val,
+                ),
+            ),
+            tmp_ic,
+        )
+    end
+    Y.soil.ϑ_l .= θ_l_0
+    Y.soil.θ_i .= 0
+
+    if isnothing(column_name_map["TS_F_MDS_1"])
+        T_soil_0 = get_data_at_start_date(
+            data[:, column_name_map["TA_F"]],
+            Δ_date;
+            preprocess_func = x -> x + 273.15,
+            val,
+        )
+    elseif unique(data[:, column_name_map["TS_F_MDS_1"]]) == [val]
+        T_soil_0 = get_data_at_start_date(
+            data[:, column_name_map["TA_F"]],
+            Δ_date;
+            preprocess_func = x -> x + 273.15,
+            val,
+        )
+    else
+        T_soil_0 = get_data_at_start_date(
+            data[:, column_name_map["TS_F_MDS_1"]],
+            Δ_date;
+            preprocess_func = x -> x + 273.15,
+            val,
+        )
+    end
+
+    ρc_s = ClimaLand.Soil.volumetric_heat_capacity.(
+        Y.soil.ϑ_l,
+        Y.soil.θ_i,
+        model.parameters.ρc_ds,
+        model.parameters.earth_param_set,
+    )
+    Y.soil.ρe_int = ClimaLand.Soil.volumetric_internal_energy.(
+        Y.soil.θ_i,
+        ρc_s,
+        FT(T_soil_0),
+        model.parameters.earth_param_set,
+    )
+end
+
+"""
+    set_fluxnet_ic!(Y, data, columns, Δ_date, model::ClimaLand.Canopy.CanopyModel)
+
+Sets Y.canopy.energy.T to the air temperature at the observation date closest to the start
+date of the model; sets the potential in the stem and leaf to -0.1 and -0.2 MPa, respectively,
+and the computes the resulting water content Y.canopy.hydraulics.ϑ_l using the retention curve
+of the plant. If the biomass model carries prognostic state (the optimal-LAI model), that is
+set from its climatology.
+"""
+function set_fluxnet_ic!(
+    Y,
+    data,
+    columns,
+    Δ_date,
+    model::ClimaLand.Canopy.CanopyModel{FT};
+    val = -9999,
+) where {FT}
+    if model.energy isa Canopy.BigLeafEnergyModel
+        idx = findfirst(columns[:] .== "TA_F")
+        T_air_0 = get_data_at_start_date(
+            data[:, idx],
+            Δ_date;
+            preprocess_func = x -> x + 273.15,
+            val,
+        )
+        Y.canopy.energy.T .= T_air_0
+    end
+
+    ψ_leaf_0 = FT(-2e5 / 9800)
+    hydraulics = model.hydraulics
+    S_l_ini = ClimaLand.Canopy.inverse_water_retention_curve.(
+        hydraulics.parameters.retention_model,
+        ψ_leaf_0,
+        hydraulics.parameters.ν,
+        hydraulics.parameters.S_s,
+    )
+    Y.canopy.hydraulics.ϑ_l .= ClimaLand.Canopy.augmented_liquid_fraction.(
+        hydraulics.parameters.ν,
+        S_l_ini,
+    )
+    ClimaLand.Simulations.set_canopy_component_initial_conditions!(
+        Y,
+        nothing,
+        model.biomass,
+        model,
+    )
+    if model.photosynthesis isa Canopy.PModel
+        idx = findfirst(columns[:] .== "VPD_F")
+        VPD_0 = get_data_at_start_date(
+            data[:, idx],
+            Δ_date;
+            preprocess_func = x -> x * 100, # hPa to Pa
+            val,
+        )
+        idx = findfirst(columns[:] .== "PA_F")
+        P_air_0 = get_data_at_start_date(
+            data[:, idx],
+            Δ_date;
+            preprocess_func = x -> x * 1000,# kPa to Pa
+            val,
+        )
+        idx = findfirst(columns[:] .== "CO2_F_MDS")
+        c_co2_0 = get_data_at_start_date(
+            data[:, idx],
+            Δ_date;
+            preprocess_func = x -> x * 1e-6, # convert from μmol/mol to mol/mol
+            val,
+        )
+        idx = findfirst(columns[:] .== "TA_F")
+        T_air_0 = get_data_at_start_date(
+            data[:, idx],
+            Δ_date;
+            preprocess_func = x -> x + 273.15,# C to K
+            val,
+        )
+        βm = FT(1)
+        APAR_canopy_moles = FT(1e-3) # mol/m^2/s, from 1000 μmol/m^2/s
+        @. Y.canopy.photosynthesis.acclimated = compute_optimal_capacities(
+            model.photosynthesis.parameters,
+            model.photosynthesis.constants,
+            FT(T_air_0),
+            FT(P_air_0),
+            FT(VPD_0),
+            FT(c_co2_0),
+            βm,
+            APAR_canopy_moles,
+        )
+    end
+
+end
+
+"""
+    set_fluxnet_ic!(Y, data, columns, Δ_date, model::ClimaLand.Snow.SnowModel)
+
+Sets Y.snow.S, Y.snow.S_l, and Y.snow.U in place to be zero at the start of the simulation
+(no snow).
+
+Note that the Snow NeuralDensity model has additional prognostic variables which also must be set
+to zero; another method may work well for that case.
+"""
+function set_fluxnet_ic!(
+    Y,
+    data,
+    columns,
+    Δ_date,
+    model::ClimaLand.Snow.SnowModel,
+)
+    Y.snow.S .= 0.0
+    Y.snow.S_l .= 0.0
+    Y.snow.U .= 0.0
+end
+
+"""
+     set_fluxnet_ic!(Y, data, columns, Δ_date, model::ClimaLand.Soil.Biogeochemistry.SoilCO2Model)
+
+Sets Y.soilco2.CO2, Y.soilco2.O2, and Y.soilco2.SOC in place with initial values.
+
+The CO2 and O2 prognostic variables are stored as total mass per unit *bulk soil
+volume* (storage = θ_eff · gas-phase concentration, where θ_eff = θ_a + β·θ_l
+accounts for both the air-filled pore space and the gas dissolved in pore water):
+- CO2: total CO₂ as carbon mass per bulk soil volume (kg C m⁻³ soil)
+- O2: total O₂ (gas-phase in air-filled pores + dissolved in pore water) per bulk
+  soil volume (kg O₂ m⁻³ soil)
+- SOC: soil organic carbon concentration (kg C/m³)
+
+The CO2/O2 values are representative atmospheric-equilibrium initial guesses
+(assuming θ_eff ≈ 0.3 at standard T, P); the near-surface values are rapidly
+replaced by the diffusive boundary condition.
+"""
+function set_fluxnet_ic!(
+    Y,
+    data,
+    columns,
+    Δ_date,
+    model::ClimaLand.Soil.Biogeochemistry.SoilCO2Model,
+)
+    # Representative bulk densities (kg m⁻³ soil) ≈ θ_eff · gas-phase density.
+    Y.soilco2.CO2 .= 6e-5   # ≈ θ_eff · c_atm · P·M_C/(R·T), kg C m⁻³ soil
+    Y.soilco2.O2 .= 0.08    # ≈ θ_eff · 0.21 · P·M_O2/(R·T), kg O₂ m⁻³ soil
+    Y.soilco2.SOC .= 5.0    # Default SOC concentration (kg C/m³)
+end

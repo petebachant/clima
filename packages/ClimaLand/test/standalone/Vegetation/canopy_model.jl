@@ -1,0 +1,787 @@
+using Test
+import ClimaParams
+import ClimaComms
+ClimaComms.@import_required_backends
+using ClimaCore
+using Thermodynamics
+using Dates
+using StaticArrays
+using ClimaLand
+using ClimaLand: PrescribedAtmosphere, PrescribedRadiativeFluxes
+using ClimaUtilities.TimeVaryingInputs: TimeVaryingInput, evaluate!
+using ClimaLand.Canopy
+using ClimaLand.Domains: Point
+import Insolation
+using ClimaCore.MatrixFields: @name
+import ClimaLand
+import ClimaLand.Parameters as LP
+import ClimaParams
+
+@testset "Canopy software pipes" begin
+    for FT in (Float32, Float64)
+        toml_dict = LP.create_toml_dict(FT)
+
+        # create a point domain
+        lat = FT(1) # degree
+        long = FT(-180) # degree
+        longlat = (long, lat)
+        z_sfc = FT(0)
+        domain = ClimaLand.Domains.Point(; z_sfc, longlat)
+
+        # Construct component models
+        radiation_parameters = (;
+            α_PAR_leaf = FT(0.1),
+            α_NIR_leaf = FT(0.4),
+            Ω = FT(1),
+            G_Function = ConstantGFunction(FT(0.5)),
+        )
+        rt_model = BeerLambertModel{FT}(domain, toml_dict; radiation_parameters)
+        photosynthesis_parameters =
+            (; fractional_c3 = FT(1), Vcmax25 = FT(9e-5))
+        photosynthesis_model =
+            FarquharModel{FT}(domain, toml_dict; photosynthesis_parameters)
+        energy_model = BigLeafEnergyModel{FT}(toml_dict)
+        AR_model = AutotrophicRespirationModel{FT}(toml_dict)
+        stomatal_model =
+            MedlynConductanceModel{FT}(domain, toml_dict; g1 = FT(790))
+
+        # Plant Hydraulics
+        LAI_fun = t -> FT(8) # m2 [leaf] m-2 [ground]
+        LAI = TimeVaryingInput(LAI_fun)
+        hydraulics = Canopy.PlantHydraulicsModel{FT}(domain, toml_dict)
+        biomass = Canopy.PrescribedBiomassModel{FT}(
+            domain,
+            LAI,
+            toml_dict;
+            rooting_depth = FT(0.5),
+            height = FT(1),
+        )
+        # Set up forcing
+        earth_param_set = LP.LandParameters(toml_dict)
+        thermo_params = LP.thermodynamic_parameters(earth_param_set)
+        start_date = DateTime(2005)
+
+        u_atmos = t -> 10 #m.s-1
+        liquid_precip = (t) -> 0 # m
+        snow_precip = (t) -> 0 # m
+        T_atmos = t -> 290 # Kelvin
+        q_atmos = t -> 0.001 # kg/kg
+        P_atmos = t -> 1e5 # Pa
+        h_atmos = FT(30) # m
+        c_atmos = (t) -> 4.11e-4 # mol/mol
+        atmos = PrescribedAtmosphere(
+            TimeVaryingInput(liquid_precip),
+            TimeVaryingInput(snow_precip),
+            TimeVaryingInput(T_atmos),
+            TimeVaryingInput(u_atmos),
+            TimeVaryingInput(q_atmos),
+            TimeVaryingInput(P_atmos),
+            start_date,
+            h_atmos,
+            toml_dict;
+            c_co2 = TimeVaryingInput(c_atmos),
+        )
+
+        shortwave_radiation(t) = 1000 # W/m2
+        longwave_radiation(t) = 200 # W/m2
+        cos_zenith_angle =
+            (t, s) -> default_cos_zenith_angle(
+                t,
+                s;
+                insol_params = earth_param_set.insol_params,
+                latitude = lat,
+                longitude = long,
+            )
+        radiation = PrescribedRadiativeFluxes(
+            FT,
+            TimeVaryingInput(shortwave_radiation),
+            TimeVaryingInput(longwave_radiation),
+            start_date;
+            cosθs = cos_zenith_angle,
+            toml_dict = toml_dict,
+        )
+
+        # Set up canopy model with all the components
+        ground = PrescribedGroundConditions{FT}()
+        forcing = (; atmos, radiation, ground)
+        canopy = ClimaLand.Canopy.CanopyModel{FT}(
+            domain,
+            forcing,
+            LAI,
+            toml_dict;
+            autotrophic_respiration = AR_model,
+            radiative_transfer = rt_model,
+            photosynthesis = photosynthesis_model,
+            conductance = stomatal_model,
+            soil_moisture_stress = Canopy.NoMoistureStressModel{FT}(),
+            hydraulics,
+            energy = energy_model,
+            biomass,
+        )
+        @test ClimaComms.context(canopy) == ClimaComms.context()
+        @test ClimaComms.device(canopy) == ClimaComms.device()
+        drivers = ClimaLand.get_drivers(canopy)
+        @test drivers == (atmos, radiation, ground)
+        Y, p, coords = ClimaLand.initialize(canopy)
+        @test propertynames(p.drivers) == (
+            :P_liq,
+            :P_snow,
+            :T,
+            :P,
+            :u,
+            :q,
+            :c_co2,
+            :SW_d,
+            :LW_d,
+            :cosθs,
+            :frac_diff,
+            :θ,
+            :T_ground,
+        )
+        # Check that structure of Y is valid (will error if not)
+        @test !isnothing(zero(Y))
+        @test canopy.energy isa BigLeafEnergyModel{FT}
+        @test propertynames(p) == (:canopy, :drivers)
+        @test propertynames(p.canopy) == (
+            :hydraulics,
+            :conductance,
+            :photosynthesis,
+            :radiative_transfer,
+            :autotrophic_respiration,
+            :energy,
+            :sif,
+            :soil_moisture_stress,
+            :biomass,
+            :turbulent_fluxes,
+        )
+        for component in ClimaLand.Canopy.canopy_components(canopy)
+            # Only hydraulics has a prognostic variable
+            if component == :hydraulics
+                @test propertynames(getproperty(Y.canopy, component)) ==
+                      ClimaLand.prognostic_vars(getproperty(canopy, component))
+            end
+            @test propertynames(getproperty(p.canopy, component)) ==
+                  ClimaLand.auxiliary_vars(getproperty(canopy, component))
+            @test getproperty(auxiliary_types(canopy), component) ==
+                  auxiliary_types(getproperty(canopy, component))
+            @test getproperty(auxiliary_vars(canopy), component) ==
+                  auxiliary_vars(getproperty(canopy, component))
+            @test getproperty(prognostic_types(canopy), component) ==
+                  prognostic_types(getproperty(canopy, component))
+            @test getproperty(prognostic_types(canopy), component) ==
+                  prognostic_types(getproperty(canopy, component))
+        end
+        Y.canopy.hydraulics.ϑ_l .= canopy.hydraulics.parameters.ν
+        Y.canopy.energy.T = FT(289)
+
+        set_initial_cache! = make_set_initial_cache(canopy)
+        exp_tendency! = make_exp_tendency(canopy)
+        compute_imp_tendency! = ClimaLand.make_compute_imp_tendency(canopy)
+        jacobian! = ClimaLand.make_compute_jacobian(canopy)
+        # set up jacobian info
+        jac_kwargs = (;
+            jac_prototype = ClimaLand.initialize_jacobian(Y),
+            Wfact = jacobian!,
+        )
+
+        t0 = FT(0.0)
+        dY = similar(Y)
+        set_initial_cache!(p, Y, t0)
+        # check that this is updated correctly:
+        # @test p.canopy.autotrophic_respiration.Ra ==
+        exp_tendency!(dY, Y, p, t0)
+        turb_fluxes_copy = copy(p.canopy.turbulent_fluxes)
+        ClimaLand.turbulent_fluxes!(turb_fluxes_copy, atmos, canopy, Y, p, t0)
+
+        @test p.canopy.turbulent_fluxes.shf == turb_fluxes_copy.shf
+        @test p.canopy.turbulent_fluxes.lhf == turb_fluxes_copy.lhf
+        @test p.canopy.turbulent_fluxes.vapor_flux ==
+              turb_fluxes_copy.vapor_flux
+        _σ = FT(LP.Stefan(earth_param_set))
+        f_abs_par = p.canopy.radiative_transfer.par.abs
+        f_abs_nir = p.canopy.radiative_transfer.nir.abs
+        nir_d = p.canopy.radiative_transfer.nir_d
+        par_d = p.canopy.radiative_transfer.par_d
+        @test p.canopy.radiative_transfer.SW_n ==
+              @. f_abs_par * par_d + f_abs_nir * nir_d
+        ϵ_canopy = p.canopy.radiative_transfer.ϵ
+        T_canopy = FT.(289)
+        T_soil = FT(298) # we are using the default value
+        ϵ_soil = FT.(ground.ϵ)
+        LW_d = FT.(longwave_radiation(t0))
+        LW_d_canopy = @. (1 - ϵ_canopy) * LW_d + ϵ_canopy * _σ * T_canopy^4
+        LW_u_soil = @. ϵ_soil * _σ * T_soil^4 + (1 - ϵ_soil) * LW_d_canopy
+        @test all(
+            Array(parent(p.canopy.radiative_transfer.LW_n)) .≈ Array(
+                parent(
+                    @. ϵ_canopy * LW_d - 2 * ϵ_canopy * _σ * T_canopy^4 +
+                       ϵ_canopy * LW_u_soil
+                ),
+            ),
+        )
+        @test all(Array(parent(p.canopy.energy.fa_energy_roots)) .== FT(0))
+        @test all(
+            Array(
+                parent(
+                    ClimaLand.Canopy.canopy_temperature(
+                        canopy.energy,
+                        canopy,
+                        Y,
+                        p,
+                    ),
+                ),
+            ) .== FT(289),
+        )
+    end
+end
+
+
+@testset "Component prescribed fields" begin
+    for FT in (Float32, Float64)
+        # Plant Hydraulics
+        LAI = FT(2)
+        RAI = FT(1)
+        SAI = FT(1)
+        lai_fun = TimeVaryingInput(t -> LAI * sin(t * 2π / 365))
+        rooting_depth = FT(0.5)
+        biomass = Canopy.PrescribedBiomassModel{FT}(;
+            LAI = lai_fun,
+            SAI,
+            RAI,
+            rooting_depth,
+            height = FT(10),
+        )
+        t0 = FT(100)
+        domain = Point(; z_sfc = FT(0.0))
+        p = ClimaCore.fill(
+            (;
+                canopy = (;
+                    biomass = (;
+                        area_index = (
+                            leaf = FT(0.0),
+                            root = FT(0.0),
+                            stem = FT(0.0),
+                        )
+                    )
+                )
+            ),
+            domain.space.surface,
+        )
+        # Test that they are set properly
+        fake_canopy = (;
+            boundary_conditions = (; prognostic_land_components = (:canopy,))
+        )
+        Canopy.update_biomass!(p, nothing, t0, biomass, fake_canopy)
+        @test all(
+            Array(parent(p.canopy.biomass.area_index.leaf)) .==
+            FT(LAI * sin(t0 * 2π / 365)),
+        )
+        @test all(Array(parent(p.canopy.biomass.area_index.stem)) .== FT(1.0))
+        @test all(Array(parent(p.canopy.biomass.area_index.root)) .== FT(1.0))
+
+        # Test that LAI is updated
+        Canopy.update_biomass!(p, nothing, FT(200), biomass, fake_canopy)
+        @test all(
+            Array(parent(p.canopy.biomass.area_index.leaf)) .==
+            ClimaLand.Canopy.clip(FT(LAI * sin(200 * 2π / 365)), FT(0.05)),
+        )
+    end
+end
+
+@testset "Jacobian for Temperature" begin
+    for FT in (Float32, Float64)
+        toml_dict = LP.create_toml_dict(FT)
+        domain = Point(; z_sfc = FT(0.0))
+
+        g1 = FT(790)
+        Vcmax25 = FT(9e-5)
+        fractional_c3 = FT(1)
+        RTparams = BeerLambertParameters(
+            toml_dict,
+            G_Function = ConstantGFunction(
+                ClimaParams.float_type(toml_dict)(0.5),
+            ),
+            α_PAR_leaf = 0.1,
+            α_NIR_leaf = 0.4,
+            Ω = 1,
+        )
+
+        photosynthesis_params =
+            FarquharParameters(toml_dict; fractional_c3, Vcmax25)
+        stomatal_g_params = MedlynConductanceParameters(toml_dict; g1)
+
+        stomatal_model = MedlynConductanceModel{FT}(stomatal_g_params)
+        photosynthesis_model = FarquharModel{FT}(photosynthesis_params)
+        rt_model = BeerLambertModel{FT}(RTparams)
+        energy_model = BigLeafEnergyModel{FT}(BigLeafEnergyParameters{FT}())
+        earth_param_set = LP.LandParameters(toml_dict)
+        thermo_params = LP.thermodynamic_parameters(earth_param_set)
+        LAI = FT(8.0) # m2 [leaf] m-2 [ground]
+        h_int = FT(30.0) # m, "where measurements would be taken at a typical flux tower of a 20m canopy"
+        lat = FT(0.0) # degree
+        long = FT(-180) # degree
+        start_date = DateTime(2005)
+
+        cos_zenith_angle =
+            (t, s) -> default_cos_zenith_angle(
+                t,
+                s;
+                insol_params = earth_param_set.insol_params,
+                latitude = lat,
+                longitude = long,
+            )
+
+        function shortwave_radiation(
+            t;
+            latitude = lat,
+            longitude = long,
+            insol_params = earth_param_set.insol_params,
+        )
+            return 1000 # W/m^2
+        end
+
+        function longwave_radiation(t)
+            return 200 # W/m^2
+        end
+
+        u_atmos = t -> 10 #m.s-1
+
+        liquid_precip = (t) -> 0 # m
+        snow_precip = (t) -> 0 # m
+        T_atmos = t -> 290 # Kelvin
+        q_atmos = t -> 0.001 # kg/kg
+        P_atmos = t -> 1e5 # Pa
+        h_atmos = h_int # m
+        c_atmos = (t) -> 4.11e-4 # mol/mol
+        atmos = PrescribedAtmosphere(
+            TimeVaryingInput(liquid_precip),
+            TimeVaryingInput(snow_precip),
+            TimeVaryingInput(T_atmos),
+            TimeVaryingInput(u_atmos),
+            TimeVaryingInput(q_atmos),
+            TimeVaryingInput(P_atmos),
+            start_date,
+            h_atmos,
+            toml_dict;
+            c_co2 = TimeVaryingInput(c_atmos),
+        )
+        radiation = PrescribedRadiativeFluxes(
+            FT,
+            TimeVaryingInput(shortwave_radiation),
+            TimeVaryingInput(longwave_radiation),
+            start_date;
+            cosθs = cos_zenith_angle,
+            toml_dict = toml_dict,
+        )
+
+        # Plant Hydraulics
+        RAI = FT(1)
+        SAI = FT(0)
+        lai_fun = TimeVaryingInput(t -> LAI)
+        K_sat_plant = FT(1.8e-8) # m/s
+        ψ63 = FT(-4 / 0.0098) # / MPa to m, Holtzman's original parameter value
+        Weibull_param = FT(4) # unitless, Holtzman's original c param value
+        a = FT(0.05 * 0.0098) # Holtzman's original parameter for the bulk modulus of elasticity
+        plant_ν = FT(0.7) # m3/m3
+        plant_S_s = FT(1e-2 * 0.0098) # m3/m3/MPa to m3/m3/m
+        conductivity_model = Canopy.Weibull{FT}(K_sat_plant, ψ63, Weibull_param)
+        retention_model = Canopy.LinearRetentionCurve{FT}(a)
+        rooting_depth = FT(0.5)
+        param_set = Canopy.PlantHydraulicsParameters(;
+            ν = plant_ν,
+            S_s = plant_S_s,
+            conductivity_model = conductivity_model,
+            retention_model = retention_model,
+        )
+        soil_driver = PrescribedGroundConditions{FT}()
+        plant_hydraulics = Canopy.PlantHydraulicsModel{FT}(param_set)
+        autotrophic_parameters = AutotrophicRespirationParameters(toml_dict)
+        biomass = Canopy.PrescribedBiomassModel{FT}(;
+            LAI = lai_fun,
+            SAI,
+            RAI,
+            rooting_depth,
+            height = FT(2),
+        )
+        autotrophic_respiration_model =
+            AutotrophicRespirationModel{FT}(autotrophic_parameters)
+        sf_parameterization =
+            ClimaLand.Canopy.MoninObukhovCanopyFluxes(toml_dict, biomass.height)
+        canopy = ClimaLand.Canopy.CanopyModel{FT}(;
+            earth_param_set,
+            domain,
+            radiative_transfer = rt_model,
+            photosynthesis = photosynthesis_model,
+            conductance = stomatal_model,
+            autotrophic_respiration = autotrophic_respiration_model,
+            energy = energy_model,
+            hydraulics = plant_hydraulics,
+            soil_moisture_stress = Canopy.NoMoistureStressModel{FT}(),
+            biomass,
+            sif = Canopy.Lee2015SIFModel{FT}(toml_dict),
+            boundary_conditions = Canopy.AtmosDrivenCanopyBC(
+                atmos,
+                radiation,
+                soil_driver,
+                sf_parameterization,
+            ),
+        )
+
+        Y, p, coords = ClimaLand.initialize(canopy)
+
+        Y.canopy.hydraulics .= plant_ν
+        Y.canopy.energy.T = FT(289)
+
+        set_initial_cache! = make_set_initial_cache(canopy)
+        t0 = FT(0.0)
+        compute_imp_tendency! = ClimaLand.make_compute_imp_tendency(canopy)
+        jacobian! = ClimaLand.make_compute_jacobian(canopy)
+
+        set_initial_cache!(p, Y, t0)
+        T_sfc = Y.canopy.energy.T
+        dY = similar(Y)
+        compute_imp_tendency!(dY, Y, p, t0)
+        jac = ClimaLand.initialize_jacobian(Y)
+        jacobian!(jac, Y, p, FT(1), t0)
+        jac_value = jac.matrix[@name(canopy.energy.T), @name(canopy.energy.T)]
+        ΔT = FT(0.01)
+
+        Y_2 = deepcopy(Y)
+        Y_2.canopy.energy.T = FT(289 + ΔT)
+        p_2 = deepcopy(p)
+        set_initial_cache!(p_2, Y_2, t0)
+        T_sfc2 = Y_2.canopy.energy.T
+        dY_2 = similar(Y_2)
+        compute_imp_tendency!(dY_2, Y_2, p_2, t0)
+
+        finitediff_LW =
+            (
+                p_2.canopy.radiative_transfer.LW_n .-
+                p.canopy.radiative_transfer.LW_n
+            ) ./ ΔT
+        estimated_LW = p.canopy.energy.∂LW_n∂T
+        @test Array(
+            parent(abs.(finitediff_LW .- estimated_LW) ./ finitediff_LW),
+        )[1] < 0.01
+
+        finitediff_SHF =
+            (p_2.canopy.turbulent_fluxes.shf .- p.canopy.turbulent_fluxes.shf) ./
+            ΔT
+        estimated_SHF = p.canopy.turbulent_fluxes.∂shf∂T
+        @test Array(
+            parent(abs.(finitediff_SHF .- estimated_SHF) ./ finitediff_SHF),
+        )[1] < 0.05
+
+        # It's not obvious why this is so poor compared to SHF
+        finitediff_LHF =
+            (p_2.canopy.turbulent_fluxes.lhf .- p.canopy.turbulent_fluxes.lhf) ./
+            ΔT
+        estimated_LHF = p.canopy.turbulent_fluxes.∂lhf∂T
+        @test Array(
+            parent(abs.(finitediff_LHF .- estimated_LHF) ./ finitediff_LHF),
+        )[1] < 0.5
+
+        # Recall jac = ∂Ṫ∂T - 1 [dtγ = 1]
+        ∂Ṫ∂T = Array(parent(jac_value))[1] .+ 1
+        @test abs.(
+            Array(parent(dY_2.canopy.energy.T .- dY.canopy.energy.T))[1] ./ ΔT -
+            ∂Ṫ∂T,
+        ) / abs.(∂Ṫ∂T) < 0.5 # Error propagates here from ∂LHF∂T
+    end
+end
+
+@testset "Zero LAI" begin
+    FT = Float32
+    domain =
+        ClimaLand.Domains.SphericalSurface(; radius = FT(100.0), nelements = 10)
+
+    toml_dict = LP.create_toml_dict(FT)
+    earth_param_set = LP.LandParameters(toml_dict)
+
+    lat = FT(0.0) # degree
+    long = FT(-180) # degree
+    start_date = DateTime(2005)
+    LAI = TimeVaryingInput((t) -> 0.0)
+    shortwave_radiation(t) = 1000 # W/m2
+    longwave_radiation(t) = 200 # W/m2
+    cos_zenith_angle =
+        (t, s) -> default_cos_zenith_angle(
+            t,
+            s;
+            insol_params = earth_param_set.insol_params,
+            latitude = lat,
+            longitude = long,
+        )
+
+    u_atmos = t -> 10 #m.s-1
+    liquid_precip = (t) -> 0 # m
+    snow_precip = (t) -> 0 # m
+    T_atmos = t -> 290 # Kelvin
+    q_atmos = t -> 0.001 # kg/kg
+    P_atmos = t -> 1e5 # Pa
+    h_atmos = FT(30.0) # m, "where measurements would be taken at a typical flux tower of a 20m canopy"
+    c_atmos = (t) -> 4.11e-4 # mol/mol
+    atmos = PrescribedAtmosphere(
+        TimeVaryingInput(liquid_precip),
+        TimeVaryingInput(snow_precip),
+        TimeVaryingInput(T_atmos),
+        TimeVaryingInput(u_atmos),
+        TimeVaryingInput(q_atmos),
+        TimeVaryingInput(P_atmos),
+        start_date,
+        h_atmos,
+        toml_dict;
+        c_co2 = TimeVaryingInput(c_atmos),
+    )
+    radiation = PrescribedRadiativeFluxes(
+        FT,
+        TimeVaryingInput(shortwave_radiation),
+        TimeVaryingInput(longwave_radiation),
+        start_date;
+        cosθs = cos_zenith_angle,
+        toml_dict = toml_dict,
+    )
+    ground = PrescribedGroundConditions{FT}()
+    forcing = (; atmos, radiation, ground)
+
+    canopy = ClimaLand.Canopy.CanopyModel{FT}(domain, forcing, LAI, toml_dict)
+
+    Y, p, coords = ClimaLand.initialize(canopy)
+    dY = similar(Y)
+
+    # Set ICs
+    Y.canopy.hydraulics .= canopy.hydraulics.parameters.ν
+    Y.canopy.energy.T = FT(289)
+    p.canopy.hydraulics.ψ .= NaN
+    dY.canopy.hydraulics.ϑ_l .= NaN
+
+    set_initial_cache! = make_set_initial_cache(canopy)
+    t0 = FT(0.0)
+    set_initial_cache!(p, Y, t0)
+
+    @test all(Array(parent(p.canopy.soil_moisture_stress.βm) .≈ FT(1)))
+    @test all(Array(parent(p.canopy.hydraulics.fa_roots)) .== FT(0))
+    @test all(Array(parent(p.canopy.turbulent_fluxes.lhf)) .== FT(0))
+    @test all(Array(parent(p.canopy.turbulent_fluxes.shf)) .== FT(0))
+    @test all(Array(parent(p.canopy.turbulent_fluxes.vapor_flux)) .== FT(0))
+    @test all(Array(parent(p.canopy.radiative_transfer.LW_n)) .== FT(0))
+    @test all(Array(parent(p.canopy.radiative_transfer.SW_n)) .== FT(0))
+    @test all(Array(parent(p.canopy.radiative_transfer.par.abs)) .== FT(0))
+    @test all(Array(parent(p.canopy.radiative_transfer.nir.abs)) .== FT(0))
+    @test all(Array(parent(p.canopy.energy.fa_energy_roots)) .== FT(0))
+    # Leafless: leaf-level respiration and photosynthesis vanish, so Ra reduces
+    # to the persistent (nonzero) root/stem maintenance respiration baseline.
+    ar_params = canopy.autotrophic_respiration.parameters
+    SAI = canopy.biomass.plant_area_index.SAI
+    RAI = canopy.biomass.plant_area_index.RAI
+    f_T = ar_params.Q10^((FT(289) - ar_params.T_ref) / FT(10))
+    Ra_baseline = f_T * ar_params.Rd_ref * (RAI + ar_params.μs * SAI)
+    @test all(Array(parent(p.canopy.autotrophic_respiration.Ra)) .≈ Ra_baseline)
+
+    exp_tend! = make_exp_tendency(canopy)
+    exp_tend!(dY, Y, p, FT(0))
+    @test all(parent(dY.canopy.hydraulics.ϑ_l) .≈ FT(0.0))
+end
+
+@testset "CanopyModel using convenience constructors" begin
+    for FT in (Float32, Float64)
+        toml_dict = LP.create_toml_dict(FT)
+        domain = ClimaLand.Domains.SphericalSurface(;
+            radius = FT(100.0),
+            nelements = 10,
+        )
+
+        # Create a simple forcing function for LAI
+        LAI = TimeVaryingInput(t -> FT(8))
+
+        # Set up component models
+        autotrophic_respiration =
+            Canopy.AutotrophicRespirationModel{FT}(toml_dict)
+        radiative_transfer_models = (
+            Canopy.TwoStreamModel{FT}(domain, toml_dict),
+            Canopy.BeerLambertModel{FT}(domain, toml_dict),
+        )
+        photosynthesis = Canopy.FarquharModel{FT}(domain, toml_dict)
+        conductance = Canopy.MedlynConductanceModel{FT}(domain, toml_dict)
+        hydraulics = Canopy.PlantHydraulicsModel{FT}(domain, toml_dict)
+        soil_moisture_stress = Canopy.TuzetMoistureStressModel{FT}(toml_dict)
+        energy = Canopy.BigLeafEnergyModel{FT}(toml_dict)
+        biomass = Canopy.PrescribedBiomassModel{FT}(domain, LAI, toml_dict)
+        sif = Canopy.Lee2015SIFModel{FT}(toml_dict)
+
+        # Use simple analytic forcing for atmosphere and radiation
+        atmos, radiation = prescribed_analytic_forcing(FT; toml_dict)
+        soil_driver = PrescribedGroundConditions{FT}()
+        turbulent_flux_parameterization =
+            MoninObukhovCanopyFluxes(toml_dict, toml_dict["canopy_height"])
+        boundary_conditions = Canopy.AtmosDrivenCanopyBC(
+            atmos,
+            radiation,
+            soil_driver,
+            turbulent_flux_parameterization,
+        )
+
+        earth_param_set = LP.LandParameters(toml_dict)
+
+        for radiative_transfer in radiative_transfer_models
+            args = (
+                autotrophic_respiration,
+                radiative_transfer,
+                photosynthesis,
+                conductance,
+                soil_moisture_stress,
+                hydraulics,
+                energy,
+                sif,
+                biomass,
+                boundary_conditions,
+                earth_param_set,
+                domain,
+            )
+
+            canopy = Canopy.CanopyModel{FT, typeof.(args)...}(args...)
+
+            # Check that the canopy model was created correctly
+            @test ClimaComms.context(canopy) == ClimaComms.context()
+            @test ClimaComms.device(canopy) == ClimaComms.device()
+            @test ClimaLand.get_drivers(canopy) ==
+                  (atmos, radiation, soil_driver)
+
+            @test canopy.autotrophic_respiration == autotrophic_respiration
+            @test canopy.radiative_transfer == radiative_transfer
+            @test canopy.biomass == biomass
+            @test canopy.photosynthesis == photosynthesis
+            @test canopy.conductance == conductance
+            @test canopy.hydraulics == hydraulics
+            @test canopy.energy == energy
+            @test canopy.soil_moisture_stress == soil_moisture_stress
+            @test canopy.sif == sif
+            @test canopy.boundary_conditions == boundary_conditions
+            @test canopy.earth_param_set == earth_param_set
+            @test canopy.domain == domain
+
+            Y, p, coords = ClimaLand.initialize(canopy)
+            @test propertynames(p.drivers) == (
+                :P_liq,
+                :P_snow,
+                :T,
+                :P,
+                :u,
+                :q,
+                :c_co2,
+                :SW_d,
+                :LW_d,
+                :cosθs,
+                :frac_diff,
+                :θ,
+                :T_ground,
+            )
+            # Check that structure of Y is valid (will error if not)
+            @test !isnothing(zero(Y))
+            @test typeof(canopy.energy) == typeof(energy)
+            @test propertynames(p) == (:canopy, :drivers)
+            @test propertynames(p.canopy) == (
+                :hydraulics,
+                :conductance,
+                :photosynthesis,
+                :radiative_transfer,
+                :autotrophic_respiration,
+                :energy,
+                :sif,
+                :soil_moisture_stress,
+                :biomass,
+                :turbulent_fluxes,
+            )
+            for component in ClimaLand.Canopy.canopy_components(canopy)
+                # Only hydraulics has a prognostic variable
+                if component == :hydraulics
+                    @test propertynames(getproperty(Y.canopy, component)) ==
+                          ClimaLand.prognostic_vars(
+                        getproperty(canopy, component),
+                    )
+                end
+                @test propertynames(getproperty(p.canopy, component)) ==
+                      ClimaLand.auxiliary_vars(getproperty(canopy, component))
+                @test getproperty(auxiliary_types(canopy), component) ==
+                      auxiliary_types(getproperty(canopy, component))
+                @test getproperty(auxiliary_vars(canopy), component) ==
+                      auxiliary_vars(getproperty(canopy, component))
+                @test getproperty(prognostic_types(canopy), component) ==
+                      prognostic_types(getproperty(canopy, component))
+                @test getproperty(prognostic_types(canopy), component) ==
+                      prognostic_types(getproperty(canopy, component))
+            end
+        end
+    end
+end
+
+@testset "CanopyModel convenience constructor" begin
+    FT = Float32
+    domain =
+        ClimaLand.Domains.SphericalSurface(; radius = FT(100.0), nelements = 10)
+
+    toml_dict = LP.create_toml_dict(FT)
+
+    # Create a simple functions for LAI and forcings
+    LAI = TimeVaryingInput(t -> FT(8))
+    atmos, radiation = prescribed_analytic_forcing(FT; toml_dict)
+    ground = PrescribedGroundConditions{FT}()
+    forcing = (; atmos, radiation, ground)
+    toml_dict = ClimaLand.Parameters.create_toml_dict(FT)
+
+    canopy = Canopy.CanopyModel{FT}(domain, forcing, LAI, toml_dict)
+
+    # Check that the canopy model was created correctly
+    @test ClimaComms.context(canopy) == ClimaComms.context()
+    @test ClimaComms.device(canopy) == ClimaComms.device()
+    @test ClimaLand.get_drivers(canopy) == (atmos, radiation, ground)
+    Y, p, coords = ClimaLand.initialize(canopy)
+    @test propertynames(p.drivers) == (
+        :P_liq,
+        :P_snow,
+        :T,
+        :P,
+        :u,
+        :q,
+        :c_co2,
+        :SW_d,
+        :LW_d,
+        :cosθs,
+        :frac_diff,
+        :θ,
+        :T_ground,
+    )
+    # Check that structure of Y is valid (will error if not)
+    @test !isnothing(zero(Y))
+    @test propertynames(p) == (:canopy, :drivers)
+    @test propertynames(p.canopy) == (
+        :hydraulics,
+        :conductance,
+        :photosynthesis,
+        :radiative_transfer,
+        :autotrophic_respiration,
+        :energy,
+        :sif,
+        :soil_moisture_stress,
+        :biomass,
+        :turbulent_fluxes,
+    )
+    @test propertynames(p.canopy.hydraulics) == (:ψ, :fa_roots)
+    for component in ClimaLand.Canopy.canopy_components(canopy)
+        # Only hydraulics has a prognostic variable
+        if component == :hydraulics
+            @test propertynames(getproperty(Y.canopy, component)) ==
+                  ClimaLand.prognostic_vars(getproperty(canopy, component))
+        end
+        @test propertynames(getproperty(p.canopy, component)) ==
+              ClimaLand.auxiliary_vars(getproperty(canopy, component))
+        @test getproperty(auxiliary_types(canopy), component) ==
+              auxiliary_types(getproperty(canopy, component))
+        @test getproperty(auxiliary_vars(canopy), component) ==
+              auxiliary_vars(getproperty(canopy, component))
+        @test getproperty(prognostic_types(canopy), component) ==
+              prognostic_types(getproperty(canopy, component))
+        @test getproperty(prognostic_types(canopy), component) ==
+              prognostic_types(getproperty(canopy, component))
+    end
+end
