@@ -67,7 +67,9 @@ Keep the bypass list small.
 ## What the review data says
 
 These are the owners proposed in `packages.toml`. They were derived from
-merged PRs in each standalone repo from 2025-09-28 to 2026-09-28: reviewers
+merged PRs in each standalone repo from 2025-09-28 to 2026-09-28 (a GitHub
+API snapshot; the query and raw counts are in
+[evaluation/ownership-2026-09/](../evaluation/ownership-2026-09/)): reviewers
 with ≥15% of a package's reviewed PRs, plus top authors, 2–3 per package.
 **They are a starting point for each team to confirm, not a decision.**
 

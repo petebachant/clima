@@ -5,6 +5,12 @@ propagate today. The longer-window numbers (2021–2026) come from
 [clima-perf](https://calkit.io/petebachant/clima-perf) and are summarized
 in [../../EVALUATION.md](../../EVALUATION.md).
 
+Inputs, with exact revisions, are listed in [../PROVENANCE.md](../PROVENANCE.md#2-12-month-baseline-2025-09-28--2026-09-28):
+- General registry at `d1ceb94b`;
+- 11 package `main` branches at the commits the monorepo imported;
+- a GitHub API snapshot from 2026-09-28;
+- clima-perf at `2765d08f`.
+
 Raw data is in `data/` and the scripts that produced it are in `scripts/`.
 The scripts expect the clones (General sparse clone, 11 blobless package
 clones) they were run against, so they are for reference rather than

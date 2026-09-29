@@ -12,9 +12,12 @@ multi-repo baseline is, and what we've seen so far.
 
 ## Baseline (multi-repo)
 
-From [clima-perf](https://calkit.io/petebachant/clima-perf)
-(GitHub + General registry data for 35 CliMA repos, 2021-Q2 → 2026-Q3,
-5.2 years). Cascade window = 14 days.
+From [clima-perf](https://calkit.io/petebachant/clima-perf) at revision
+[`2765d08f`](https://github.com/petebachant/clima-perf/tree/2765d08f0f5f1c37da293a93428dbcd142518c73)
+(GitHub + General registry data for 35 CliMA repos through 2026-09-27;
+2021-Q2 → 2026-Q3, 5.2 years). Cascade window = 14 days. Every number's
+source file, and the revisions of all other inputs, are in
+[evaluation/PROVENANCE.md](evaluation/PROVENANCE.md).
 
 | | Value |
 |:--|:--|
@@ -46,8 +49,11 @@ clima-perf's own conclusion: the PR-count saving is modest, because
 propagation PRs already merge in under a day. The bigger cost is the
 per-release ritual, most of which serves no one outside the org.
 
-**Last 12 months**, measured directly (details, per-edge tables, and data
-in [evaluation/baseline-2026-09/](evaluation/baseline-2026-09/SUMMARY.md)):
+**Last 12 months**, measured directly. Details, per-edge tables, and data
+are in [evaluation/baseline-2026-09/](evaluation/baseline-2026-09/SUMMARY.md).
+Inputs: General registry at `d1ceb94b` and package `main` branches at the
+same commits the monorepo imported
+([PROVENANCE §2](evaluation/PROVENANCE.md#2-12-month-baseline-2025-09-28--2026-09-28)).
 
 | | Value |
 |:--|:--|

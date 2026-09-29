@@ -1,0 +1,89 @@
+{
+ "ClimaComms": [
+  "nefrathenrici",
+  "imreddyTeja",
+  "haakon-e"
+ ],
+ "ClimaParams": [
+  "szy21",
+  "trontrytel",
+  "nefrathenrici"
+ ],
+ "RootSolvers": [
+  "imreddyTeja",
+  "tapios"
+ ],
+ "ClimaInterpolations": [
+  "giordano",
+  "ph-kev",
+  "imreddyTeja"
+ ],
+ "Insolation": [
+  "tapios",
+  "ph-kev",
+  "szy21"
+ ],
+ "ClimaAnalysis": [
+  "imreddyTeja",
+  "nefrathenrici",
+  "ph-kev"
+ ],
+ "Thermodynamics": [
+  "szy21",
+  "tapios"
+ ],
+ "SurfaceFluxes": [
+  "akshaysridhar",
+  "tapios",
+  "szy21"
+ ],
+ "CloudMicrophysics": [
+  "trontrytel",
+  "haakon-e",
+  "tapios"
+ ],
+ "RRTMGP": [
+  "szy21",
+  "tapios"
+ ],
+ "ClimaCore": [
+  "imreddyTeja",
+  "dennisYatunin",
+  "ph-kev"
+ ],
+ "ClimaTimeSteppers": [
+  "tapios",
+  "dennisYatunin",
+  "ph-kev"
+ ],
+ "ClimaUtilities": [
+  "ph-kev",
+  "imreddyTeja",
+  "nefrathenrici"
+ ],
+ "ClimaDiagnostics": [
+  "imreddyTeja",
+  "ph-kev",
+  "nefrathenrici"
+ ],
+ "ClimaAtmos": [
+  "szy21",
+  "tapios"
+ ],
+ "ClimaLand": [
+  "kmdeck",
+  "ph-kev"
+ ],
+ "ClimaCoupler": [
+  "szy21",
+  "juliasloan25"
+ ],
+ "ClimaCalibrate": [
+  "nefrathenrici",
+  "ph-kev"
+ ],
+ "DeveloperGuides": [
+  "imreddyTeja",
+  "tapios"
+ ]
+}
