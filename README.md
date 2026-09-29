@@ -189,3 +189,75 @@ The shared CliMA developer guides live in [docs/dev/](docs/dev/), which is
 the DeveloperGuides repo as a subtree. Start at
 [docs/dev/AGENTS.md](docs/dev/AGENTS.md). Each package may also have its own
 `AGENTS.md` and repo-specific guide.
+
+## TODO
+
+What's left, grouped by when it can happen. Details live in the linked
+docs. Tick items off here as they land.
+
+### Now (during the evaluation)
+
+- [ ] **Get CI green on GitHub Actions.** The plan job is fixed; the test
+  matrix, LTS, and examples jobs haven't run there yet. Watch for the cost
+  of instantiating the 312-package workspace in every matrix job.
+- [ ] **Upstream the `issubspace` fix.** Branch `fix/climacore-issubspace`
+  → PRs to CliMA/ClimaCore.jl (methods + regression test) and
+  CliMA/ClimaCoupler.jl (`output_writer`). Then unpin ClimaLand in the
+  Coupler nightly. See [EVALUATION.md](EVALUATION.md#case-study-the-issubspace-outage-september-2026).
+- [ ] **Report API/doc friction found by the examples**, e.g. the wrong
+  SurfaceFluxes `config` keyword in the docs, `q_liq` vs `q_lcl` naming,
+  ITime `≈` errors, ClimaLand default diagnostics writing to `.`. Details
+  are in each example's agent report and in the commit messages.
+- [ ] **Add an example: custom physics in ClimaAtmos + calibration**
+  (user-defined boundary-layer closure, synthetic-observation calibration;
+  cf. arXiv:2604.19500).
+- [ ] **Run the trial** in [EVALUATION.md](EVALUATION.md#how-to-run-the-trial):
+  2–3 real cross-cutting changes done here, and one low-traffic package
+  (ClimaParams or RootSolvers) registered from here end to end.
+- [ ] **Confirm owners and teams.** The `owners` in `packages.toml` are
+  derived from review data. Create the `@CliMA/{core,physics,atmos,coupler,calibration}`
+  teams and switch to team handles. See [docs/OWNERSHIP.md](docs/OWNERSHIP.md).
+- [ ] **Create the team project boards** and the `PROJECTS_TOKEN` secret;
+  fill in the project numbers in `packages.toml` `[_teams]`.
+- [ ] **Turn on the branch ruleset** for `main`: code-owner review, required
+  CI checks, `@CliMA/software` as the only bypass actor.
+- [ ] **Resolve the AMIP experiment env** (`experiments/amip`) and load the
+  coupled stack from it. The resolve was interrupted.
+- [ ] **Standardize test environments** on `test/Project.toml` (7 packages
+  still use `[extras]`/`[targets]`), so every test env joins the workspace.
+
+### At cutover (once the monorepo is the source of truth)
+
+- [ ] **One pre-commit config for every package.** Remove `packages/` and
+  `docs/dev/` from the `exclude` in [.pre-commit-config.yaml](.pre-commit-config.yaml).
+  Delete ClimaAtmos's and ClimaCore's nested `.pre-commit-config.yaml` and
+  every `packages/*/.JuliaFormatter.toml`. Fix or `#! format: off` the 9
+  files the pinned JuliaFormatter can't parse. Then run one
+  `prek run --all-files` commit (423 files) and add it to
+  `.git-blame-ignore-revs`.
+- [ ] **Move registration here.** One General PR per package setting `repo`
+  and `subdir`; enable [register.yml](.github/workflows/register.yml) and
+  TagBot with an SSH key.
+- [ ] **Stop the upstream sync**, archive the standalone repos with redirect
+  READMEs, and delete `sync-upstream.yml`.
+- [ ] **Delete per-package leftovers:** each `packages/*/docs/dev-guides`
+  subtree, `update_dev_guides.yml`, and the per-package `.github/workflows`
+  that are now inert (CI, TagBot, CompatHelper, formatter, downstream).
+- [ ] **Consolidated docs site.** See [docs/PLAN.md](docs/PLAN.md#migration):
+  store repo, `deploydocs` changes, MultiDocumenter aggregate.
+- [ ] **Move the flagship simulations** into `experiments/`. See
+  [experiments/README.md](experiments/README.md#migration-once-upstream-sync-stops);
+  this deletes the `UPSTREAM_PACKAGES` machinery.
+- [ ] **Port per-package Buildkite pipelines** (ClimaAtmos especially), or
+  trigger them from the root pipeline.
+
+### Decisions still open
+
+- [ ] Merge internal-only packages (ClimaUtilities, ClimaDiagnostics,
+  ClimaInterpolations) to remove reactive releases? See
+  [EVALUATION.md](EVALUATION.md#question-3-less-release-maintenance).
+- [ ] Commit the workspace `Manifest.toml`?
+- [ ] Custom docs domain vs `clima.github.io/clima/`?
+- [ ] Who owns `experiments/` and its cluster budget?
+- [ ] Split the workspace (packages + tests vs examples/experiments) if
+  shared resolution keeps coupling unrelated test deps?
