@@ -23,6 +23,9 @@ concurrency: register  # never interleave two cascades
 
 jobs:
   register:
+    # A branch's first push has no "before" commit (40 zeros); there is
+    # nothing to compare versions against, so never register on it.
+    if: github.event_name == 'workflow_dispatch' || github.event.before != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     timeout-minutes: 360  # cascades wait on General's AutoMerge for each tier
     steps:

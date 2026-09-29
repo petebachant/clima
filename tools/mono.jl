@@ -114,9 +114,30 @@ end
 
 git(args...) = readchomp(Cmd(`git -C $ROOT $args`))
 
+# A usable diff base? GitHub sends 40 zeros as `github.event.before` on a
+# branch's first push, and a force-push's old SHA may no longer exist.
+valid_base(base) =
+    !occursin(r"^0+$", base) &&
+    success(
+        pipeline(
+            `git -C $ROOT rev-parse --verify --quiet $(base * "^{commit}")`;
+            stdout = devnull,
+        ),
+    )
+
+# Files changed since BASE, or `nothing` when BASE can't be diffed against.
+function changed_files(base)
+    valid_base(base) || return nothing
+    return split(git("diff", "--name-only", "$base...HEAD"), '\n'; keepempty = false)
+end
+
 function changed_packages(pkgs, base)
     base == "ALL" && return Set(keys(pkgs))
-    files = split(git("diff", "--name-only", "$base...HEAD"), '\n'; keepempty = false)
+    files = changed_files(base)
+    if files === nothing
+        @warn "Can't diff against $base; treating every package as affected"
+        return Set(keys(pkgs))
+    end
     hit = Set{String}()
     for f in files, p in values(pkgs)
         startswith(f, p.path * "/") && push!(hit, p.name)
@@ -283,6 +304,9 @@ end
 # Packages whose version changed since BASE, in dependency order. `waits_for`
 # lists in-repo deps released in the same batch, which must reach General first.
 function cmd_releases(pkgs, base)
+    # Never guess here: an unknown base would make every package look bumped
+    # and register all of them.
+    valid_base(base) || error("releases: can't resolve base $base; pass an explicit ref")
     out = String[]
     for n in toposort(pkgs)
         p = pkgs[n]
@@ -401,7 +425,7 @@ function cmd_examples(pkgs, base = "origin/main"; pr = false, list = false)
     affected = downstream_closure(pkgs, changed)
     files =
         base == "ALL" ? String[] :
-        split(git("diff", "--name-only", "$base...HEAD"), '\n'; keepempty = false)
+        something(changed_files(base), String[])
     hit = filter(ucs) do u
         (pr && u.nightly) && return false
         base == "ALL" || any(in(affected), u.deps) ||
