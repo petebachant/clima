@@ -648,6 +648,7 @@ DecayWithHeightDiffusion{FT}(; disable_momentum_vertical_diffusion, H, D₀) whe
 
 disable_momentum_vertical_diffusion(::DecayWithHeightDiffusion{DM}) where {DM} = DM
 disable_momentum_vertical_diffusion(::Nothing) = false
+disable_momentum_vertical_diffusion(::AbstractVerticalDiffusion) = false
 
 
 ### --------------------- ###

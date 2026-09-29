@@ -800,10 +800,8 @@ compute_edt(_, _, _, _, _) =
     error_diagnostic_variable("Can only compute heat diffusivity with \
                                vertical diffusion or EDMFX")
 
-compute_edt(state, cache, _, model::VerticalDiffusion, ::Nothing) =
-    ᶜcompute_eddy_diffusivity_coefficient(state.c.uₕ, cache.precomputed.ᶜp, model)
-compute_edt(state, _, _, model::DecayWithHeightDiffusion, ::Nothing) =
-    ᶜcompute_eddy_diffusivity_coefficient(state.c.ρ, model)
+compute_edt(state, cache, _, model::AbstractVerticalDiffusion, ::Nothing) =
+    ᶜeddy_diffusivity(state, cache, model)
 
 function compute_edt(state, cache, _,
     ::Nothing, ::Union{PrognosticEDMFX, EDOnlyEDMFX},
@@ -845,10 +843,8 @@ compute_evu(_, _, _, _, _) =
                                vertical diffusion or EDMFX")
 
 # this setup assumes ᶜK_u = ᶜK_h
-compute_evu(state, cache, _, model::VerticalDiffusion, ::Nothing) =
-    ᶜcompute_eddy_diffusivity_coefficient(state.c.uₕ, cache.precomputed.ᶜp, model)
-compute_evu(state, _, _, model::DecayWithHeightDiffusion, ::Nothing) =
-    ᶜcompute_eddy_diffusivity_coefficient(state.c.ρ, model)
+compute_evu(state, cache, _, model::AbstractVerticalDiffusion, ::Nothing) =
+    ᶜeddy_diffusivity(state, cache, model)
 
 function compute_evu(
     state,

@@ -65,7 +65,7 @@ function vertical_diffusion_boundary_layer_tendency!(
     Y,
     p,
     t,
-    ::Union{VerticalDiffusion, DecayWithHeightDiffusion},
+    ::AbstractVerticalDiffusion,
 )
     FT = eltype(Y)
     ϵ_FT = eps(FT)
@@ -73,15 +73,7 @@ function vertical_diffusion_boundary_layer_tendency!(
     thermo_params = CAP.thermodynamics_params(p.params)
     (; ᶜu, ᶜp, ᶜT) = p.precomputed
     ᶜK_h = p.scratch.ᶜtemp_scalar
-    if vertical_diffusion isa DecayWithHeightDiffusion
-        ᶜK_h .= ᶜcompute_eddy_diffusivity_coefficient(Y.c.ρ, vertical_diffusion)
-    elseif vertical_diffusion isa VerticalDiffusion
-        ᶜK_h .= ᶜcompute_eddy_diffusivity_coefficient(
-            Y.c.uₕ,
-            ᶜp,
-            vertical_diffusion,
-        )
-    end
+    ᶜK_h .= ᶜeddy_diffusivity(Y, p, vertical_diffusion)
 
     # Face diffusivities use a harmonic mean (reciprocal of interpolated
     # reciprocal), so the diffusive flux collapses at faces separating a

@@ -981,13 +981,9 @@ function eddy_diffusivity_coefficients!(Y, p)
     (; vertical_diffusion, smagorinsky_lilly) = p.atmos
     (; ᶜp) = p.precomputed
     ᶜK_u = ᶜK_h = nothing
-    if vertical_diffusion isa DecayWithHeightDiffusion
+    if vertical_diffusion isa AbstractVerticalDiffusion
         ᶜK_h = p.scratch.ᶜtemp_scalar_3
-        ᶜK_h .= ᶜcompute_eddy_diffusivity_coefficient(Y.c.ρ, vertical_diffusion)
-        ᶜK_u = ᶜK_h
-    elseif vertical_diffusion isa VerticalDiffusion
-        ᶜK_h = p.scratch.ᶜtemp_scalar_3
-        ᶜK_h .= ᶜcompute_eddy_diffusivity_coefficient(Y.c.uₕ, ᶜp, vertical_diffusion)
+        ᶜK_h .= ᶜeddy_diffusivity(Y, p, vertical_diffusion)
         ᶜK_u = ᶜK_h
     elseif is_smagorinsky_vertical(smagorinsky_lilly)
         ᶜK_u = p.precomputed.ᶜνₜ_v

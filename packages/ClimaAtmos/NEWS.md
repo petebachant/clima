@@ -3,6 +3,12 @@ ClimaAtmos.jl Release Notes
 
 main
 ----
+- ![][badge-✨feature/enhancement] Vertical diffusion closures are now
+  extensible: define a subtype of `AbstractVerticalDiffusion` and a method of
+  `ᶜeddy_diffusivity(Y, p, closure)`, and the tendency, implicit Jacobian, and
+  `edt`/`evu` diagnostics use it. Previously these dispatched on the two
+  built-in closures, so a user-defined closure raised a `MethodError` in the
+  tendency and was silently skipped in the Jacobian.
 - ![][badge-✨feature/enhancement] Two parameters,
   `sgs_liquid_uniform_fraction` and `sgs_ice_uniform_fraction` (default 0),
   blend the SGS-quadrature condensate reconstruction of the 1-moment

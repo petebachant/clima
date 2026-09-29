@@ -41,6 +41,19 @@ which confines the mixing to the boundary layer and the lower free
 troposphere. The same value serves as the eddy viscosity for momentum;
 `disable_momentum_vertical_diffusion` restricts either closure to the scalars.
 
+### Adding your own closure
+
+Both built-in closures are methods of one function,
+`ClimaAtmos.ᶜeddy_diffusivity(Y, p, closure)`, which the tendency, its implicit
+Jacobian, and the `edt`/`evu` diagnostics all call. To add a closure, define a
+subtype of `ClimaAtmos.AbstractVerticalDiffusion` and one method of that
+function returning the cell-center diffusivity, then pass an instance as
+`AtmosModel(grid; vertical_diffusion = ...)`. Everything described below
+(the enthalpy and water fluxes, momentum diffusion, harmonic-mean face values,
+the implicit treatment) applies to it unchanged. The monorepo example
+`examples/atmos-custom-closure-calibration` implements a K-profile
+boundary-layer closure this way and calibrates it.
+
 Face diffusivities are formed as a harmonic mean of the two neighboring center
 values rather than an arithmetic one. The flux then collapses at a face
 separating a turbulent layer from quiescent, strongly stratified air, where an

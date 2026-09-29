@@ -53,6 +53,7 @@ import ..COSPModel
 import ClimaAtmos.RRTMGPInterface as RRTMGPI
 
 # vert_diff
+import ..AbstractVerticalDiffusion
 import ..VerticalDiffusion
 import ..DecayWithHeightDiffusion
 
@@ -89,6 +90,7 @@ import ..eddy_viscosity
 import ..turbulent_prandtl_number
 import ..smagorinsky_lilly_length
 import ..ᶜcompute_eddy_diffusivity_coefficient
+import ..ᶜeddy_diffusivity
 import ..ρa⁰
 import ..specific
 import ..ᶜspecific_env_value
