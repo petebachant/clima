@@ -30,7 +30,13 @@ whole stack.
 
 1. **They already need the whole repo at HEAD.** The Coupler nightly
    pipeline has an `UPSTREAM_PACKAGES` step that `Pkg.add`s the `main`
-   branch of 8 packages. ClimaAtmos's pipeline has the same mechanism for
+   branch of 8 packages. The other 9 in-repo packages it loads (ClimaComms,
+   ClimaDiagnostics, ClimaUtilities, ClimaParams, ClimaAnalysis,
+   ClimaCalibrate, Insolation, RootSolvers, ClimaInterpolations) still come
+   from the registry. So it tests `main` of ClimaCore and ClimaAtmos against
+   *released* ClimaComms and ClimaDiagnostics, a combination nobody ships,
+   and never sees unreleased changes in the other 9. Here, all 18 resolve to
+   the checkout. ClimaAtmos's pipeline has the same mechanism for
    downstream triggers. That's a hand-built monorepo checkout. Here, every
    in-repo package already resolves to the checkout.
 2. **They catch cross-package breaks, which is exactly the monorepo's job.**

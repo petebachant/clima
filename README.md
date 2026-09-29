@@ -221,8 +221,12 @@ docs. Tick items off here as they land.
   fill in the project numbers in `packages.toml` `[_teams]`.
 - [ ] **Turn on the branch ruleset** for `main`: code-owner review, required
   CI checks, `@CliMA/software` as the only bypass actor.
-- [ ] **Resolve the AMIP experiment env** (`experiments/amip`) and load the
-  coupled stack from it. The resolve was interrupted.
+- [ ] **Load and run the AMIP experiment env** (`experiments/amip`). It
+  resolves with all 18 in-repo packages tracked by path; the nightly today
+  moves only 8 to `main` and takes 9 from the registry. Loading (Makie,
+  GeoMakie, CUDA) and a short run are still unverified. Also do a trial
+  run of [amip-nightly.yml](.buildkite/experiments/amip-nightly.yml) on
+  Buildkite.
 - [ ] **Standardize test environments** on `test/Project.toml` (7 packages
   still use `[extras]`/`[targets]`), so every test env joins the workspace.
 
