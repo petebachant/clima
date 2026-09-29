@@ -95,6 +95,8 @@ jobs:
         with:
           version: '1.12'
       - uses: julia-actions/cache@v2
+      # The workspace Manifest is not committed, so resolve it first.
+      - run: julia --color=yes --project=${{ matrix.ex.path }} -e 'using Pkg; Pkg.instantiate()'
       - run: julia --color=yes --project=${{ matrix.ex.path }} ${{ matrix.ex.path }}/run.jl
 
   registered:

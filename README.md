@@ -199,9 +199,14 @@ docs. Tick items off here as they land.
 
 ### Now (during the evaluation)
 
-- [ ] **Get CI green on GitHub Actions.** The plan job is fixed; the test
-  matrix, LTS, and examples jobs haven't run there yet. Watch for the cost
-  of instantiating the 312-package workspace in every matrix job.
+- [ ] **Get CI green on GitHub Actions.** The first full run: 27 jobs passed and 13 failed, with the
+  ClimaLand jobs still running. The plumbing failures are fixed; what remains are real
+  cross-package findings (see [EVALUATION.md](EVALUATION.md#what-the-first-full-ci-run-found-2026-09-29)):
+  - ClimaParams `main` vs ClimaAtmos test defaults
+    (`sgs_variance_horizontal_scale_factor`): one of them has to change.
+  - ClimaUtilities tests vs ClimaTimeSteppers 1.x (`ClimaODEFunction`).
+  - The ClimaAtmos Musica extension overwrites `chemistry_tendency!`.
+  - Diagnose ClimaCore `unit_layout_args.jl` (`d1` undefined under `Pkg.test`).
 - [ ] **Upstream the `issubspace` fix.** Branch `fix/climacore-issubspace`
   → PRs to CliMA/ClimaCore.jl (methods + regression test) and
   CliMA/ClimaCoupler.jl (`output_writer`). Then unpin ClimaLand in the

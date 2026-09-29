@@ -224,11 +224,35 @@ function cmd_test(pkgs, name, registered = false)
             run(`$(Base.julia_cmd()) --color=yes --project=$env runtests.jl`)
         end
     else
+        # [extras]/[targets]: build a separate environment rather than
+        # developing deps into (a copy of) the package's own Project.toml,
+        # which Aqua's deps_compat/stale_deps checks would then flag.
+        proj = TOML.parsefile(joinpath(dir, "Project.toml"))
+        # Test targets may name weak deps (package extensions) as well as extras.
+        extras = merge(get(proj, "weakdeps", Dict{String, Any}()),
+            get(proj, "extras", Dict{String, Any}()))
+        compat = get(proj, "compat", Dict{String, Any}())
+        wanted = get(get(proj, "targets", Dict()), "test", String[])
+        extra_specs = [
+            Pkg.PackageSpec(; name = n, uuid = extras[n],
+                version = haskey(compat, n) ? Pkg.Versions.semver_spec(compat[n]) :
+                          Pkg.Versions.VersionSpec())
+            for n in wanted if haskey(extras, n) && !haskey(pkgs, n) && n != name
+        ]
+        # Like Pkg.test, make the package's own deps loadable from its tests.
+        for (n, u) in get(proj, "deps", Dict())
+            haskey(pkgs, n) || any(s -> s.name == n, extra_specs) ||
+                push!(extra_specs, Pkg.PackageSpec(; name = n, uuid = u))
+        end
         env = mktempdir()
-        cp(dir, env; force = true)  # keep the tracked Project.toml clean
         Pkg.activate(env)
-        isempty(specs) || Pkg.develop(specs)
-        Pkg.test()
+        Pkg.develop(vcat(Pkg.PackageSpec(path = dir), specs))
+        isempty(extra_specs) || Pkg.add(extra_specs)
+        cd(joinpath(dir, "test")) do
+            run(
+                `$(Base.julia_cmd()) --color=yes --check-bounds=yes --project=$env runtests.jl`,
+            )
+        end
     end
 end
 

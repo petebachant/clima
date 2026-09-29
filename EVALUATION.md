@@ -134,6 +134,33 @@ if downstream checks are *required*, and flaky downstream tests would make
 people want them advisory again. Budgeting for test reliability is part of
 the cost of Q2.
 
+## What the first full CI run found (2026-09-29)
+
+The first CI run to get past planning, GitHub Actions run 36635294994 at
+`434a897f9`, tested all 18 packages on Julia 1.12 and LTS against each
+other's in-repo HEAD. It surfaced three cross-package problems that no
+standalone repo's CI reports today:
+
+| Where | What | Why per-repo CI misses it |
+|:--|:--|:--|
+| ClimaAtmos `test/parameter_tests.jl:117` | Asserts `sgs_variance_horizontal_scale_factor` "must default to 0 so the historical closure is reproduced bitwise"; ClimaParams `main` sets it to **3.0** (and `sgs_variance_geometric_Ri_factor` to 1.0). | ClimaAtmos CI pins an older ClimaParams; ClimaParams has no ClimaAtmos downstream test. It surfaces only after the next ClimaParams release reaches ClimaAtmos. |
+| ClimaUtilities `test/timemanager.jl:9` | Fails with ClimaTimeSteppers 1.x (`ClimaODEFunction` no longer satisfies SciMLBase's `isinplace`). | The test env pinned `ClimaTimeSteppers = "0.8.2"`, one of the "stale bounds" above. The bound wasn't just stale: it was **hiding** that ClimaUtilities' tests don't work with the current ClimaTimeSteppers. |
+| ClimaAtmos `ext/ClimaAtmosMusica` | Overwrites `chemistry_tendency!(…, ::GasPhaseChem)` from the main module, which errors during precompilation of the extension. | Only shows when Musica is in the environment; the shared workspace has it. |
+
+A fourth, ClimaCore `test/DataLayouts/unit_layout_args.jl:118`
+(`UndefVarError: d1 not defined in Main` inside a MultiBroadcastFusion
+macro), happens under `Pkg.test()`. MultiBroadcastFusion is at the same
+version (0.3.4) as in ClimaCore's own CI Manifest, so this is probably a
+difference in how the test file is run, not version drift. Not yet
+diagnosed.
+
+The same run also hit bugs in the prototype's own plumbing, all fixed:
+- Examples ran before the (uncommitted) workspace Manifest was instantiated.
+- The LTS path for `[extras]`/`[targets]` packages developed in-repo deps
+  into a copy of the package's own `Project.toml`, which made Aqua's
+  `deps_compat`/`stale_deps` checks fail (ClimaAtmos, ClimaDiagnostics,
+  ClimaCalibrate). It now builds a separate environment, as `Pkg.test` does.
+
 ## What the prototype showed on day one
 
 Importing 18 packages and resolving them in **one** Julia workspace, the
