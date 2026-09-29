@@ -61,15 +61,21 @@ struct MyClosure{FT} <: CA.AbstractVerticalDiffusion
     K₀::FT  # surface diffusivity [m²/s]
     H::FT   # decay height [m]
 end
+Base.broadcastable(c::MyClosure) = tuple(c)  # so `c` can appear inside `@.`
+decay(c, z) = c.K₀ * exp(-z / c.H)
 function CA.ᶜeddy_diffusivity(Y, p, c::MyClosure)
     ᶜz = Fields.coordinate_field(Y.c).z
-    return @. c.K₀ * exp(-ᶜz / c.H)  # a Field or a lazy broadcast
+    return @. decay(c, ᶜz)
 end
 ```
 
 Pass it with `AtmosModel(grid; vertical_diffusion = MyClosure(1.0, 500.0), ...)`.
 The result is copied into scratch space, so returning either a `Field` or a
-lazy broadcast works. The precomputed quantities in `p.precomputed` (e.g.
+lazy broadcast works. A `Field` allocates on every call; the built-in closures
+return `LazyBroadcast.lazy` broadcasts to avoid that, which matters on GPUs.
+Surface quantities are level fields: broadcast them together with a center
+field (e.g. `ᶜz`); a broadcast of surface fields alone into a center field
+raises a `DimensionMismatch`. The precomputed quantities in `p.precomputed` (e.g.
 `ᶜp`, `ᶜT`, `ᶜu`) and the surface conditions in `p.precomputed.sfc_conditions`
 are up to date when this is called. By default, closures also diffuse
 momentum; define `CA.disable_momentum_vertical_diffusion(::MyClosure) = true`

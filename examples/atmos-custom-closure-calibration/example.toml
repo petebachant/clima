@@ -1,0 +1,4 @@
+title = "Add your own closure to ClimaAtmos and calibrate it"
+summary = "Add a K-profile closure to ClimaAtmos and recover its parameters on GABLS with EKI"
+nightly = false
+timeout_minutes = 15

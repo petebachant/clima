@@ -43,6 +43,8 @@ short, tested script for a common task:
 - [Single-column soil simulation](examples/land-single-site/)
 - [Build your own model on ClimaCore](examples/build-on-climacore/)
 - [Calibrate a toy model](examples/calibrate-toy-model/)
+- [Add your own physics to ClimaAtmos and calibrate it](examples/atmos-custom-closure-calibration/)
+  (a K-profile boundary-layer closure on GABLS; cf. arXiv:2604.19500)
 - [Coupled slabplanet](examples/coupled-slabplanet/) (nightly)
 
 ## Setup
@@ -208,9 +210,18 @@ docs. Tick items off here as they land.
   SurfaceFluxes `config` keyword in the docs, `q_liq` vs `q_lcl` naming,
   ITime `≈` errors, ClimaLand default diagnostics writing to `.`. Details
   are in each example's agent report and in the commit messages.
-- [ ] **Add an example: custom physics in ClimaAtmos + calibration**
-  (user-defined boundary-layer closure, synthetic-observation calibration;
-  cf. arXiv:2604.19500).
+- [x] **Add an example: custom physics in ClimaAtmos + calibration**
+  ([atmos-custom-closure-calibration](examples/atmos-custom-closure-calibration/)).
+  This needed ClimaAtmos's vertical diffusion made extensible
+  (`ᶜeddy_diffusivity` hook).
+- [ ] **Upstream the ClimaAtmos extension hook** (CliMA/ClimaAtmos.jl PR),
+  and fix what the example found:
+  - `Setups.GABLS` can't run dry; it sets surface `q_vap` (GABLS.jl:57).
+  - `diff_mode = Implicit()` with no closure crashes in the Jacobian, which
+    broadcasts `ᶜK_h = nothing` (manual_sparse_jacobian.jl `update_diffusion_jacobian!`).
+  - `solve_atmos!` returns `:simulation_crashed` instead of throwing.
+  - The scripting default `diff_mode = Explicit()` blows up for boundary-layer
+    closures at typical dt.
 - [ ] **Run the trial** in [EVALUATION.md](EVALUATION.md#how-to-run-the-trial):
   2–3 real cross-cutting changes done here, and one low-traffic package
   (ClimaParams or RootSolvers) registered from here end to end.

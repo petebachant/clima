@@ -12,6 +12,7 @@ julia --project=examples/<name> examples/<name>/run.jl
 
 | Example | What it shows | Packages | CI |
 |:--|:--|:--|:--|
+| [Add your own closure to ClimaAtmos and calibrate it](atmos-custom-closure-calibration/) | Add a K-profile closure to ClimaAtmos and recover its parameters on GABLS with EKI | ClimaAnalysis, ClimaAtmos, ClimaCalibrate, ClimaCore | every PR |
 | [ClimaAtmos single-column simulation](atmos-single-column/) | Run 10 minutes of the BOMEX single-column case and read diagnostics with ClimaAnalysis | ClimaAnalysis, ClimaAtmos | every PR |
 | [Build your own model on ClimaCore](build-on-climacore/) | 1D column heat diffusion with ClimaCore operators, integrated by ClimaTimeSteppers | ClimaComms, ClimaCore, ClimaTimeSteppers | every PR |
 | [Calibrate a toy model](calibrate-toy-model/) | Recover two parameters of a logistic-growth model with ClimaCalibrate and EKI | ClimaCalibrate | every PR |

@@ -33,6 +33,7 @@ projects = [
     "packages/ClimaCoupler/test",
     "packages/ClimaLand",
     "packages/ClimaLand/test",
+    "examples/atmos-custom-closure-calibration",
     "examples/atmos-single-column",
     "examples/build-on-climacore",
     "examples/calibrate-toy-model",

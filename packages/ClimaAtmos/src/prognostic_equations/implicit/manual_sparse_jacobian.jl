@@ -1054,7 +1054,7 @@ function update_diffusion_jacobian!(
     #   entrainment diffusivity ᶠK_entr (see set_face_diffusivities! and
     #   edmfx_sgs_diffusive_flux_tendency!), treated as frozen
     #   coefficients (no ∂K/∂state terms).
-    # - VerticalDiffusion/DecayWithHeightDiffusion: harmonic-mean face
+    # - AbstractVerticalDiffusion (via ᶜeddy_diffusivity): harmonic-mean face
     #   interpolation of the center K (see
     #   vertical_diffusion_boundary_layer_tendency!).
     # - Smagorinsky: arithmetic interpolation, matching its tendency.
