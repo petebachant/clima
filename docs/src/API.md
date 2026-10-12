@@ -12,6 +12,8 @@ SurfaceFluxes.SolverScheme
 SurfaceFluxes.PointValueScheme
 SurfaceFluxes.LayerAverageScheme
 SurfaceFluxes.compute_profile_value
+SurfaceFluxes.screen_level_values
+SurfaceFluxes.dimensionless_profile_value
 ```
 
 ## Inputs Container
@@ -67,6 +69,16 @@ SurfaceFluxes.obukhov_stability_parameter
 
 ```@docs
 SurfaceFluxes.surface_density
+SurfaceFluxes.surface_geopotential
+SurfaceFluxes.interior_geopotential
+SurfaceFluxes.effective_height
+SurfaceFluxes.ReferenceAboveSurface
+SurfaceFluxes.ReferenceAboveApparentSink
+SurfaceFluxes.reference_above_surface
+SurfaceFluxes.interior_vapor_specific_humidity
+SurfaceFluxes.reference_height_valid
+SurfaceFluxes.check_reference_height
+SurfaceFluxes.invalidate_unless
 ```
 
 ## Roughness & Gustiness
@@ -75,23 +87,57 @@ SurfaceFluxes.surface_density
 SurfaceFluxes.ConstantRoughnessParams
 SurfaceFluxes.COARE3RoughnessParams
 SurfaceFluxes.RaupachRoughnessParams
+SurfaceFluxes.momentum_roughness
+SurfaceFluxes.scalar_roughness
+SurfaceFluxes.displacement_height
+SurfaceFluxes.frontal_area_index
+SurfaceFluxes.canopy_area_index
+SurfaceFluxes.raupach_displacement_fraction
+SurfaceFluxes.raupach_roughness_fraction
 SurfaceFluxes.ConstantGustinessSpec
 SurfaceFluxes.DeardorffGustinessSpec
+SurfaceFluxes.FlooredDeardorffGustinessSpec
 SurfaceFluxes.MoistModel
 SurfaceFluxes.DryModel
+SurfaceFluxes.gustiness_value
+SurfaceFluxes.minimum_wind_speed
+SurfaceFluxes.without_floor
+SurfaceFluxes.free_convection_wind_speed
+SurfaceFluxes.virtual_pottemps
+SurfaceFluxes.depends_on_ustar
+SurfaceFluxes.compute_ustar_and_roughness
 ```
 
 ## Roughness Sublayer
 
-Models for the roughness sublayer (RSL) correction, which enhances turbulent exchange
-above rough surfaces beyond standard MOST predictions. Pass the chosen model via
-`SurfaceFluxConfig(roughness, gustiness, moisture_model, rsl_model)`.
+Models for the roughness sublayer (RSL) correction, which accounts for the enhanced
+turbulent mixing above tall roughness elements (plant and urban canopies). Pass the chosen
+model via `SurfaceFluxConfig(roughness, gustiness, moisture_model, rsl_model)`.
 
 ```@docs
 SurfaceFluxes.NoRoughnessSubLayer
-SurfaceFluxes.PhysickGarrattRSL
-SurfaceFluxes.HarmanFinniganRSL
+SurfaceFluxes.LinearRSL
+SurfaceFluxes.ExponentialRSL
+SurfaceFluxes.rsl_corrected_profile
 SurfaceFluxes.rsl_profile_correction
+```
+
+## Stability Cap
+
+Caps on the stability parameter in stable conditions, which hold the exchange
+coefficients at their values at the cap for more stable conditions. Pass the chosen
+cap via `SurfaceFluxConfig(roughness, gustiness, moisture_model, rsl_model, stability_cap)`.
+
+```@docs
+SurfaceFluxes.NoStabilityCap
+SurfaceFluxes.ConstantStabilityCap
+SurfaceFluxes.MaxHeatFluxStabilityCap
+SurfaceFluxes.max_heat_flux_stability
+SurfaceFluxes.neutral_momentum_roughness
+SurfaceFluxes.stability_cap_value
+SurfaceFluxes.with_stability_cap
+SurfaceFluxes.resolved_stability_cap
+SurfaceFluxes.capped_stability
 ```
 
 ## Universal Functions
