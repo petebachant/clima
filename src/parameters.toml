@@ -363,6 +363,43 @@ value = 0.4
 type = "float"
 description = "The von Kármán constant ($\\kappa$) describing the logarithmic velocity profile near a boundary (unitless)."
 
+# Raupach (1994) Canopy Roughness
+
+[raupach_element_drag_coefficient]
+value = 0.3
+type = "float"
+description = "Drag coefficient $C_R$ of an isolated roughness element in the Raupach canopy roughness model (unitless). Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
+[raupach_substrate_drag_coefficient]
+value = 0.003
+type = "float"
+description = "Drag coefficient $C_S$ of the substrate surface in the absence of roughness elements, referenced to the wind speed at the canopy height $h$, in the Raupach canopy roughness model (unitless). Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
+[raupach_displacement_coefficient]
+value = 7.5
+type = "float"
+description = "Coefficient $c_{d1}$ of the zero-plane displacement height $d/h = 1 - (1 - e^{-\\sqrt{c_{d1} \\Lambda}}) / \\sqrt{c_{d1} \\Lambda}$ in the Raupach canopy roughness model, with $\\Lambda$ the plant area index (unitless). Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
+[raupach_frontal_area_ratio]
+value = 0.5
+type = "float"
+description = "Ratio of the frontal area index $\\lambda$ to the plant area index $\\Lambda$ in the Raupach canopy roughness model, 0.5 for isotropically oriented canopy elements (unitless). Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
+[raupach_minimum_frontal_area_index]
+value = 0.0
+type = "float"
+description = "Floor on the frontal area index $\\lambda$ in the Raupach canopy roughness model (unitless). Zero applies no floor; a positive value stands in for stems and branches when the input is a leaf area index alone."
+
+[raupach_max_ustar_to_canopy_wind_ratio]
+value = 0.3
+type = "float"
+description = "Maximum ratio $(u_* / U_h)_{max}$ of the friction velocity to the wind speed at the canopy top, the sheltering limit in the Raupach canopy roughness model (unitless). Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
+[raupach_roughness_sublayer_depth_ratio]
+value = 2.0
+type = "float"
+description = "Ratio $c_w = (z_w - d) / (h - d)$ of the heights of the roughness-sublayer top $z_w$ and the canopy top $h$ above the zero-plane displacement height $d$ in the Raupach canopy roughness model (unitless). It sets the roughness-sublayer influence function at the canopy top, $\\Psi_h = \\ln c_w - 1 + c_w^{-1}$, which is 0.193 for $c_w = 2$. Source: Raupach (1994), DOI: 10.1007/BF00709229."
+
 # Businger
 
 [prandtl_number_0_businger]
@@ -868,6 +905,26 @@ value = 600.0
 type = "float"
 description = "Upper cap on the eddy turnover timescale `τ_ε = c_tke · √(c_d / a_pd)` (s) in the empirical `l_TKE`, representing the residual eddy turnover time from background processes. The cap is inert wherever local shear/buoyancy production is strong."
 
+[mixing_length_alpha]
+value = 1.05
+type = "float"
+description = "Non-equilibrium correction factor α_kε on the balance-derived l_TKE in the mixing-length closure, accounting for the ε/ω-lag (dε/dt = 0 rather than dTKE/dt = 0) — unitless. Order 1; larger values increase the mixing length under local shear/buoyancy balance. Deprecated, will be removed in v2.0."
+
+[mixing_length_l_0]
+value = 100.0
+type = "float"
+description = "Base BL mixing length (m) in the empirical `l_TKE` ceiling `l_empirical_CC = l_0 · (1 + x) · exp(−x)`, with `x = tke / tke_max`. The ceiling equals `l_0` at tke = 0 and decays exponentially for tke ≫ tke_max. Deprecated, will be removed in v2.0."
+
+[mixing_length_tke_max]
+value = 5.0
+type = "float"
+description = "Characteristic TKE magnitude (m²/s²) in the empirical `l_TKE` ceiling `l_0 · (1 + x) · exp(−x)`; larger values relax the cap. Deprecated, will be removed in v2.0."
+
+[mixing_length_min]
+value = 1.0
+type = "float"
+description = "Minimum mixing length (m) applied to the master `l_final` in the SGS closure to prevent division-by-zero in the dissipation rate ε = c_d · tke^{3/2} / l_mix. Deprecated, will be removed in v2.0."
+
 [mixing_length_param_vec]
 value = [0.0, 0.0, 0.0, 0.0, 0.0]
 type = "float"
@@ -1002,9 +1059,14 @@ type = "float"
 description = "Coefficient $c_g$ of the horizontal resolved-gradient (geometric) SGS variance term in ClimaAtmos (unitless). $1/12$ is the variance of a linear field over a uniform cell."
 
 [sgs_variance_horizontal_scale_factor]
-value = 3.0
+value = 1.0
 type = "float"
 description = "Multiplier $c_{\\Delta x}$ on the horizontal grid scale $\\Delta x_h$ in the geometric SGS variance term (unitless)."
+
+[sgs_variance_vertical_scale_factor]
+value = 1.0
+type = "float"
+description = "Multiplier $c_{\\Delta z}$ on the vertical grid scale $\\Delta z$ in the geometric SGS variance term (unitless)."
 
 [sgs_variance_max_rel_std]
 value = 0.5
@@ -1193,20 +1255,30 @@ value = 5e-4
 type = "float"
 description = "Rain formation threshold in terms of specific humidity for the 1-moment microphysics scheme (unitless). Also used as the threshold for strong vertical velocities (convective regime) in the vertical velocity dependent Kessler rain formation."
 
+[cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale]
+value = 1.0
+type = "float"
+description = "Multiplicative scale factor applied to cloud_liquid_water_specific_humidity_autoconversion_threshold to get the stratiform-regime (weak vertical velocities) threshold in the vertical-velocity-dependent Kessler rain formation (unitless). Default 1.0 (stratiform threshold equals the convective one, giving the classic velocity-independent Kessler scheme)."
+
 [cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform]
 value = 5e-4
 type = "float"
-description = "Rain formation threshold in terms of specific humidity for weak vertical velocities (stratiform regime) in the vertical velocity dependent Kessler rain formation (unitless). Equal to cloud_liquid_water_specific_humidity_autoconversion_threshold by default, which gives the classic velocity-independent Kessler scheme."
+description = "Rain formation threshold in terms of specific humidity for weak vertical velocities (stratiform regime) in the vertical velocity dependent Kessler rain formation (unitless). Equal to cloud_liquid_water_specific_humidity_autoconversion_threshold by default, which gives the classic velocity-independent Kessler scheme. Deprecated, will be removed in v2.0."
 
 [rain_autoconversion_timescale]
 value = 1000.0
 type = "float"
 description = "Rain formation timescale for the 1-moment microphysics scheme (s). Also used as the timescale for strong vertical velocities (convective regime) in the vertical velocity dependent Kessler rain formation."
 
+[rain_autoconversion_timescale_stratiform_scale]
+value = 1.0
+type = "float"
+description = "Multiplicative scale factor applied to rain_autoconversion_timescale to get the stratiform-regime (weak vertical velocities) timescale in the vertical-velocity-dependent Kessler rain formation (unitless). Default 1.0 (stratiform timescale equals the convective one, giving the classic velocity-independent Kessler scheme)."
+
 [rain_autoconversion_timescale_stratiform]
 value = 1000.0
 type = "float"
-description = "Rain formation timescale for weak vertical velocities (stratiform regime) in the vertical velocity dependent Kessler rain formation (s). Equal to rain_autoconversion_timescale by default, which gives the classic velocity-independent Kessler scheme."
+description = "Rain formation timescale for weak vertical velocities (stratiform regime) in the vertical velocity dependent Kessler rain formation (s). Equal to rain_autoconversion_timescale by default, which gives the classic velocity-independent Kessler scheme. Deprecated, will be removed in v2.0."
 
 [rain_autoconversion_velocity_scale]
 value = 1.5
