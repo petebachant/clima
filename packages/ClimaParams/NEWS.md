@@ -3,6 +3,51 @@ ClimaParams.jl Release Notes
 main
 -------
 
+v1.3.1
+-------
+- Add the parameters of the Raupach (1994) canopy roughness model in
+  SurfaceFluxes.jl (`RaupachRoughnessParams`), with the defaults of the paper:
+  `raupach_element_drag_coefficient` (`C_R`, 0.3),
+  `raupach_substrate_drag_coefficient` (`C_S`, 0.003),
+  `raupach_displacement_coefficient` (`c_d1`, 7.5),
+  `raupach_frontal_area_ratio` (frontal per plant area index, 0.5),
+  `raupach_minimum_frontal_area_index` (`λ_min`, 0.0),
+  `raupach_max_ustar_to_canopy_wind_ratio` (`(u★/U_h)_max`, 0.3), and
+  `raupach_roughness_sublayer_depth_ratio` (`c_w`, 2.0), which sets the
+  roughness-sublayer influence function `Ψ_h = ln c_w - 1 + 1/c_w`.
+
+v1.3.0
+-------
+- Add `sgs_variance_vertical_scale_factor` (default `1.0`): multiplier
+  `c_Δz` on the vertical grid scale `Δz` in the resolved vertical-gradient
+  SGS variance term in ClimaAtmos, `variance += c_g (c_Δz Δz)² (∂_z ψ)²`.
+- Change the default of `sgs_variance_horizontal_scale_factor` from `3.0`
+  to `1.0`, so the horizontal effective coefficient is `c_g · c_Δx² = 1/12`
+  — the uniform-box exact value, matching the new vertical factor.
+
+v1.2.1
+-------
+- Restore the parameters removed or renamed in v1.1.17 and v1.2.0, which broke
+  downstream packages. They are deprecated and will be removed in v2.0:
+  - `mixing_length_alpha`, `mixing_length_l_0`, `mixing_length_tke_max`,
+    `mixing_length_min`
+  - `rain_autoconversion_timescale_stratiform`,
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform`
+
+v1.2.0
+-------
+- Rename the stratiform Kessler autoconversion parameters to dimensionless
+  scale factors on their convective counterparts, both with default `1.0`
+  (so the classic velocity-independent Kessler scheme is recovered by default):
+  - `rain_autoconversion_timescale_stratiform` (was 1000.0 s) →
+    `rain_autoconversion_timescale_stratiform_scale` (1.0, unitless);
+    stratiform timescale is `rain_autoconversion_timescale` times this.
+  - `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform`
+    (was 5e-4) →
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale`
+    (1.0, unitless); stratiform threshold is
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold` times this.
+
 v1.1.17
 -------
 - Rework the EDMF empirical `l_TKE` closure parameters:
