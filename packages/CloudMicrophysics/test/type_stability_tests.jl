@@ -102,6 +102,13 @@ function run_type_stability_tests()
                 @test getproperty(val1_lin, k) isa FT
             end
 
+            # --- 1-Moment (LinearizedAverageVerbose, diagnostics) ---
+            val1_lin_v = BMT.bulk_microphysics_tendencies.(
+                BMT.LinearizedAverageVerbose(), BMT.Microphysics1Moment(), mp1, tps,
+                ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt,
+            )[1]
+            @test all(v -> v isa FT, values(val1_lin_v))
+
             # --- 1-Moment (InstantaneousVerbose — diagnostics) ---
             tendencies_1M_verbose =
                 BMT.bulk_microphysics_tendencies.(
@@ -125,12 +132,14 @@ function run_type_stability_tests()
             end
 
             # --- 1-Moment (Kessler1M with velocity-dependent regime values) ---
+            # τ_slow = 1000 s · 14.4 = 14400 s;  q_slow = 5·10⁻⁴ · 2.0 = 1·10⁻³.
             mp1_vd = CMP.Microphysics1MParams(
                 CP.create_toml_dict(FT;
                     override_file = Dict(
-                        "rain_autoconversion_timescale_stratiform" => Dict("value" => 14400.0, "type" => "float"),
-                        "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform" =>
-                            Dict("value" => 1e-3, "type" => "float"),
+                        "rain_autoconversion_timescale_stratiform_scale" =>
+                            Dict("value" => 14.4, "type" => "float"),
+                        "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale" =>
+                            Dict("value" => 2.0, "type" => "float"),
                     ),
                 ),
             )

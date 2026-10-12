@@ -34,6 +34,8 @@ import ..P3Scheme as CMP3
 import ..HetIceNucleation as CM_HetIce
 import ...ThermodynamicsInterface as TDI
 import ..Common as CO
+import StaticArrays as SA
+import UnrolledUtilities as UU
 
 export MicrophysicsScheme,
     Microphysics0Moment,
@@ -43,6 +45,7 @@ export MicrophysicsScheme,
     Instantaneous,
     InstantaneousVerbose,
     LinearizedAverage,
+    LinearizedAverageVerbose,
     bulk_microphysics_tendencies
 
 #####
@@ -55,6 +58,7 @@ export MicrophysicsScheme,
 Abstract type for microphysics scheme dispatch.
 """
 abstract type MicrophysicsScheme end
+Base.broadcastable(x::MicrophysicsScheme) = tuple(x)
 
 """
     Microphysics0Moment <: MicrophysicsScheme
@@ -89,6 +93,7 @@ struct Microphysics2Moment <: MicrophysicsScheme end
 Abstract type for selecting the output mode of `bulk_microphysics_tendencies`.
 """
 abstract type TendencyMode end
+Base.broadcastable(x::TendencyMode) = tuple(x)
 
 """
     Instantaneous <: TendencyMode
@@ -114,30 +119,66 @@ This is the mode used operationally by ClimaAtmos.
 """
 struct LinearizedAverage <: TendencyMode end
 
+"""
+    LinearizedAverageVerbose <: TendencyMode
+
+Return the time-averaged tendencies of [`LinearizedAverage`](@ref) and the time-averaged
+rate of each process, with the `S_*` names of [`InstantaneousVerbose`](@ref).
+"""
+struct LinearizedAverageVerbose <: TendencyMode end
+
+include("bulk_process_terms.jl")
+
+"""
+    Condensates1M{FT} <: StaticArrays.FieldVector{4, FT}
+
+Specific contents of the four 1-moment condensate species [kg/kg].
+
+The fields are `q_lcl`, `q_icl`, `q_rai` and `q_sno`. The state is indexed by position or
+by species name, for example `q[:q_lcl]`.
+"""
+struct Condensates1M{FT} <: SA.FieldVector{4, FT}
+    q_lcl::FT
+    q_icl::FT
+    q_rai::FT
+    q_sno::FT
+end
+SA.similar_type(::Type{<:Condensates1M}, ::Type{FT}, ::SA.Size{(4,)}) where {FT} = Condensates1M{FT}
+
+@inline Base.getindex(q::Condensates1M, species::Symbol) = getproperty(q, species)
+@inline Base.setindex(q::Q, v, species::Symbol) where {Q <: Condensates1M} =
+    Base.setindex(q, v, Base.fieldindex(Q, species))
+
+include("bulk_donor_step.jl")
+
 # --- 1-Moment Microphysics ---
 
 # --- Internal helpers ---
 
 """
-Compute all individual 1-moment microphysics source terms in a single pass.
+    _microphysics_source_terms(
+        ::Microphysics1Moment, mp, tps, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
+    )
 
-This is the **single source of truth** for which microphysical processes are
-called and with what arguments. Both the raw tendency aggregation and the
-linearized operator construction consume this output.
+Compute the term of each 1-moment microphysics process.
 
-Constructs two `NamedTuple`s that are passed to all process functions
-(see `Microphysics1M` module docs for the full convention):
-- `micro = (; q_tot, q_lcl, q_icl, q_rai, q_sno)` — specific humidities (kg/kg)
-- `thermo = (; ρ, T, w)` — air density (kg/m³), temperature (K) and vertical velocity [m/s]
+Each term is a [`Transfer`](@ref), [`VaporExchange`](@ref) or [`VaporRelaxation`](@ref), and
+its type gives the species of the process and the direction of its rate. A collision with a
+cold and a warm branch has one term for each branch, with the suffix `_cold` or `_warm`, and
+the term of the inactive branch is zero.
 
-Naming convention: `S_process_species1_species2`
- - process: physical mechanism (phase_change, acnv, accr, melt, accr_melt, accr_freeze)
- - species1, species2: interacting pair (not from/to)
- - `_cold` / `_warm` suffix for two-sided collision arms (inactive arm = zero)
+# Arguments
+- `mp`: 1-moment microphysics parameters.
+- `tps`: thermodynamics parameters.
+- `ρ`: air density [kg/m³].
+- `T`: temperature [K].
+- `w`: vertical velocity [m/s].
+- `q_tot`, `q_lcl`, `q_icl`, `q_rai`, `q_sno`: specific contents of total water, cloud
+  liquid, cloud ice, rain and snow [kg/kg].
 
-Returns a `NamedTuple` of 18 scalar source terms plus the two relaxation timescales
-`τ_phase_change_vap_lcl` / `τ_phase_change_vap_icl` used by the linearized solver.  All two-sided collision
-processes are pre-routed by temperature, so consumers never need `is_warm`.
+# Returns
+- `NamedTuple` of process terms. The terms of the two cloud phase changes store their
+  relaxation timescale `τ` [s], which is `Inf` if the process is disabled.
 """
 @inline function _microphysics_source_terms(
     ::Microphysics1Moment, mp::CMP.Microphysics1MParams, tps,
@@ -164,22 +205,30 @@ processes are pre-routed by temperature, so consumers never need `is_warm`.
     sd = CM1.size_distr_parameters(mp, micro, thermo)
 
     # --- Phase change: vapor ↔ cloud condensate (bidirectional, ±) ---
-    S_phase_change_vap_lcl = CMNonEq.conv_q_vap_to_q_lcl(procs.cloud_liquid_formation, mp, tps, micro, thermo)
-    S_phase_change_vap_icl = CMNonEq.conv_q_vap_to_q_icl(procs.cloud_ice_formation, mp, tps, micro, thermo)
-    # Relaxation timescales (without Γ) of the two phase changes above; `Inf` when disabled.
-    # Used by the linearized solver to integrate the relaxation implicitly.
-    τ_phase_change_vap_lcl = CMNonEq.τ_vap_to_q_lcl(procs.cloud_liquid_formation, mp, tps, micro, thermo)
-    τ_phase_change_vap_icl = CMNonEq.τ_vap_to_q_icl(procs.cloud_ice_formation, mp, tps, micro, thermo)
+    # Relaxation timescales (without Γ); `Inf` when disabled
+    S_phase_change_vap_lcl = VaporRelaxation(:q_lcl,
+        CMNonEq.conv_q_vap_to_q_lcl(procs.cloud_liquid_formation, mp, tps, micro, thermo),
+        CMNonEq.τ_vap_to_q_lcl(procs.cloud_liquid_formation, mp, tps, micro, thermo),
+    )
+
+    S_phase_change_vap_icl = VaporRelaxation(:q_icl,
+        CMNonEq.conv_q_vap_to_q_icl(procs.cloud_ice_formation, mp, tps, micro, thermo),
+        CMNonEq.τ_vap_to_q_icl(procs.cloud_ice_formation, mp, tps, micro, thermo),
+    )
 
     # --- Autoconversion (cloud → precipitation, ≥ 0) ---
-    S_acnv_lcl_rai = CM1.conv_q_lcl_to_q_rai(procs.rain_autoconversion, mp, tps, micro, thermo)
-    S_acnv_icl_sno = CM1.conv_q_icl_to_q_sno(procs.snow_autoconversion, mp, tps, micro, thermo, sd)
+    S_acnv_lcl_rai =
+        Transfer(:q_lcl => :q_rai, CM1.conv_q_lcl_to_q_rai(procs.rain_autoconversion, mp, tps, micro, thermo))
+
+    S_acnv_icl_sno =
+        Transfer(:q_icl => :q_sno, CM1.conv_q_icl_to_q_sno(procs.snow_autoconversion, mp, tps, micro, thermo, sd))
 
     # --- Accretion (collisions between species) ---
     is_warm = T >= TDI.T_freeze(tps)
 
     # Cloud liquid + rain → rain
-    S_accr_lcl_rai = CM1.accretion(procs.cloud_liquid_rain_accretion, mp, tps, micro, thermo, sd)
+    S_accr_lcl_rai =
+        Transfer(:q_lcl => :q_rai, CM1.accretion(procs.cloud_liquid_rain_accretion, mp, tps, micro, thermo, sd))
 
     # Cloud liquid + snow: product goes to sno (cold) or rai (warm), plus thermal melt.
     # The previous accretion versions return a single number, this one has to return a tuple.
@@ -188,39 +237,46 @@ processes are pre-routed by temperature, so consumers never need `is_warm`.
     else
         CM1.accretion(procs.cloud_liquid_snow_accretion, mp, tps, micro, thermo, sd)
     end
-    S_accr_lcl_sno_cold = ifelse(is_warm, zero(FT), S_accr)    # lcl → sno (cold)
-    S_accr_lcl_sno_warm = ifelse(is_warm, S_accr, zero(FT))    # lcl → rai (warm)
-    S_accr_melt_lcl_sno = S_melt                                # thermal melt of sno from warm lcl (already zero when cold)
+    S_accr_lcl_sno_cold = Transfer(:q_lcl => :q_sno, ifelse(is_warm, zero(FT), S_accr)) # cold
+    S_accr_lcl_sno_warm = Transfer(:q_lcl => :q_rai, ifelse(is_warm, S_accr, zero(FT))) # warm
+    S_accr_melt_lcl_sno = Transfer(:q_sno => :q_rai, S_melt) # thermal melt, zero when cold
 
     # Cloud ice + rain → snow (ice-side sink)
-    S_accr_icl_rai = CM1.accretion(procs.cloud_ice_rain_accretion, mp, tps, micro, thermo, sd)
+    S_accr_icl_rai =
+        Transfer(:q_icl => :q_sno, CM1.accretion(procs.cloud_ice_rain_accretion, mp, tps, micro, thermo, sd))
 
     # Rain frozen in cloud ice + rain collision → snow (rain sink)
-    S_accr_freeze_icl_rai = CM1.accretion_rain_sink(procs.cloud_ice_rain_accretion, mp, tps, micro, thermo, sd)
+    S_accr_freeze_icl_rai =
+        Transfer(:q_rai => :q_sno, CM1.accretion_rain_sink(procs.cloud_ice_rain_accretion, mp, tps, micro, thermo, sd))
 
     # Cloud ice + snow → snow
-    S_accr_icl_sno = CM1.accretion(procs.cloud_ice_snow_accretion, mp, tps, micro, thermo, sd)
+    S_accr_icl_sno =
+        Transfer(:q_icl => :q_sno, CM1.accretion(procs.cloud_ice_snow_accretion, mp, tps, micro, thermo, sd))
 
     # Rain-snow collisions: split into cold/warm arms (inactive arm = zero)
     (; S_rai_sno, S_sno_rai, S_melt) = CM1.accretion_snow_rain(procs.rain_snow_accretion, mp, tps, micro, thermo, sd)
-    S_accr_rai_sno_cold = ifelse(is_warm, zero(FT), S_rai_sno) # cold arm: rai freezes → sno
-    S_accr_rai_sno_warm = ifelse(is_warm, S_sno_rai, zero(FT)) # warm arm: sno melts → rai
-    S_accr_melt_rai_sno = ifelse(is_warm, S_melt, zero(FT))    # thermal melt of sno from warm rai
+    S_accr_rai_sno_cold = Transfer(:q_rai => :q_sno, ifelse(is_warm, zero(FT), S_rai_sno)) # cold
+    S_accr_rai_sno_warm = Transfer(:q_sno => :q_rai, ifelse(is_warm, S_sno_rai, zero(FT))) # warm
+    S_accr_melt_rai_sno = Transfer(:q_sno => :q_rai, ifelse(is_warm, S_melt, zero(FT)))    # thermal melt
 
     # --- Phase change: precipitation ↔ vapor ---
-    S_phase_change_vap_rai = CM1.conv_q_rai_to_q_vap(procs.rain_condensation_evaporation, mp, tps, micro, thermo, sd)
-    S_phase_change_vap_sno = CM1.conv_q_sno_to_q_vap(procs.snow_deposition_sublimation, mp, tps, micro, thermo, sd)
+    S_phase_change_vap_rai =
+        VaporExchange(:q_rai, CM1.conv_q_rai_to_q_vap(procs.rain_condensation_evaporation, mp, tps, micro, thermo, sd))
+    S_phase_change_vap_sno =
+        VaporExchange(:q_sno, CM1.conv_q_sno_to_q_vap(procs.snow_deposition_sublimation, mp, tps, micro, thermo, sd))
 
     # --- Melting ---
-    S_melt_icl_lcl = CM1.conv_q_icl_to_q_lcl(procs.cloud_ice_melt, mp, tps, micro, thermo, sd)
-    S_melt_sno_rai = CM1.conv_q_sno_to_q_rai(procs.snow_melt, mp, tps, micro, thermo, sd)
+    S_melt_icl_lcl =
+        Transfer(:q_icl => :q_lcl, CM1.conv_q_icl_to_q_lcl(procs.cloud_ice_melt, mp, tps, micro, thermo, sd))
+    S_melt_sno_rai =
+        Transfer(:q_sno => :q_rai, CM1.conv_q_sno_to_q_rai(procs.snow_melt, mp, tps, micro, thermo, sd))
 
     # --- Freezing ---
-    S_freeze_lcl_icl = CM1.conv_q_lcl_to_q_icl(procs.cloud_liquid_freezing, mp, tps, micro, thermo)
+    S_freeze_lcl_icl =
+        Transfer(:q_lcl => :q_icl, CM1.conv_q_lcl_to_q_icl(procs.cloud_liquid_freezing, mp, tps, micro, thermo))
 
     return (;
         S_phase_change_vap_lcl, S_phase_change_vap_icl,
-        τ_phase_change_vap_lcl, τ_phase_change_vap_icl,
         S_acnv_lcl_rai, S_acnv_icl_sno,
         S_accr_lcl_rai, S_accr_lcl_sno_cold, S_accr_lcl_sno_warm, S_accr_melt_lcl_sno,
         S_accr_icl_rai, S_accr_freeze_icl_rai, S_accr_icl_sno,
@@ -232,309 +288,246 @@ processes are pre-routed by temperature, so consumers never need `is_warm`.
 end
 
 """
-Aggregate individual source terms into the four hydrometeor tendency totals.
+    _latent_heating(Δq, tps)
 
-This is the **single location** where the sign convention of source terms
-to tendency accumulators is defined.  All temperature-dependent routing is
-pre-applied in `_microphysics_source_terms` (cold/warm arms), so every term
-here appears with a fixed sign — no `ifelse` branching.
+Temperature change [K] from the latent heat of the species change `Δq`, a
+[`Condensates1M`](@ref) [kg/kg], with the reference latent heats and the dry-air specific
+heat of the substep temperature update: `(L_v (Δq_lcl + Δq_rai) + L_s (Δq_icl + Δq_sno)) / c_p`.
 """
-@inline function _aggregate_tendencies(src)
-    dq_lcl_dt =
-        src.S_phase_change_vap_lcl - src.S_acnv_lcl_rai - src.S_accr_lcl_rai -
-        src.S_accr_lcl_sno_cold - src.S_accr_lcl_sno_warm + src.S_melt_icl_lcl -
-        src.S_freeze_lcl_icl
-
-    dq_icl_dt =
-        src.S_phase_change_vap_icl - src.S_acnv_icl_sno - src.S_accr_icl_rai -
-        src.S_accr_icl_sno - src.S_melt_icl_lcl +
-        src.S_freeze_lcl_icl
-
-    dq_rai_dt =
-        src.S_acnv_lcl_rai + src.S_accr_lcl_rai +
-        src.S_accr_lcl_sno_warm + src.S_accr_melt_lcl_sno -
-        src.S_accr_freeze_icl_rai -
-        src.S_accr_rai_sno_cold + src.S_accr_rai_sno_warm + src.S_accr_melt_rai_sno +
-        src.S_phase_change_vap_rai + src.S_melt_sno_rai
-
-    dq_sno_dt =
-        src.S_acnv_icl_sno +
-        src.S_accr_lcl_sno_cold - src.S_accr_melt_lcl_sno +
-        src.S_accr_icl_rai + src.S_accr_freeze_icl_rai +
-        src.S_accr_icl_sno +
-        src.S_accr_rai_sno_cold - src.S_accr_rai_sno_warm - src.S_accr_melt_rai_sno +
-        src.S_phase_change_vap_sno - src.S_melt_sno_rai
-
-    return (; dq_lcl_dt, dq_icl_dt, dq_rai_dt, dq_sno_dt)
+@inline function _latent_heating(Δq::Condensates1M, tps)
+    cp_d = TDI.TD.Parameters.cp_d(tps)
+    Lv = TDI.TD.Parameters.LH_v0(tps)
+    Ls = TDI.TD.Parameters.LH_s0(tps)
+    return (Lv * (Δq.q_lcl + Δq.q_rai) + Ls * (Δq.q_icl + Δq.q_sno)) / cp_d
 end
 
 """
-    _relaxation_transfer(S, τ, Δt)
+    _saturation_floor(tps, ρ, T, q)
 
-Transfer over a substep `Δt` of a linear relaxation with instantaneous rate `S`
-and timescale `τ` (Morrison & Milbrandt 2015, Appendix C, eqs. C6-C7):
-`S τ (1 - exp(-Δt/τ))`, i.e. `S Δt φ(Δt/τ)` with `φ(x) = (1 - e⁻ˣ)/x`. It tends
-to `S Δt` for `Δt ≪ τ` (the instantaneous rate is recovered) and to `S τ` for
-`Δt ≫ τ` (the transfer saturates at the equilibrium amount, so the substep never
-overshoots the equilibrium). Only `x φ(x) = 1 - e⁻ˣ` is needed, so there is no
-division by `x`; `τ` is clamped to `[eps, floatmax]` so that a disabled process
-(`τ = Inf`, `S = 0`) yields `0` rather than `0 ⋅ Inf`.
+Quantities of the vapor limiter of `linearized_step_1m`: the lower of the saturation specific
+contents over liquid and over ice, `q_smin`, its temperature derivative `λ_min`, the
+corresponding latent-heat factor `Γ_min = 1 + (L/cₚ) λ_min`, and the tolerance `q_tol` below
+which the summed vapor sources of a substep count as zero.
+
+`Γ_min` uses the reference latent heat and the dry-air heat capacity of the substep
+temperature update (`_latent_heating`), so that the sources scaled by the limiter leave the
+vapor on the floor; the slope `λ_min` is that of the saturation curve. `q_tol` is one ulp of
+the larger saturation content.
 """
-@inline function _relaxation_transfer(S, τ, Δt)
-    τ_c = clamp(τ, eps(typeof(τ)), floatmax(typeof(τ)))
-    return S * τ_c * -expm1(-Δt / τ_c)
+@inline function _saturation_floor(tps::TDI.PS, ρ, T, q::Condensates1M)
+    FT = eltype(q)
+    q_sl = TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ)
+    q_si = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+    Rᵥ = TDI.Rᵥ(tps)
+    dqsl_dT = CMNonEq.dqcld_dT(q_sl, TDI.Lᵥ(tps, T), Rᵥ, T)
+    dqsi_dT = CMNonEq.dqcld_dT(q_si, TDI.Lₛ(tps, T), Rᵥ, T)
+    cp_d = TDI.TD.Parameters.cp_d(tps)
+    Γₗ = CMNonEq.gamma_helper(TDI.TD.Parameters.LH_v0(tps), cp_d, dqsl_dT)
+    Γᵢ = CMNonEq.gamma_helper(TDI.TD.Parameters.LH_s0(tps), cp_d, dqsi_dT)
+    (q_smin, λ_min, Γ_min) = ifelse(q_si <= q_sl, (q_si, dqsi_dT, Γᵢ), (q_sl, dqsl_dT, Γₗ))
+    # one ulp of the saturation content: the vapor gap carries that much round-off, so a source sum below it
+    # cannot be told from zero and the limiter is skipped (α = 1) instead of dividing by it
+    q_tol = eps(FT) * max(q_sl, q_si)
+    return (; q_smin, λ_min, Γ_min, q_tol)
 end
 
 """
-Construct a local linear approximation of 1-moment microphysics tendencies
-from pre-computed source terms:
+    linearized_step_1m(mp, tps, ρ, T, w, q_tot, q, Δt)
 
-    dq/dt ≈ M * q + e
+Compute one linearized substep of width `Δt` for the 1-moment species `q`.
 
-using a donor-based linearization:
-- donor → receiver transfers are represented as `D * q_donor`
-- vapor ↔ cloud condensate phase changes are relaxations toward their
-  equilibrium, `S = (q* - q)/τ`. Their transfer over the substep is the time
-  average of the exact relaxation, `Δq = S Δt φ(Δt/τ)` with
-  `φ(x) = (1 - exp(-x))/x` (Morrison & Milbrandt 2015, Appendix C), so the
-  substep never crosses `q*` for any `Δt/τ` and the instantaneous rate is
-  recovered for `Δt ≪ τ`. A source (`Δq > 0`) enters `e` as a non-negative
-  constant. A sink (`Δq < 0`) enters `M` as an implicit decay `-D q` whose
-  coefficient, `D = |Δq| / ((q + Δq) Δt)`, removes exactly `|Δq|` when acting
-  alone; combined with other sinks it keeps `q ≥ 0`, and, unlike the plain
-  `S/q` decay, it does not over-sublimate when `τ ≪ Δt`. This matters when τ is
-  a few seconds (e.g. `PrescribedIceNumber` with a large prescribed `N_0`),
-  where feeding the instantaneous rate to the substep produced a
-  deposition/sublimation flip-flop.
-- vapor → snow deposition is treated as a constant source (`e`)
-- other condensate sinks are treated as linear sinks (`-D * q`)
+The substep returns the time-averaged tendencies of the species, the rate of each process
+over the substep, and the factors of its limiters.
 
-The other `D` coefficients use `D = S / max(q_min, q_donor)` for robustness.
+Two backward Euler steps are taken. The first, with the donor-based linearization of the
+process terms, gives the realized transfers and the realized heating of all phase changes
+(with the latent-heat factors of the substep temperature update, `_latent_heating`). From them:
 
-Returns a `NamedTuple` containing the nonzero entries of `M` and `e`.
+- vapor limiter: if the solved vapor would fall below the lower saturation at the updated
+  temperature (linearized, `q_smin + λ_min ΔT`, `_saturation_floor`), the vapor sources are
+  scaled by `α_cap = 1 - gap / (Γ_min Σe Δt)` (reducing the sources by `R` raises the vapor by `R`
+  and lowers the saturation by `(Γ_min - 1) R`). This removes deposition that a pool exhausted
+  within the substep (e.g. liquid taken by freezing) could not feed.
+- latent-heating limiter: if the realized heating or cooling of all phase changes exceeds
+  `max_latent_heating_rate × Δt`, the vapor sources are scaled by `f_lim` and the decays of every
+  donor's terms that change phase by the factor `f_k` of [`_donor_limiter_scale`](@ref), which
+  scales their realized transfer by `f_lim`; transfers within one phase are not scaled.
+
+The second step applies both factors. Should the realized heating still exceed the bound
+(pools feeding each other) or the condensate grow by more than the available vapor, the
+substep tendencies and rates are scaled uniformly by `g_uniform` (heating and the vapor budget are
+linear in them, so both bounds are then met exactly; the condensate pools are non-negative by
+construction of the implicit decays). Negative species are clamped to zero on input.
+
+# Arguments
+- `q`: species, as a [`Condensates1M`](@ref) [kg/kg].
+- `Δt`: width of the substep [s].
+- The other arguments are those of `_microphysics_source_terms`.
+
+# Returns
+- `(; dq_dt, rates, α_cap, f_lim, g_uniform)`: the tendencies, as a [`Condensates1M`](@ref)
+  [kg/kg/s], the rate of each process from [`donor_rates`](@ref) [kg/kg/s], and the factors of
+  the vapor limiter, the heating limiter and the uniform scaling [-].
 """
-@inline function _linearize(src, q_lcl, q_icl, q_rai, q_sno, q_min, Δt)
-    FT = typeof(src.S_phase_change_vap_lcl)
+@inline function linearized_step_1m(mp::CMP.Microphysics1MParams, tps, ρ, T, w, q_tot, q, Δt)
+    FT = eltype(q)
+    q = max.(q, zero(FT))   # non-negative pools (hosts may pass slightly negative reconstructed values)
+    terms = _microphysics_source_terms(Microphysics1Moment(), mp, tps, ρ, T, w, q_tot, q...)
+    q_min = TDI.TD.Parameters.q_min(tps)
+    lin = donor_linearization(terms, q, q_min, Δt)
+    q1 = backward_euler_solve(lin, q, one(FT), Δt)
+    (; α_cap, f_lim, f_k) = _limiter_factors(mp, tps, terms, lin, q, q1, ρ, T, q_tot, q_min, Δt)
 
-    M11 = zero(FT)
-    M12 = zero(FT)
-    M21 = zero(FT)
-    M22 = zero(FT)
-    M31 = zero(FT)
-    M33 = zero(FT)
-    M34 = zero(FT)
-    M41 = zero(FT)
-    M42 = zero(FT)
-    M43 = zero(FT)
-    M44 = zero(FT)
-    e1 = zero(FT)
-    e2 = zero(FT)
-    e4 = zero(FT)
+    lin2 = donor_linearization(terms, q, q_min, Δt, f_k)
+    q2 = backward_euler_solve(lin2, q, α_cap * f_lim, Δt)
+    g_uniform = _uniform_scale(mp, tps, q, q2, q_tot, Δt)
 
-    # --- Phase change: vapor ↔ cloud condensate (time-averaged relaxation) ---
-    # The non-equilibrium schemes relax the condensate toward q* = q + S τ at rate
-    # 1/τ (τ excludes Γ, which is already inside S; `Inf` when the process is
-    # disabled). Δq is the transfer over the substep (see `_relaxation_transfer`).
-    # A source enters `e` as a non-negative constant; a sink enters `M` as an
-    # implicit decay whose coefficient removes exactly |Δq| on its own
-    # (|Δq| ≤ |S| τ ≤ q by the tendency bound, so q + Δq ≥ 0 up to round-off; the
-    # `q_min` floor keeps the coefficient finite when the whole pool sublimates).
-    Δq = _relaxation_transfer(src.S_phase_change_vap_lcl, src.τ_phase_change_vap_lcl, Δt)
-    e1 += max(zero(Δq), Δq) / Δt
-    M11 -= ifelse(Δq < zero(Δq), -Δq / (max(q_lcl + Δq, q_min) * Δt), zero(Δq))
+    dq_dt = (q2 - q) * (g_uniform / Δt)
+    rates = UU.unrolled_map(r -> g_uniform * r, donor_rates(terms, q, q2, α_cap * f_lim, q_min, Δt, f_k))
+    return (; dq_dt, rates, α_cap, f_lim, g_uniform)
+end
 
-    Δq = _relaxation_transfer(src.S_phase_change_vap_icl, src.τ_phase_change_vap_icl, Δt)
-    e2 += max(zero(Δq), Δq) / Δt
-    M22 -= ifelse(Δq < zero(Δq), -Δq / (max(q_icl + Δq, q_min) * Δt), zero(Δq))
+"""
+    _limiter_factors(mp, tps, terms, lin, q, q1, ρ, T, q_tot, q_min, Δt)
 
-    # --- Melt: ice cloud → liquid cloud ---
-    D = src.S_melt_icl_lcl / max(q_min, q_icl)
-    M22 -= D
-    M12 += D
+Factors of the vapor limiter and of the latent-heating limiter of `linearized_step_1m`,
+from the first backward Euler step `q1` of the linearization `lin` of `terms` at `q`:
+`(; α_cap, f_lim, f_k)`, the scale of the vapor sources, the scale of the realized heating,
+and the per-donor scale of the phase-change decays ([`_donor_limiter_scale`](@ref)).
+"""
+@inline function _limiter_factors(mp, tps, terms, lin, q, q1, ρ, T, q_tot, q_min, Δt)
+    FT = eltype(q)
+    ΔT1 = _latent_heating(q1 - q, tps)
 
-    # --- Freeze: liquid cloud → ice cloud ---
-    D = src.S_freeze_lcl_icl / max(q_min, q_lcl)
-    M11 -= D
-    M21 += D
+    # vapor limiter on the solved state: the sources may not leave less vapor than the lower
+    # saturation at the corrected temperature (linearized in ΔT); scaling the sources by α raises
+    # the vapor by (1-α) Σe and lowers the floor by (Γ_min-1)(1-α) Σe, hence Γ_min below
+    sf = _saturation_floor(tps, ρ, T, q)
+    q_v1 = q_tot - sum(q1)
+    gap = max(zero(FT), sf.q_smin + sf.λ_min * ΔT1 - q_v1)
+    e = Condensates1M(lin.e...)
+    Σe = sum(e) * Δt
+    α_cap = ifelse(Σe > sf.q_tol, max(zero(FT), one(FT) - gap / (sf.Γ_min * max(Σe, sf.q_tol))), one(FT))
 
-    # --- Autoconversion: donor-based transfer ---
-    D = src.S_acnv_lcl_rai / max(q_min, q_lcl)
-    M11 -= D
-    M31 += D
+    # latent-heating limiter on the realized heating (after the vapor limiter)
+    ΔT_α = ΔT1 - (one(FT) - α_cap) * _latent_heating(e, tps) * Δt
+    ΔT_max = mp.max_latent_heating_rate * Δt
+    f_lim = ifelse(abs(ΔT_α) > ΔT_max, ΔT_max / max(abs(ΔT_α), eps(FT)), one(FT))
+    (Dpc, Dcol) = limiter_decay_totals(terms, q, q_min, Δt)
+    f_k = _donor_limiter_scale.(f_lim, Dpc, Dcol, Δt)
+    return (; α_cap, f_lim, f_k)
+end
 
-    D = src.S_acnv_icl_sno / max(q_min, q_icl)
-    M22 -= D
-    M42 += D
+"""
+    _uniform_scale(mp, tps, q, q2, q_tot, Δt)
 
-    # --- Accretion: donor-based transfer ---
-    D = src.S_accr_lcl_rai / max(q_min, q_lcl)
-    M11 -= D
-    M31 += D
+Uniform scale `g_uniform` of the substep tendencies of `linearized_step_1m` after its second
+backward Euler step `q2`: the smaller of the scale that bounds the realized heating by
+`max_latent_heating_rate × Δt` and the scale that keeps the condensate from growing by more
+than the available vapor; 1 when neither bound is exceeded.
+"""
+@inline function _uniform_scale(mp, tps, q, q2, q_tot, Δt)
+    FT = eltype(q)
+    # the per-donor scaling is exact for a donor whose pool is not refilled by another phase change; when
+    # pools feed each other (rain freezing on ice while snow melts) the realized heating can still exceed the
+    # bound, in which case all substep tendencies are scaled uniformly to it (exact: heating is linear in them)
+    ΔT2 = _latent_heating(q2 - q, tps)
+    ΔT_max = mp.max_latent_heating_rate * Δt
+    g_heat = ifelse(abs(ΔT2) > ΔT_max, ΔT_max / max(abs(ΔT2), eps(FT)), one(FT))
+    # hard positivity guard for the vapor: the condensate may not grow by more than the vapor available
+    # (the condensate pools are non-negative by construction of the implicit decays)
+    Δq_cond = sum(q2 - q)
+    q_v0 = max(q_tot - sum(q), zero(FT))
+    g_vap = ifelse(Δq_cond > q_v0, q_v0 / max(Δq_cond, eps(FT)), one(FT))
+    return min(g_heat, g_vap)
+end
 
-    # lcl + sno accretion (cold/warm arms already zeroed)
-    D_cold = src.S_accr_lcl_sno_cold / max(q_min, q_lcl)
-    D_warm = src.S_accr_lcl_sno_warm / max(q_min, q_lcl)
-    M11 -= D_cold + D_warm
-    M31 += D_warm           # warm: lcl → rai
-    M41 += D_cold           # cold: lcl → sno
-
-    # thermal melt of sno from warm lcl
-    D = src.S_accr_melt_lcl_sno / max(q_min, q_sno)
-    M44 -= D
-    M34 += D
-
-    D = src.S_accr_icl_rai / max(q_min, q_icl)
-    M22 -= D
-    M42 += D
-
-    D = src.S_accr_icl_sno / max(q_min, q_icl)
-    M22 -= D
-    M42 += D
-
-    # rain frozen in icl + rai collision
-    D = src.S_accr_freeze_icl_rai / max(q_min, q_rai)
-    M33 -= D
-    M43 += D
-
-    # warm arm: sno melts → rai (already zero when cold)
-    D = src.S_accr_rai_sno_warm / max(q_min, q_sno)
-    M44 -= D
-    M34 += D
-
-    # thermal melt of sno from warm rai (already zero when cold)
-    D = src.S_accr_melt_rai_sno / max(q_min, q_sno)
-    M44 -= D
-    M34 += D
-
-    # cold arm: rai freezes → sno (already zero when warm)
-    D = src.S_accr_rai_sno_cold / max(q_min, q_rai)
-    M33 -= D
-    M43 += D
-
-    # --- Rain phase change: sink to vapor (always zero or negative) ---
-    D = (-src.S_phase_change_vap_rai) / max(q_min, q_rai)
-    M33 -= D
-
-    # --- Snow phase change: deposition/sublimation ---
-    D = src.S_phase_change_vap_sno / max(q_min, q_sno)
-    is_source = src.S_phase_change_vap_sno >= zero(FT)
-    e4 += ifelse(is_source, src.S_phase_change_vap_sno, zero(FT))
-    M44 += ifelse(is_source, zero(FT), D)
-
-    # --- Snow melt: snow → rain ---
-    D = src.S_melt_sno_rai / max(q_min, q_sno)
-    M44 -= D
-    M34 += D
-
-    return (
-        M11 = M11, M12 = M12, M21 = M21, M22 = M22,
-        M31 = M31, M33 = M33, M34 = M34,
-        M41 = M41, M42 = M42, M43 = M43, M44 = M44,
-        e1 = e1, e2 = e2, e4 = e4,
+"""
+    _linearized_implicit_step_factors(
+        ::Microphysics1Moment, mp, tps, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt,
     )
+
+The tendencies of `linearized_step_1m` as `rates = (; dq_lcl_dt, dq_icl_dt, dq_rai_dt, dq_sno_dt)`
+[kg/kg/s] together with its factors `α_cap`, `f_lim` and `g_uniform` (for tests).
+"""
+@inline function _linearized_implicit_step_factors(
+    ::Microphysics1Moment, mp::CMP.Microphysics1MParams, tps,
+    ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt::AbstractFloat,
+)
+    q = Condensates1M(q_lcl, q_icl, q_rai, q_sno)
+    (; dq_dt, rates, α_cap, f_lim, g_uniform) = linearized_step_1m(mp, tps, ρ, T, w, q_tot, q, Δt)
+    return (; rates = _output_1m(LinearizedAverage(), dq_dt, rates), α_cap, f_lim, g_uniform)
 end
 
 """
-Compute time-averaged 1-moment microphysics tendencies over a single linearized substep.
+    _linearized_implicit_step(
+        ::Microphysics1Moment, mp, tps, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt,
+    )
 
-Solves the linearized implicit system
-
-    (q* - q⁰) / Δt = M q* + e
-
-and returns the average tendency
-
-    dq/dt = (q* - q⁰) / Δt.
-
-The system uses a sparse structure specific to the 1-moment microphysics model.
-`q_lcl` and `q_icl` as well as `q_rai` and `q_sno` are solved from a coupled 2×2 system.
-
-Because sinks are linearized as `-D q`, they are effectively integrated as
-exponential decays over the substep. The vapor → cloud condensate sources in `e`
-are the time-averaged transfers over the substep (see `_linearize`); evaporation and
-sublimation are part of `M`.
+Compute the tendencies of `linearized_step_1m` as the `NamedTuple`
+`(; dq_lcl_dt, dq_icl_dt, dq_rai_dt, dq_sno_dt)` [kg/kg/s].
 """
 @inline function _linearized_implicit_step(
     ::Microphysics1Moment, mp::CMP.Microphysics1MParams, tps,
     ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt::AbstractFloat,
 )
+    q = Condensates1M(q_lcl, q_icl, q_rai, q_sno)
+    (; dq_dt, rates) = linearized_step_1m(mp, tps, ρ, T, w, q_tot, q, Δt)
+    return _output_1m(LinearizedAverage(), dq_dt, rates)
+end
 
-    FT = typeof(q_tot)
+"""
+    _substep_1m(mp, tps, ρ, T, w, q_tot, q, Δt_sub)
 
-    src = _microphysics_source_terms(
-        Microphysics1Moment(), mp, tps,
-        ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
+Advance the species `q` and the temperature `T` over one substep of width `Δt_sub`, and
+return them as `(; q, T, increments)` with the increment of each process [kg/kg].
+
+The temperature changes by the latent heat of the species increments.
+"""
+@inline function _substep_1m(mp, tps, ρ, T, w, q_tot, q, Δt_sub)
+    (; dq_dt, rates) = linearized_step_1m(mp, tps, ρ, T, w, q_tot, q, Δt_sub)
+    q += dq_dt * Δt_sub
+    T += _latent_heating(dq_dt, tps) * Δt_sub
+    return (; q, T, increments = UU.unrolled_map(r -> r * Δt_sub, rates))
+end
+
+"""
+    _zero_increments_1m(mp, tps, ρ, T, w, q_tot, q, Δt_sub)
+
+Return zero increments of the processes, of the type that `_substep_1m` returns for the same arguments.
+"""
+@inline function _zero_increments_1m(args...)
+    Substep = Core.Compiler.return_type(_substep_1m, typeof(args))
+    Increments = fieldtype(Substep, :increments)
+    return Increments(ntuple(_ -> zero(eltype(Increments)), Val(fieldcount(Increments))))
+end
+
+"""
+    _output_1m(mode, dq_dt, rates)
+
+Return the output of `bulk_microphysics_tendencies` for the 1-moment tendencies `dq_dt`, a
+[`Condensates1M`](@ref) [kg/kg/s], and the rate of each process `rates` [kg/kg/s].
+
+The output has the tendencies `dq_lcl_dt`, `dq_icl_dt`, `dq_rai_dt` and `dq_sno_dt`, and,
+with `InstantaneousVerbose` and `LinearizedAverageVerbose`, also the rates.
+"""
+@inline function _output_1m(mode, dq_dt::Condensates1M, rates)
+    tendencies = (;
+        dq_lcl_dt = dq_dt.q_lcl, dq_icl_dt = dq_dt.q_icl, dq_rai_dt = dq_dt.q_rai, dq_sno_dt = dq_dt.q_sno,
     )
-    q_min = TDI.TD.Parameters.q_min(tps)
-    lin = _linearize(src, q_lcl, q_icl, q_rai, q_sno, q_min, Δt)
-
-    invΔt = one(FT) / Δt
-
-    # Cap vap→condensate sources jointly so the substep cannot drive
-    # `q_v` below `min(q_sat_liq, q_sat_ice)`. Preserves relative rates.
-    q_sat_min = min(
-        TDI.saturation_vapor_specific_content_over_liquid(tps, T, ρ),
-        TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ),
-    )
-    q_v = q_tot - q_lcl - q_icl - q_rai - q_sno
-    α = min(
-        one(FT),
-        max(zero(FT), q_v - q_sat_min) * invΔt /
-        max(lin.e1 + lin.e2 + lin.e4, eps(FT)),
-    )
-
-    # A = I/Δt - M
-    a11 = invΔt - lin.M11
-    a12 = -lin.M12
-    a21 = -lin.M21
-    a22 = invΔt - lin.M22
-    a31 = -lin.M31
-    a33 = invΔt - lin.M33
-    a34 = -lin.M34
-    a41 = -lin.M41
-    a42 = -lin.M42
-    a43 = -lin.M43
-    a44 = invΔt - lin.M44
-
-    # rhs = e + q_0/Δt (vap→condensate `e` terms scaled by `α` above)
-    # e3 = 0 by the 1m model
-    b1 = α * lin.e1 + invΔt * q_lcl
-    b2 = α * lin.e2 + invΔt * q_icl
-    b3 = invΔt * q_rai
-    b4 = α * lin.e4 + invΔt * q_sno
-
-    # Solve 2×2 system for q_lcl, q_icl (coupled via ice melt M12 and liquid freezing M21)
-    det12 = muladd(-a12, a21, a11 * a22)
-    q_lcl_new = (b1 * a22 - a12 * b2) / det12
-    q_icl_new = (a11 * b2 - a21 * b1) / det12
-
-    # Reduced 2x2 system for q_rai_new, q_sno_new
-    r3 = muladd(-a31, q_lcl_new, b3)
-    r4 = muladd(-a41, q_lcl_new, muladd(-a42, q_icl_new, b4))
-
-    det = muladd(-a34, a43, a33 * a44)
-    # det is a positive because a33a44 is guaranteed to be larger than a34a43
-    q_rai_new = (r3 * a44 - a34 * r4) / det
-    q_sno_new = (a33 * r4 - r3 * a43) / det
-
-    dq_lcl_dt = (q_lcl_new - q_lcl) * invΔt
-    dq_icl_dt = (q_icl_new - q_icl) * invΔt
-    dq_rai_dt = (q_rai_new - q_rai) * invΔt
-    dq_sno_dt = (q_sno_new - q_sno) * invΔt
-
-    return (; dq_lcl_dt, dq_icl_dt, dq_rai_dt, dq_sno_dt)
+    return mode isa Union{InstantaneousVerbose, LinearizedAverageVerbose} ? merge(tendencies, rates) : tendencies
 end
 
 # --- Public API: bulk_microphysics_tendencies with TendencyMode dispatch ---
 
 """
     bulk_microphysics_tendencies(
-        ::Instantaneous, ::Microphysics1Moment, mp, tps,
+        ::Union{Instantaneous, InstantaneousVerbose}, ::Microphysics1Moment, mp, tps,
         ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
     )
 
 Compute all 1-moment microphysics tendencies in one fused call.
 
-Returns a NamedTuple with the aggregated tendency for each water category.
 This is a pure function of local thermodynamic state, suitable for:
 - Point quadrature over subgrid-scale (T, q_tot) distributions
 - GPU kernel evaluation
@@ -558,143 +551,68 @@ This is a pure function of local thermodynamic state, suitable for:
 - `dq_icl_dt`: Cloud ice tendency [kg/kg/s]
 - `dq_rai_dt`: Rain tendency [kg/kg/s]
 - `dq_sno_dt`: Snow tendency [kg/kg/s]
+- With `InstantaneousVerbose`, also the rate of each process, such as `S_acnv_lcl_rai`
+  [kg/kg/s], positive in the direction of the process.
 
 # Notes
 - Negative specific contents are clamped to zero for robustness.
 - Does NOT apply timestep-dependent limiters.
 """
 @inline function bulk_microphysics_tendencies(
-    ::Instantaneous, ::Microphysics1Moment, mp::CMP.Microphysics1MParams, tps,
-    ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
+    mode::Union{Instantaneous, InstantaneousVerbose}, ::Microphysics1Moment,
+    mp::CMP.Microphysics1MParams, tps, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
 )
-    src = _microphysics_source_terms(
+    terms = _microphysics_source_terms(
         Microphysics1Moment(), mp, tps,
         ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
     )
-    return _aggregate_tendencies(src)
+    dq_dt = species_tendency(terms, Condensates1M{typeof(q_tot)})
+    return _output_1m(mode, dq_dt, UU.unrolled_map(t -> t.S, terms))
 end
 
 """
     bulk_microphysics_tendencies(
-        ::InstantaneousVerbose, ::Microphysics1Moment, mp, tps,
-        ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
-    )
-
-Compute all 1-moment microphysics tendencies and return both aggregated
-tendencies (`dq_*_dt`), all individual source terms (`S_*`) and the two
-`τ_phase_change_vap_*` relaxation timescales.
-
-Useful for model diagnostics. The `dq_*_dt` fields are identical to those
-returned by `Instantaneous()`.
-
-# Returns
-`NamedTuple` with all fields from `Instantaneous()` plus individual source
-terms: `S_phase_change_vap_lcl`, `S_phase_change_vap_icl`, `S_acnv_lcl_rai`,
-`S_acnv_icl_sno`, etc.
-"""
-@inline function bulk_microphysics_tendencies(
-    ::InstantaneousVerbose, ::Microphysics1Moment, mp::CMP.Microphysics1MParams, tps,
-    ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
-)
-    src = _microphysics_source_terms(
-        Microphysics1Moment(), mp, tps,
-        ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno,
-    )
-    agg = _aggregate_tendencies(src)
-    return merge(agg, src)
-end
-
-"""
-    bulk_microphysics_tendencies(
-        ::LinearizedAverage, ::Microphysics1Moment, mp, tps,
+        ::Union{LinearizedAverage, LinearizedAverageVerbose}, ::Microphysics1Moment, mp, tps,
         ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt, nsub = 1,
     )
 
-Compute average 1-moment microphysics tendencies over `Δt` using repeated
-linearized implicit substeps.
+Compute average 1-moment microphysics tendencies over `Δt` using repeated linearized
+implicit substeps.
 
-The interval `Δt` is divided into `nsub` equal substeps. At each substep, a local
-linearized microphysics system is rebuilt from the current state and solved
-implicitly for cloud liquid, cloud ice, rain, and snow. Temperature is then
-updated from the latent heating implied by the substep tendencies.
-
-The returned tendencies are the net change in the hydrometeor species over the
-full interval divided by `Δt`.
-
-Increasing `nsub` improves how well the method captures nonlinear changes in the
-active microphysical processes, including regime changes near freezing.
+The interval `Δt` is divided into `nsub` equal substeps. At each substep, the
+linearized tendency is rebuilt from the current state and solved implicitly for cloud
+liquid, cloud ice, rain, and snow, with a vapor limiter and a latent-heating limiter
+(`linearized_step_1m`). Temperature is then updated from the latent
+heating implied by the substep tendencies. Increasing `nsub` improves how well the method
+captures nonlinear changes in the active microphysical processes, including regime changes
+near freezing.
 
 # Returns
-`NamedTuple` with fields:
-- `dq_lcl_dt`: Cloud liquid tendency [kg/kg/s]
-- `dq_icl_dt`: Cloud ice tendency [kg/kg/s]
-- `dq_rai_dt`: Rain tendency [kg/kg/s]
-- `dq_sno_dt`: Snow tendency [kg/kg/s]
+- `NamedTuple` with the net change of each species over `Δt` divided by `Δt` [kg/kg/s]:
+  `dq_lcl_dt`, `dq_icl_dt`, `dq_rai_dt` and `dq_sno_dt`.
+- With `LinearizedAverageVerbose`, also the average rate of each process over `Δt`, with
+  the names of `InstantaneousVerbose` [kg/kg/s].
 """
 @inline function bulk_microphysics_tendencies(
-    ::LinearizedAverage,
-    cm::Microphysics1Moment,
-    mp::CMP.Microphysics1MParams,
-    tps,
-    ρ,
-    T,
-    w,
-    q_tot,
-    q_lcl,
-    q_icl,
-    q_rai,
-    q_sno,
-    Δt::AbstractFloat,
-    nsub::Integer = 1,
+    mode::Union{LinearizedAverage, LinearizedAverageVerbose}, ::Microphysics1Moment,
+    mp::CMP.Microphysics1MParams, tps, ρ, T, w,
+    q_tot, q_lcl, q_icl, q_rai, q_sno,
+    Δt::AbstractFloat, nsub::Integer = 1,
 )
     FT = typeof(q_tot)
-
-    q_lcl_0 = q_lcl
-    q_icl_0 = q_icl
-    q_rai_0 = q_rai
-    q_sno_0 = q_sno
-
+    q₀ = Condensates1M(q_lcl, q_icl, q_rai, q_sno)
     Δt_sub = Δt / FT(nsub)
 
-    Lv_over_cp = TDI.TD.Parameters.LH_v0(tps) / TDI.TD.Parameters.cp_d(tps)
-    Ls_over_cp = TDI.TD.Parameters.LH_s0(tps) / TDI.TD.Parameters.cp_d(tps)
-
+    q = q₀
+    increments = _zero_increments_1m(mp, tps, ρ, T, w, q_tot, q₀, Δt_sub)
     for _ in 1:nsub
-        rates = _linearized_implicit_step(
-            cm,
-            mp,
-            tps,
-            ρ,
-            T,
-            w,
-            q_tot,
-            q_lcl,
-            q_icl,
-            q_rai,
-            q_sno,
-            Δt_sub,
-        )
-
-        q_lcl += rates.dq_lcl_dt * Δt_sub
-        q_icl += rates.dq_icl_dt * Δt_sub
-        q_rai += rates.dq_rai_dt * Δt_sub
-        q_sno += rates.dq_sno_dt * Δt_sub
-
-        T +=
-            (
-                Lv_over_cp * (rates.dq_lcl_dt + rates.dq_rai_dt) +
-                Ls_over_cp * (rates.dq_icl_dt + rates.dq_sno_dt)
-            ) * Δt_sub
+        substep = _substep_1m(mp, tps, ρ, T, w, q_tot, q, Δt_sub)
+        (; q, T) = substep
+        increments = UU.unrolled_map(+, increments, substep.increments)
     end
-
-    dq_lcl_dt = (q_lcl - q_lcl_0) / Δt
-    dq_icl_dt = (q_icl - q_icl_0) / Δt
-    dq_rai_dt = (q_rai - q_rai_0) / Δt
-    dq_sno_dt = (q_sno - q_sno_0) / Δt
-
-    return (; dq_lcl_dt, dq_icl_dt, dq_rai_dt, dq_sno_dt)
+    dq_dt = (q - q₀) / Δt
+    return _output_1m(mode, dq_dt, UU.unrolled_map(Δ -> Δ / Δt, increments))
 end
-
 
 # --- 0-Moment Microphysics ---
 """
