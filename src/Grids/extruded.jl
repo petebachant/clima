@@ -65,11 +65,17 @@ function ExtrudedFiniteDifferenceGrid(
     else
         global_geometry = horizontal_grid.global_geometry
     end
+    # The global geometry's type depends on a runtime branch, so specializing
+    # the rest of construction on it compiles the whole grid pipeline once per
+    # branch for no benefit. Base.inferencebarrier (an undocumented but stable
+    # Base internal, present in 1.10-1.12) widens it back to Any. Nothing
+    # downstream loses inference: the memoized constructor below stores grids
+    # in an untyped Dict, so callers already received an Any from it.
     ExtrudedFiniteDifferenceGrid(
         horizontal_grid,
         vertical_grid,
         hypsography,
-        global_geometry,
+        Base.inferencebarrier(global_geometry),
     )
 end
 
@@ -162,6 +168,12 @@ hypsography(grid::ExtrudedFiniteDifferenceGrid) = grid.hypsography
 quadrature_style(grid::ExtrudedFiniteDifferenceGrid) =
     quadrature_style(grid.horizontal_grid)
 
+for f in (:issubgrid, :maybe_issubgrid)
+    @eval $f(subgrid::FiniteDifferenceGrid, grid::ExtrudedFiniteDifferenceGrid) =
+        $f(subgrid, grid.vertical_grid)
+    @eval $f(subgrid::AbstractSpectralElementGrid, grid::ExtrudedFiniteDifferenceGrid) =
+        $f(subgrid, grid.horizontal_grid)
+end
 
 ## GPU compatibility
 struct DeviceExtrudedFiniteDifferenceGrid{VT, Q, GG, CLG, FLG} <:
@@ -184,6 +196,11 @@ quadrature_style(grid::DeviceExtrudedFiniteDifferenceGrid) =
     grid.quadrature_style
 vertical_topology(grid::DeviceExtrudedFiniteDifferenceGrid) =
     grid.vertical_topology
+
+issubgrid(
+    ::Union{DeviceFiniteDifferenceGrid, AbstractSpectralElementGrid},
+    ::DeviceExtrudedFiniteDifferenceGrid,
+) = throw(ArgumentError("Cannot compare device-side slices of extruded grids"))
 
 ## aliases
 

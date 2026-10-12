@@ -54,7 +54,7 @@ horizontal spectral-element derivative operators evaluate to zero, as on a
 single column.
 """
 struct MultiColumnFiniteDifferenceSpace{
-    G <: Grids.AbstractExtrudedFiniteDifferenceGrid,
+    G <: Union{Grids.AbstractExtrudedFiniteDifferenceGrid, Grids.PlaceholderGrid},
     S <: Staggering,
 } <: AbstractSpace
     grid::G
@@ -113,13 +113,6 @@ Adapt.adapt_structure(to, space::MultiColumnFiniteDifferenceSpace) =
         Adapt.adapt(to, grid(space)),
         staggering(space),
     )
-
-issubspace(subspace::MultiPointSpace, space::MultiColumnFiniteDifferenceSpace) =
-    grid(subspace) === grid(space).horizontal_grid ||
-    (grid(subspace) isa Grids.LevelGrid && grid(subspace).full_grid === grid(space))
-issubspace(subspace::FiniteDifferenceSpace, space::MultiColumnFiniteDifferenceSpace) =
-    grid(subspace) === grid(space).vertical_grid ||
-    (grid(subspace) isa Grids.ColumnGrid && grid(subspace).full_grid === grid(space))
 
 level(space::MultiPointSpace, v) =
     isone(v) ? space : throw(ArgumentError("Space only has one level"))

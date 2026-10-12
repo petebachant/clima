@@ -77,12 +77,7 @@ export FieldMatrixWithSolver
 
 include("band_matrix_row.jl")
 
-const ColumnwiseBandMatrixField{V, S} = Fields.Field{
-    V, S,
-} where {
-    V <: DataLayout{<:BandMatrixRow},
-    S <: Union{Spaces.AbstractSpace, Operators.PlaceholderSpace}, # so that this can exist inside cuda kernels
-}
+const ColumnwiseBandMatrixField = Fields.Field{<:DataLayout{<:BandMatrixRow}}
 
 include("matrix_shape.jl")
 include("matrix_multiplication.jl")
@@ -113,7 +108,7 @@ Base.broadcasted(style::Fields.AbstractFieldStyle, ::typeof(*), x, y) =
 
 function Base.broadcasted(
     ::MultiplyColumnwiseBandMatrixField,
-    x::Fields.PointField,
+    x::Union{Fields.PointField, Fields.SpectralElementField},
     y,
 )
     @assert eltype(x) <: DiagonalMatrixRow
