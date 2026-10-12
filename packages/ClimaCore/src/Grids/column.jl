@@ -28,7 +28,7 @@ end
 View of the column at `indices` of the extruded grid `full_grid`.
 """
 struct ColumnGrid{
-    G <: AbstractExtrudedFiniteDifferenceGrid,
+    G <: Union{AbstractExtrudedFiniteDifferenceGrid, PlaceholderGrid},
     I <: Tuple{Vararg{Integer}},
 } <: AbstractFiniteDifferenceGrid
     full_grid::G
@@ -47,3 +47,13 @@ vertical_topology(colgrid::ColumnGrid) = vertical_topology(colgrid.full_grid)
 local_geometry_data(colgrid::ColumnGrid, staggering::Staggering) =
     column(local_geometry_data(colgrid.full_grid, staggering), colgrid.indices...)
 global_geometry(colgrid::ColumnGrid) = global_geometry(colgrid.full_grid)
+
+issubgrid(subgrid::ColumnGrid, grid::ColumnGrid) = subgrid === grid
+maybe_issubgrid(subgrid::ColumnGrid, grid::ColumnGrid) = true
+for f in (:issubgrid, :maybe_issubgrid)
+    @eval $f(subgrid::ColumnGrid, grid::AbstractGrid) = $f(subgrid.full_grid, grid)
+    @eval $f(subgrid::AbstractGrid, grid::ColumnGrid) =
+        grid.full_grid isa DeviceExtrudedFiniteDifferenceGrid ?
+        throw(ArgumentError("Cannot compare device-side slices of extruded grids")) :
+        $f(subgrid, grid.full_grid.vertical_grid)
+end

@@ -245,8 +245,6 @@ This means that we can express the bounds on the interior values of ``i`` as
 """
 struct MultiplyColumnwiseBandMatrixField <: Operators.FiniteDifferenceOperator end
 
-Operators.strip_space(op::MultiplyColumnwiseBandMatrixField, _) = op
-
 # These name the two corners of the band matrix, not the ends of the column.
 # The vertical index runs from the domain bottom (the `LeftBoundaryWindow`) to
 # the domain top (the `RightBoundaryWindow`), so the matrix's top-left corner
@@ -338,8 +336,7 @@ function Operators.return_eltype(
     end
 end
 
-Operators.return_space(::MultiplyColumnwiseBandMatrixField, space1, space2) =
-    space1
+Operators.return_space(::MultiplyColumnwiseBandMatrixField, space, _) = space
 
 # Compute max(li - i, ld) and min(ri - i, ud). Both corners clamp both ends of
 # the band: on columns too short for the interior stencil, the boundary windows
@@ -386,17 +383,17 @@ function multiply_matrix_at_index(
         arg,
     )
 
-    column_space1 = column_axes(matrix1, space)
+    column_space1 = isnothing(bc) ? nothing : column_axes(matrix1, space)
     ld1, ud1 = outer_diagonals(eltype(matrix1))
     boundary_modified_ld1 = boundary_modified_ld(bc, ld1, column_space1, idx)
     boundary_modified_ud1 = boundary_modified_ud(bc, ud1, column_space1, idx)
 
     # Precompute the row that is needed from matrix1 so that it does not get
     # recomputed multiple times.
-    matrix1_row = @inbounds Operators.getidx(space, matrix1, idx, hidx)
+    matrix1_row = @inbounds Operators.getidx(matrix1, idx, hidx)
 
     matrix2 = arg
-    column_space2 = column_axes(matrix2, column_space1)
+    column_space2 = isnothing(bc) ? nothing : column_axes(matrix2, column_space1)
     ld2, ud2 = outer_diagonals(eltype(matrix2))
     prod_ld, prod_ud = outer_diagonals(prod_type)
     boundary_modified_prod_ld =
@@ -414,7 +411,7 @@ function multiply_matrix_at_index(
         # TODO: Use @propagate_inbounds_meta instead of @inline_meta.
         Base.@_inline_meta
         if isnothing(bc) || boundary_modified_ld1 <= d <= boundary_modified_ud1
-            @inbounds Operators.getidx(space, matrix2, idx + d, hidx)
+            @inbounds Operators.getidx(matrix2, idx + d, hidx)
         else
             zero(eltype(matrix2)) # This row is outside the matrix.
         end
@@ -442,7 +439,9 @@ function multiply_matrix_at_index(
             @inbounds for d in min_d:max_d
                 value1 = matrix1_row[d]
                 value2 = matrix2_rows_wrapper[d][prod_d - d]
-                value2_lg = Geometry.LocalGeometry(space, idx + d, hidx)
+                value2_lg =
+                    isnothing(Geometry._dual_axes_for_projection(typeof(value1))) ?
+                    nothing : Geometry.LocalGeometry(space, idx + d, hidx)
                 prod_entry += mul_with_projection(value1, value2, value2_lg)
             end # Using a for-loop is currently faster than using mapreduce.
             prod_entry
@@ -468,21 +467,23 @@ function multiply_matrix_at_index(
         arg,
     )
 
-    column_space1 = column_axes(matrix1, space)
+    column_space1 = isnothing(bc) ? nothing : column_axes(matrix1, space)
     ld1, ud1 = outer_diagonals(eltype(matrix1))
     boundary_modified_ld1 = boundary_modified_ld(bc, ld1, column_space1, idx)
     boundary_modified_ud1 = boundary_modified_ud(bc, ud1, column_space1, idx)
 
     # Precompute the row that is needed from matrix1 so that it does not get
     # recomputed multiple times.
-    matrix1_row = @inbounds Operators.getidx(space, matrix1, idx, hidx)
+    matrix1_row = @inbounds Operators.getidx(matrix1, idx, hidx)
 
     vector = arg
     prod_value = zero(prod_type)
     @inbounds for d in boundary_modified_ld1:boundary_modified_ud1
         value1 = matrix1_row[d]
-        value2 = Operators.getidx(space, vector, idx + d, hidx)
-        value2_lg = Geometry.LocalGeometry(space, idx + d, hidx)
+        value2 = Operators.getidx(vector, idx + d, hidx)
+        value2_lg =
+            isnothing(Geometry._dual_axes_for_projection(typeof(value1))) ?
+            nothing : Geometry.LocalGeometry(space, idx + d, hidx)
         prod_value += mul_with_projection(value1, value2, value2_lg)
     end # Using a for-loop is currently faster than using mapreduce.
     return prod_value

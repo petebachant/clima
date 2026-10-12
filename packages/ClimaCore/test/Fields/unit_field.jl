@@ -23,6 +23,7 @@ import ClimaCore:
 
 using LazyBroadcast: lazy
 using LinearAlgebra: norm
+import LinearAlgebra
 using Statistics: mean
 using ForwardDiff
 
@@ -162,16 +163,16 @@ end
         f = fill((; x = FT(1)), space)
         pow_n(f) # Compile first
         p_allocated = @allocated pow_n(f)
-        @test p_allocated == 0
+        TU.@test_allocations p_allocated == 0
         pow_n_bc(f) # Compile first
         p_allocated = @allocated pow_n_bc(f)
         if space isa Spaces.SpectralElementSpace1D
-            @test p_allocated == 0
+            TU.@test_allocations p_allocated == 0
         else
             # TODO: On extruded spaces, this broadcast has two unelided views
             # from getproperty (48 bytes each); whether the compiler elides
             # them depends on how much of its inference budget is used up.
-            @test p_allocated ≤ 96
+            TU.@test_allocations p_allocated ≤ 96
         end
     end
 end
@@ -210,18 +211,18 @@ end
         ifelse_broadcast_allocating(a, b, c)
         p_allocated = @allocated ifelse_broadcast_allocating(a, b, c)
         if VERSION ≥ v"1.11.0-beta"
-            @test p_allocated == 0
+            TU.@test_allocations p_allocated == 0
         else
             @test_broken p_allocated == 0
         end
 
         ifelse_broadcast_or(a, b, c)
         p_allocated = @allocated ifelse_broadcast_or(a, b, c)
-        @test p_allocated == 0
+        TU.@test_allocations p_allocated == 0
 
         ifelse_broadcast_simple(a, b, c)
         p_allocated = @allocated ifelse_broadcast_simple(a, b, c)
-        @test p_allocated == 0
+        TU.@test_allocations p_allocated == 0
     end
 end
 
@@ -414,6 +415,55 @@ end
     @test all(Yb)
 end
 
+@testset "FieldVector ldiv!" begin
+    # `ldiv!(::LU, ::FieldVector)` dispatches on the factor type, because a
+    # method taking any `LU` would be ambiguous with the thirteen methods that
+    # LinearAlgebra and ArrayLayouts define with an unconstrained second
+    # argument. The covered factor types, for both the two- and three-argument
+    # forms, are `Matrix` and `Tridiagonal`.
+    # Everything else here is a wrapper that `lu` materializes into a `Matrix`,
+    # so it is covered too; the cases are listed because the signatures do not
+    # show which factor types `lu` produces.
+    space = spectral_space_2D()
+    FT = Spaces.undertype(space)
+    Y = Fields.FieldVector(; a = ones(space))
+    n = length(parent(Y))
+    dense =
+        Matrix{FT}(LinearAlgebra.I, n, n) .+
+        FT(1 // 10) .* FT[1 / (i + j) for i in 1:n, j in 1:n]
+    rhs = FT[1 / i for i in 1:n]
+
+    matrices = (
+        "Matrix" => dense,
+        "Tridiagonal" => LinearAlgebra.Tridiagonal(dense),
+        "view" => view(dense, 1:n, 1:n),
+        "Symmetric" => LinearAlgebra.Symmetric(dense * dense'),
+        "Adjoint" => dense',
+    )
+    for (name, A) in matrices
+        expected = Matrix(A) \ rhs
+
+        # Two-argument, in place on the FieldVector.
+        x = similar(Y)
+        parent(x) .= reshape(rhs, size(parent(x)))
+        LinearAlgebra.ldiv!(LinearAlgebra.lu(A), x)
+        @test vec(parent(x)) ≈ expected rtol = 100eps(FT)
+
+        # Three-argument.
+        b = similar(Y)
+        parent(b) .= reshape(rhs, size(parent(b)))
+        x3 = similar(Y)
+        LinearAlgebra.ldiv!(x3, LinearAlgebra.lu(A), b)
+        @test vec(parent(x3)) ≈ expected rtol = 100eps(FT)
+    end
+
+    # The QR methods next to the LU ones have no other coverage.
+    x = similar(Y)
+    parent(x) .= reshape(rhs, size(parent(x)))
+    LinearAlgebra.ldiv!(LinearAlgebra.qr(dense), x)
+    @test vec(parent(x)) ≈ dense \ rhs rtol = 100eps(FT)
+end
+
 # Allocation measurements run in top-level functions, since the @allocated
 # macro has a small constant overhead when it is used in a local scope.
 fv_length_allocations(Y) = @allocated length(Y)
@@ -488,7 +538,7 @@ fv_from_array_allocations(Y, array) = @allocated Fields.array2fieldvector!(Y, ar
             () -> fv_from_array_allocations(Y2, array),
         )
             measure!()
-            @test measure!() == 0
+            TU.@test_allocations measure!() == 0
         end
     end
 end
@@ -559,7 +609,7 @@ end
     test_fv_allocations!(Y1, Y2, Y3, Y4)
     p_allocated = @allocated test_fv_allocations!(Y1, Y2, Y3, Y4)
     if device isa ClimaComms.AbstractCPUDevice
-        @test p_allocated == 0
+        TU.@test_allocations p_allocated == 0
     elseif device isa ClimaComms.CUDADevice
         @test_broken p_allocated == 0
     end
@@ -612,7 +662,7 @@ end
     @test_opt call_getcolumn(fv, colidx, device)
     p = @allocated call_getcolumn(fv, colidx, device)
     if ClimaComms.SingletonCommsContext(device) isa ClimaComms.AbstractCPUDevice
-        @test p ≤ 32
+        TU.@test_allocations p ≤ 32
     end
 end
 
@@ -832,99 +882,164 @@ end
     end
 end
 
-##### Levels, columns, and slabs #####
-
-@testset "Levels of Fields and Field broadcasts" begin
+@testset "Slices of Fields and pointwise Field broadcasts" begin
     FT = Float64
     for space in TU.all_spaces(FT)
-        TU.levelable(space) || continue
         field = fill((; x = FT(1)), space)
-        level_of_field = Fields.Field(
-            Spaces.level(Fields.field_values(field), 1),
-            Spaces.level(space, TU.fc_index(1, space)),
+        point_of_field = view(field, 1)
+        level_of_field = Spaces.level(field, 1)
+        slab_of_field = Spaces.slab(field, 1, 1)
+        column_of_field = Spaces.column(field, 1, 1, 1)
+
+        @test point_of_field === Fields.Field(
+            view(Fields.field_values(field), 1),
+            view(space, 1),
         )
-        @test level_of_field == Spaces.level(field, TU.fc_index(1, space))
+        @test level_of_field === Fields.Field(
+            Spaces.level(Fields.field_values(field), 1),
+            Spaces.level(space, 1),
+        )
+        @test slab_of_field === Fields.Field(
+            Spaces.slab(Fields.field_values(field), 1, 1),
+            Spaces.slab(space, 1, 1),
+        )
+        @test column_of_field === Fields.Field(
+            Spaces.column(Fields.field_values(field), 1, 1, 1),
+            Spaces.column(space, 1, 1, 1),
+        )
+
+        @test point_of_field ==
+              Base.materialize(view(lazy.(identity.(field)), 1))
         @test level_of_field ==
-              Base.materialize(Spaces.level(lazy.(identity.(field)), TU.fc_index(1, space)))
+              Base.materialize(Spaces.level(lazy.(identity.(field)), 1))
+        @test slab_of_field ==
+              Base.materialize(Spaces.slab(lazy.(identity.(field)), 1, 1))
+        @test column_of_field ==
+              Base.materialize(Spaces.column(lazy.(identity.(field)), 1, 1, 1))
+
+        for sliced_field in (point_of_field, level_of_field, slab_of_field, column_of_field)
+            sliced_field == field && continue
+            @test field === (field .= sliced_field)
+            @test_throws DimensionMismatch sliced_field .= field
+            @test field == field .+ sliced_field .- 1
+        end
+        for sliced_field in (level_of_field, slab_of_field, column_of_field)
+            sliced_field == point_of_field && continue
+            @test sliced_field === (sliced_field .= point_of_field)
+            @test_throws DimensionMismatch point_of_field .= sliced_field
+            @test sliced_field == sliced_field .+ point_of_field .- 1
+        end
+
+        if slab_of_field != point_of_field
+            @test level_of_field === (level_of_field .= slab_of_field)
+            @test_throws DimensionMismatch slab_of_field .= level_of_field
+            @test level_of_field == level_of_field .+ slab_of_field .- 1
+        end
+        if column_of_field != point_of_field
+            for level_or_slab_of_field in (level_of_field, slab_of_field)
+                level_or_slab_of_field == point_of_field && continue
+                @test_throws DimensionMismatch level_or_slab_of_field .= column_of_field
+                @test_throws DimensionMismatch column_of_field .= level_or_slab_of_field
+                @test_throws DimensionMismatch level_or_slab_of_field .+ column_of_field
+                @test field === (field .= level_or_slab_of_field .+ column_of_field .- 1)
+                @test field == level_or_slab_of_field .+ column_of_field .- field
+            end
+        end
+
+        if Spaces.has_horizontal(space)
+            other_column_of_field =
+                space isa Spaces.MultiColumnFiniteDifferenceSpace ?
+                Spaces.column(field, 1, 1, 2) : Spaces.column(field, 2, 1, 1)
+
+            @test column_of_field === (column_of_field .= other_column_of_field)
+            @test other_column_of_field === (other_column_of_field .= column_of_field)
+            @test_throws DimensionMismatch column_of_field .+ other_column_of_field
+            @test field === (field .= column_of_field .+ other_column_of_field .- 1)
+            @test field == column_of_field .+ other_column_of_field .- field
+        end
+
+        if space isa Spaces.ExtrudedFiniteDifferenceSpace
+            horizontal_field = fill((; x = FT(1)), Spaces.horizontal_space(space))
+            vertical_field = fill((; x = FT(1)), Spaces.vertical_space(space))
+
+            @test field === (field .= horizontal_field)
+            @test field === (field .= vertical_field)
+            @test_throws DimensionMismatch horizontal_field .= field
+            @test_throws DimensionMismatch vertical_field .= field
+            @test field == field .+ horizontal_field .- 1
+            @test field == field .+ vertical_field .- 1
+
+            @test_throws DimensionMismatch point_of_field .= horizontal_field
+            @test_throws DimensionMismatch point_of_field .= vertical_field
+            @test horizontal_field === (horizontal_field .= point_of_field)
+            @test vertical_field === (vertical_field .= point_of_field)
+            @test horizontal_field == point_of_field .+ horizontal_field .- 1
+            @test vertical_field == point_of_field .+ vertical_field .- 1
+
+            @test level_of_field === (level_of_field .= horizontal_field)
+            @test_throws DimensionMismatch level_of_field .= vertical_field
+            @test horizontal_field === (horizontal_field .= level_of_field)
+            @test_throws DimensionMismatch vertical_field .= level_of_field
+            @test level_of_field == level_of_field .+ horizontal_field .- 1
+            @test_throws DimensionMismatch level_of_field .+ vertical_field
+            @test field === (field .= level_of_field .+ vertical_field .- 1)
+            @test field == level_of_field .+ vertical_field .- field
+
+            @test_throws DimensionMismatch slab_of_field .= horizontal_field
+            @test_throws DimensionMismatch slab_of_field .= vertical_field
+            @test horizontal_field === (horizontal_field .= slab_of_field)
+            @test_throws DimensionMismatch vertical_field .= slab_of_field
+            @test horizontal_field == slab_of_field .+ horizontal_field .- 1
+            @test_throws DimensionMismatch slab_of_field .+ vertical_field
+            @test field === (field .= slab_of_field .+ vertical_field .- 1)
+            @test field == slab_of_field .+ vertical_field .- field
+
+            @test_throws DimensionMismatch column_of_field .= horizontal_field
+            @test column_of_field === (column_of_field .= vertical_field)
+            @test_throws DimensionMismatch horizontal_field .= column_of_field
+            @test vertical_field === (vertical_field .= column_of_field)
+            @test_throws DimensionMismatch column_of_field .+ horizontal_field
+            @test column_of_field == column_of_field .+ vertical_field .- 1
+            @test field === (field .= column_of_field .+ horizontal_field .- 1)
+            @test field == column_of_field .+ horizontal_field .- field
+        end
     end
 end
 
-@testset "Levels of nonlocal Fields and nonlocal Field broadcasts" begin
+@testset "Slices of Fields and nonlocal Field broadcasts" begin
     FT = Float64
     gradh = Operators.Gradient()
-    # Todo: Make this work over all spaces; currently broken for everything else.
-    for space in (
-        TU.CenterExtrudedFiniteDifferenceSpace(FT),
-        TU.FaceExtrudedFiniteDifferenceSpace(FT),
-    )
+    for space in TU.all_spaces(FT)
         TU.levelable(space) || continue
-        field = fill((; x = FT(1)), space)
+        coords = Fields.coordinate_field(space)
+        field = :lat in propertynames(coords) ? (@. coords.z + sind(coords.lat)) : coords.z
+        level_of_field = Spaces.level(field, TU.fc_index(1, space))
+        other_level_of_field = Spaces.level(field, TU.fc_index(2, space))
+        level_of_twos = fill(FT(2), axes(other_level_of_field))
 
-        op_on_level_of_field =
-            gradh.(
-                Fields.Field(
-                    Spaces.level(Fields.field_values(field.x), 1),
-                    Spaces.level(space, TU.fc_index(1, space)),
-                ),
-            )
+        # Every argument of a sliced broadcast is sliced at its own indices.
+        bc = Base.Broadcast.instantiate(lazy.(field .* level_of_twos))
+        @test Spaces.level(bc, TU.fc_index(3, space)).args[2] === level_of_twos
+        @test Spaces.column(bc, 1, 1, 1).args[2] ===
+              Spaces.column(level_of_twos, 1, 1, 1)
 
-        @test op_on_level_of_field ==
-              (Spaces.level(gradh.(field.x), TU.fc_index(1, space)))
+        gradv =
+            Spaces.staggering(space) isa Spaces.CellCenter ?
+            Operators.GradientC2F(;
+                bottom = Operators.SetValue(FT(0)),
+                top = Operators.SetValue(FT(0)),
+            ) : Operators.GradientF2C()
+        @test (@. gradv(field * level_of_twos)) ≈ (@. 2 * gradv(field))
 
-        @test op_on_level_of_field == Base.materialize((Spaces.level(
-            lazy.(gradh.(field.x)),
-            TU.fc_index(1, space),
-        )),)
-    end
-end
-
-@testset "Columns of Fields and Field broadcasts" begin
-    FT = Float64
-    for space in TU.all_spaces(FT)
-        TwoColumnIndexSpace = Union{
-            Spaces.SpectralElementSpace1D,
-            Spaces.ExtrudedSpectralElementSpace2D,
-        }
-        ThreeColumnIndexSpace = Union{
-            Spaces.SpectralElementSpace2D,
-            Spaces.ExtrudedSpectralElementSpace3D,
-        }
-        if space isa Union{TwoColumnIndexSpace, ThreeColumnIndexSpace}
-            field = fill((; x = FT(1)), space)
-            indices = space isa TwoColumnIndexSpace ? (1, 1) : (1, 1, 1)
-            column_of_field = Fields.Field(
-                Spaces.column(Fields.field_values(field), indices...),
-                Spaces.column(space, indices...),
-            )
-            @test column_of_field == Spaces.column(field, indices...)
-            @test column_of_field ==
-                  Base.materialize(Spaces.column(lazy.(identity.(field)), indices...))
-        end
-    end
-end
-
-@testset "Slabs of Fields and Field broadcasts" begin
-    FT = Float64
-    is_cuda = ClimaComms.device() == ClimaComms.CUDADevice()
-    for space in TU.all_spaces(FT)
-        OneSlabIndexSpace =
-            Union{Spaces.SpectralElementSpace1D, Spaces.SpectralElementSpace2D}
-        TwoSlabIndexSpace = Union{
-            Spaces.ExtrudedSpectralElementSpace2D,
-            Spaces.ExtrudedSpectralElementSpace3D,
-        }
-        if space isa Union{OneSlabIndexSpace, TwoSlabIndexSpace}
-            field = fill((; x = FT(1)), space)
-            indices = space isa OneSlabIndexSpace ? (1,) : (1, 1)
-            slab_of_field = Fields.Field(
-                Spaces.slab(Fields.field_values(field), indices...),
-                Spaces.slab(space, indices...),
-            )
-            @test slab_of_field == Spaces.slab(field, indices...)
-            @test slab_of_field == Base.materialize(
-                Spaces.slab(lazy.(identity.(field)), indices...),
-            )
-        end
+        space isa Spaces.ExtrudedFiniteDifferenceSpace || continue
+        @test gradh.(level_of_field) == Spaces.level(gradh.(field), TU.fc_index(1, space))
+        @test gradh.(level_of_field) ==
+              Base.materialize(Spaces.level(lazy.(gradh.(field)), TU.fc_index(1, space)))
+        @test (@. gradh(field * level_of_twos)) ≈ (@. 2 * gradh(field))
+        level_of_gradh = similar(gradh.(level_of_field))
+        level_of_gradh .= gradh.(other_level_of_field)
+        @test Fields.field_values(level_of_gradh) ==
+              Fields.field_values(Spaces.level(gradh.(field), TU.fc_index(2, space)))
     end
 end
 
@@ -1298,6 +1413,53 @@ end
     @test all(==(0.0), parent(C))
 end
 
+# Base.broadcastable presents a custom scalar as a single-element tuple (see the
+# VarTimescaleAcnv pattern in inference_fields.jl), so a FieldVector accepts it
+# exactly like a Ref. Each leaf array is given its own axes before the
+# broadcast is instantiated, in place of the FieldVector's BlockedOneTo axes.
+@testset "FieldVector broadcasting with scalar-like arguments" begin
+    context = ClimaComms.SingletonCommsContext(ClimaComms.CPUSingleThreaded())
+    FT = Float64
+    domain = Domains.IntervalDomain(
+        Geometry.ZPoint(FT(0)) .. Geometry.ZPoint(FT(1)),
+        periodic = true,
+    )
+    mesh = Meshes.IntervalMesh(domain; nelems = 10)
+    space = Spaces.CenterFiniteDifferenceSpace(
+        Topologies.IntervalTopology(context, mesh),
+    )
+
+    all_entries_equal(fv, v) =
+        all(propertynames(fv)) do name
+            p = getproperty(fv, name)
+            p isa Fields.FieldVector ? all_entries_equal(p, v) :
+            all(==(v), parent(p))
+        end
+
+    make_flat() =
+        Fields.FieldVector(; a = fill(FT(1), space), b = fill(FT(2), space))
+    make_nested() = Fields.FieldVector(;
+        inner = Fields.FieldVector(; a = fill(FT(1), space)),
+        c = fill(FT(3), space),
+    )
+
+    for make in (make_flat, make_nested)
+        # Style{Tuple}
+        Y = make()
+        Y .= (FT(7),)
+        @test all_entries_equal(Y, FT(7))
+
+        # AbstractArrayStyle{0} and a plain scalar
+        Y = make()
+        Y .= Ref(FT(8))
+        @test all_entries_equal(Y, FT(8))
+
+        Y = make()
+        Y .= FT(9)
+        @test all_entries_equal(Y, FT(9))
+    end
+end
+
 function integrate_bycolumn!(∫y, Y)
     Fields.bycolumn(axes(Y.y)) do colidx
         Operators.column_integral_definite!(∫y[colidx], Y.y[colidx])
@@ -1321,13 +1483,13 @@ end
         # Implicit bycolumn
         Operators.column_integral_definite!(∫y, y) # compile first
         p = @allocated Operators.column_integral_definite!(∫y, y)
-        @test p == 0
+        TU.@test_allocations p == 0
         # Skip spaces incompatible with Fields.bycolumn:
         TU.bycolumnable(space) || continue
         # Explicit bycolumn
         integrate_bycolumn!(∫y, Y) # compile first
         p = @allocated integrate_bycolumn!(∫y, Y)
-        @test p == 0
+        TU.@test_allocations p == 0
         nothing
     end
     nothing
