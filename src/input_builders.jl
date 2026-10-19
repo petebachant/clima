@@ -20,8 +20,12 @@ A `NamedTuple` with the following fields:
 
 ## Geometry
 - `Φ_sfc`: Surface geopotential [m²/s²]
-- `Δz`: Height difference between interior and surface reference levels [m]
+- `Δz`: Height of the reference level above the surface [m], under the convention
+  `reference_level`
 - `d`: Displacement height [m]
+- `reference_level`: Convention for `Δz`, [`ReferenceAboveSurface`](@ref) or
+  [`ReferenceAboveApparentSink`](@ref); the solver converts the second to the first
+  (see [`reference_above_surface`](@ref))
 
 ## Wind
 - `u_int`: Horizontal wind components `(u, v)` at the interior level, as a tuple [m/s].
@@ -31,7 +35,19 @@ A `NamedTuple` with the following fields:
 - `roughness_model`: Roughness parameterization, e.g. [`ConstantRoughnessParams`](@ref).
 - `gustiness_model`: Gustiness parameterization, e.g. [`ConstantGustinessSpec`](@ref).
 - `moisture_model`: Moisture model, [`MoistModel`](@ref) or [`DryModel`](@ref).
-- `rsl_model`: Roughness sublayer model, e.g. [`PhysickGarrattRSL`](@ref) or [`NoRoughnessSubLayer`](@ref).
+- `rsl_model`: Roughness sublayer model, e.g. [`ExponentialRSL`](@ref) or
+  [`NoRoughnessSubLayer`](@ref).
+- `stability_cap`: Stability cap specification, e.g. [`MaxHeatFluxStabilityCap`](@ref) or
+  [`NoStabilityCap`](@ref).
+- `ζ_cap`: Numerical value of the stability cap, or `nothing`. It is `nothing` here and is
+  set by the MOST solver from `stability_cap` (see [`with_stability_cap`](@ref)); functions
+  that read the cap from the inputs compute it from `stability_cap` when it is `nothing`
+  (see [`resolved_stability_cap`](@ref)).
+- `z0m`, `z0h`: Momentum and scalar roughness lengths [m], or `nothing`. They are
+  `nothing` here and are set by [`surface_fluxes`](@ref) for roughness models independent
+  of the friction velocity (see [`with_roughness_lengths`](@ref)); functions that read
+  them evaluate the roughness model when they are `nothing` (see
+  [`roughness_lengths`](@ref)).
 - `roughness_inputs`: Optional inputs for roughness models.
 
 ## Callbacks and Prescribed Values
@@ -62,6 +78,10 @@ function build_surface_flux_inputs(
     update_T_sfc,
     update_q_vap_sfc,
 )
+    # Prescribed fluxes and coefficients in the floating-point type of the state, so that
+    # Float64 specifications keep a Float32 solve in Float32; `nothing` and dual numbers
+    # pass through (see `float_parameter`)
+    FT = float(typeof(T_int))
 
     return (;
         T_int,
@@ -80,13 +100,18 @@ function build_surface_flux_inputs(
         gustiness_model = config.gustiness,
         moisture_model = config.moisture_model,
         rsl_model = config.rsl_model,
+        stability_cap = config.stability_cap,
+        reference_level = config.reference_level,
+        ζ_cap = nothing,
+        z0m = nothing,
+        z0h = nothing,
         roughness_inputs,
         update_T_sfc,
         update_q_vap_sfc,
-        shf = flux_specs.shf,
-        lhf = flux_specs.lhf,
-        ustar = flux_specs.ustar,
-        Cd = flux_specs.Cd,
-        Ch = flux_specs.Ch,
+        shf = float_parameter(FT, flux_specs.shf),
+        lhf = float_parameter(FT, flux_specs.lhf),
+        ustar = float_parameter(FT, flux_specs.ustar),
+        Cd = float_parameter(FT, flux_specs.Cd),
+        Ch = float_parameter(FT, flux_specs.Ch),
     )
 end
