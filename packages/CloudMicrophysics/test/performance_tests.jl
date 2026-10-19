@@ -128,13 +128,19 @@ function benchmark_test(FT)
     mp_1m_2M = CMP.Microphysics1MParams(FT;
         rain_autoconversion = CMP.PrescribedNd(),
     )
-    # Kessler1M with different quiescent and convective regime values (velocity dependent)
+    mp_1m_kk = CMP.Microphysics1MParams(FT;
+        rain_autoconversion = CMP.KK2000Autoconversion(),
+        cloud_liquid_rain_accretion = CMP.KK2000Accretion(),
+    )
+    # Kessler1M with different quiescent and convective regime values (velocity dependent).
+    # τ_slow = 1000 s · 14.4 = 14400 s;  q_slow = 5·10⁻⁴ · 2.0 = 1·10⁻³.
     mp_1m_vd = CMP.Microphysics1MParams(
         CP.create_toml_dict(FT;
             override_file = Dict(
-                "rain_autoconversion_timescale_stratiform" => Dict("value" => 14400.0, "type" => "float"),
-                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform" =>
-                    Dict("value" => 1e-3, "type" => "float"),
+                "rain_autoconversion_timescale_stratiform_scale" =>
+                    Dict("value" => 14.4, "type" => "float"),
+                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale" =>
+                    Dict("value" => 2.0, "type" => "float"),
             ),
         ),
     )
@@ -188,15 +194,22 @@ function benchmark_test(FT)
         (params_P3, L_ice, N_ice, F_rim, ρ_rim),
         400,
     )
-    bench_press(FT, P3.get_distribution_logλ, (state,), 220_000)  # 10 (F64) / 8 (F32) FixedIterations BrentsMethod, zero warp divergence
+    bench_press(FT, P3.get_distribution_logλ, (state,), 220_000)  # BrentsMethod, at most 18 iterations
     # The weighted-velocity integrals build a nested terminal-velocity closure
     # that escapes into `integrate`. With `ice_particle_terminal_velocity`
     # returning a single (concretely-typed) closure, this path is type-stable
     # on both 1.10 and 1.12 and allocates nothing — keep the default zero
     # allocation/memory budget so a future closure regression is caught here.
-    bench_press(FT, P3.ice_terminal_velocity_number_weighted, (ch2022, ρ_air, state, logλ), 170_000)
-    bench_press(FT, P3.ice_terminal_velocity_mass_weighted, (ch2022, ρ_air, state, logλ), 200_000)
-    bench_press(FT, P3.integrate, (x -> x^4, FT(0), FT(1)), 7_000)
+    quad = P3.ChebyshevGauss(100)
+    bench_press(
+        FT, (a, b, c, d) -> P3.ice_terminal_velocity_number_weighted(a, b, c, d; quad),
+        (ch2022, ρ_air, state, logλ), 170_000,
+    )
+    bench_press(
+        FT, (a, b, c, d) -> P3.ice_terminal_velocity_mass_weighted(a, b, c, d; quad),
+        (ch2022, ρ_air, state, logλ), 200_000,
+    )
+    bench_press(FT, P3.integrate, (x -> x^4, FT(0), FT(1), P3.ChebyshevGauss(100)), 7_000)
     bench_press(FT, P3.D_m, (state, logλ), 18_000)
 
     @info "P3 Ice Nucleation"
@@ -208,7 +221,7 @@ function benchmark_test(FT)
     )
     bench_press(
         @NamedTuple{dNdt::FT, dLdt::FT},
-        P3.ice_melt,
+        (vp, ap, tp, T, ρ, st, lλ) -> P3.ice_melt(vp, ap, tp, T, ρ, st, lλ; quad),
         (ch2022, aps, tps, T_air, ρ_air, state, logλ),
         150_000,
     )
@@ -268,6 +281,16 @@ function benchmark_test(FT)
     bench_press(
         FT, CM1.conv_q_lcl_to_q_rai,
         (mp_1m_2M.processes.rain_autoconversion, mp_1m_2M, tps, micro_1m, thermo_1m),
+        500,
+    )
+    bench_press(
+        FT, CM1.conv_q_lcl_to_q_rai,
+        (mp_1m_kk.processes.rain_autoconversion, mp_1m_kk, tps, micro_1m, thermo_1m),
+        500,
+    )
+    bench_press(
+        FT, CM1.accretion,
+        (mp_1m_kk.processes.cloud_liquid_rain_accretion, mp_1m_kk, tps, micro_1m, thermo_1m),
         500,
     )
     thermo_1m_w = (; ρ = ρ_air, T = T_air, w = FT(3))

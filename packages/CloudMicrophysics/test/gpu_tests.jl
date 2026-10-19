@@ -410,6 +410,17 @@ end
     )
 end
 
+@kernel inbounds = true function test_average_bulk_tendencies_1m_verbose_kernel!(
+    mp, tps, output, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt,
+)
+    i = @index(Global, Linear)
+    CM1M = BMT.Microphysics1Moment()
+    output[i] = BMT.bulk_microphysics_tendencies(BMT.LinearizedAverageVerbose(),
+        CM1M, mp, tps, ρ[i], T[i], w[i], q_tot[i], q_lcl[i], q_icl[i], q_rai[i], q_sno[i],
+        Δt[i], 2,
+    ).S_acnv_lcl_rai
+end
+
 
 
 @kernel inbounds = true function test_bulk_tendencies_2m_warm_kernel!(
@@ -548,13 +559,21 @@ function test_gpu(FT)
     mp_1m_2M = CMP.Microphysics1MParams(FT;
         rain_autoconversion = CMP.PrescribedNd(),
     )
-    # Kessler1M with different quiescent and convective regime values (velocity dependent)
+    # Khairoutdinov and Kogan (2000) autoconversion and accretion with a prescribed droplet number
+    mp_1m_kk = CMP.Microphysics1MParams(FT;
+        rain_autoconversion = CMP.KK2000Autoconversion(),
+        cloud_liquid_rain_accretion = CMP.KK2000Accretion(),
+    )
+    # Kessler1M with different quiescent and convective regime values (velocity dependent).
+    # Stratiform ("slow") values are scale factors on the convective ("fast") defaults:
+    # τ_slow = 1000 s · 14.4 = 14400 s;  q_slow = 5·10⁻⁴ · 2.0 = 1·10⁻³.
     mp_1m_vd = CMP.Microphysics1MParams(
         CP.create_toml_dict(FT;
             override_file = Dict(
-                "rain_autoconversion_timescale_stratiform" => Dict("value" => 14400.0, "type" => "float"),
-                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform" =>
-                    Dict("value" => 1e-3, "type" => "float"),
+                "rain_autoconversion_timescale_stratiform_scale" =>
+                    Dict("value" => 14.4, "type" => "float"),
+                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale" =>
+                    Dict("value" => 2.0, "type" => "float"),
             ),
         ),
     )
@@ -736,6 +755,12 @@ function test_gpu(FT)
         # q_lcl = 0 → zero rate regardless of w
         TT.@test out[3] == FT(0)
 
+        # KK2000 autoconversion with a prescribed droplet number
+        kernel!(mp_1m_kk, tps, output, ql, w_arr; ndrange)
+        out = Array(output)
+        TT.@test out[1] > FT(0)
+        TT.@test out[3] == FT(0)
+
         DT = @NamedTuple{
             liq_rai::FT, ice_sno::FT, liq_sno::FT, ice_rai::FT,
             rai_sink::FT, sno_rai::FT, rai_sno::FT,
@@ -803,6 +828,12 @@ function test_gpu(FT)
         TT.@test out1_opt.sno_rai ≈ FT(2.466313958248222e-4)
         TT.@test out1_opt.rai_sno ≈ FT(6.830957197816771e-5)
 
+        # KK2000 cloud liquid + rain accretion
+        kernel_opt!(mp_1m_kk, tps, output, ρ, T_arr, qi, qs, ql, qr; ndrange)
+        out0_kk, out1_kk = Array(output)
+        TT.@test out0_kk.liq_rai == FT(0)
+        TT.@test out1_kk.liq_rai > FT(0)
+
         (; output, ndrange) = setup_output(3, FT)
 
         T_freeze = FT(273.15)
@@ -837,7 +868,7 @@ function test_gpu(FT)
             TT.@test S_LD2004 ≈ FT(1.6963072465911614e-6)
             TT.@test S_TC1980 ≈ FT(3.5482867084128596e-6)
             TT.@test S_B1994 ≈ FT(9.825462758968215e-7)
-            TT.@test S_KK2000 ≈ FT(5.855332513368727e-8)
+            TT.@test S_KK2000 ≈ FT(5.854386977448622e-8)
         end
 
         TT.@testset "accretion" begin
@@ -1251,6 +1282,19 @@ function test_gpu(FT)
             TT.@test allequal(Array(output))
             tendencies = Array(output)[1]
             TT.@test all(isfinite, tendencies)
+        end
+
+        # 1M LinearizedAverageVerbose: rate of one process
+        (; output) = setup_output(ndrange, FT)
+        kernel! = test_average_bulk_tendencies_1m_verbose_kernel!(backend, work_groups)
+        TT.@testset "1M average verbose" begin
+            kernel!(mp_1m, tps, output, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt; ndrange)
+            TT.@test allequal(Array(output))
+            inputs = map(x -> Array(x)[1], (ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt))
+            cpu = BMT.bulk_microphysics_tendencies(
+                BMT.LinearizedAverageVerbose(), BMT.Microphysics1Moment(), mp_1m, tps, inputs..., 2,
+            )
+            TT.@test Array(output)[1] ≈ cpu.S_acnv_lcl_rai
         end
 
         # 1M Kessler1M with velocity-dependent regime values and nonzero w

@@ -139,6 +139,7 @@ BulkMicrophysicsTendencies.TendencyMode
 BulkMicrophysicsTendencies.Instantaneous
 BulkMicrophysicsTendencies.InstantaneousVerbose
 BulkMicrophysicsTendencies.LinearizedAverage
+BulkMicrophysicsTendencies.LinearizedAverageVerbose
 BulkMicrophysicsTendencies.bulk_microphysics_tendencies
 ```
 
@@ -165,6 +166,7 @@ CMP.SlopeConstant{Float64}
 CMP.VentilationFactor
 CMP.LocalRimeDensity
 CMP.AspectRatio
+CMP.SmoothSlopePowerLaw
 ```
 
 ## Obtain particle state
@@ -268,7 +270,6 @@ P3Scheme.integrate
 P3Scheme.subintervals
 P3Scheme.ChebyshevGauss
 Quadrature.GaussLegendre
-Quadrature.build_quadrature
 P3Scheme.integral_bounds
 ```
 
@@ -427,6 +428,8 @@ Common.Chen2022_exponential_pdf
 Common.volume_sphere_D
 Common.volume_sphere_R
 Common.ventilation_factor
+Common.KK2000_autoconversion
+Common.KK2000_accretion
 ```
 
 # Precipitation susceptibility
