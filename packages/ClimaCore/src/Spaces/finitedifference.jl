@@ -16,7 +16,7 @@ One-dimensional finite-difference space, located at either
   - cell faces, where `staggering` is [`Grids.CellFace`](@ref).
 """
 struct FiniteDifferenceSpace{
-    G <: Grids.AbstractFiniteDifferenceGrid,
+    G <: Union{Grids.AbstractFiniteDifferenceGrid, Grids.PlaceholderGrid},
     S <: Staggering,
 } <: AbstractFiniteDifferenceSpace
     grid::G
@@ -29,6 +29,11 @@ FiniteDifferenceSpace(
 
 local_geometry_type(::Type{FiniteDifferenceSpace{G, S}}) where {G, S} =
     local_geometry_type(G)
+
+# Read the column's local geometry type from its full grid, without a view of its data.
+undertype(space::FiniteDifferenceSpace{<:Grids.ColumnGrid}) = Geometry.undertype(
+    eltype(local_geometry_data(grid(space).full_grid, staggering(space))),
+)
 
 """
     FaceFiniteDifferenceSpace{G}

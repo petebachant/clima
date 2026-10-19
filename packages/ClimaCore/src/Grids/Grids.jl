@@ -103,6 +103,22 @@ terrain-following adaption otherwise. Levels of an extruded grid
 """
 function hypsography end
 
+"""
+    Grids.issubgrid(subgrid::AbstractGrid, grid::AbstractGrid)
+
+Determine whether `subgrid` is either equal to `grid`, or if it is a component
+of `grid` (e.g., if it is a `LevelGrid` of an `ExtrudedFiniteDifferenceGrid`).
+"""
+issubgrid(subgrid::AbstractGrid, grid::AbstractGrid) = subgrid === grid
+
+"""
+    Grids.maybe_issubgrid(subgrid::AbstractGrid, grid::AbstractGrid)
+
+Similar to [`Grids.issubgrid`](@ref), but based solely on the types of `grid`
+and `subgrid`, rather than their actual values.
+"""
+maybe_issubgrid(subgrid::AbstractGrid, grid::AbstractGrid) = typeof(subgrid) == typeof(grid)
+
 ClimaComms.context(grid::AbstractGrid) = ClimaComms.context(topology(grid))
 ClimaComms.device(grid::AbstractGrid) = ClimaComms.device(topology(grid))
 
@@ -112,8 +128,15 @@ include("finitedifference.jl")
 include("spectralelement.jl")
 include("multipoint.jl")
 include("extruded.jl")
+include("placeholders.jl")
 include("column.jl")
 include("level.jl")
+
+# Resolve ambiguities for issubgrid and maybe_issubgrid.
+for f in (:issubgrid, :maybe_issubgrid)
+    @eval $f(::ColumnGrid, ::LevelGrid) = false
+    @eval $f(::LevelGrid, ::ColumnGrid) = false
+end
 
 function Base.show(io::IO, grid::AbstractGrid)
     indent = get(io, :indent, 0)
@@ -140,23 +163,20 @@ end
 
 Return `true` if the grid has a horizontal part.
 """
-function has_horizontal end
-has_horizontal(::AbstractGrid) = false
-has_horizontal(::ExtrudedFiniteDifferenceGrid) = true
-has_horizontal(::DeviceSpectralElementGrid2D) = true
-has_horizontal(::SpectralElementGrid2D) = true
-has_horizontal(::SpectralElementGrid1D) = true
-has_horizontal(::MultiPointGrid) = true
+has_horizontal(::AbstractSpectralElementGrid) = true
+has_horizontal(::AbstractFiniteDifferenceGrid) = false
+has_horizontal(::AbstractExtrudedFiniteDifferenceGrid) = true
+has_horizontal(::LevelGrid) = true
 
 """
     has_vertical(::AbstractGrid)
 
 Return `true` if the grid has a vertical part.
 """
-function has_vertical end
-has_vertical(::AbstractGrid) = false
-has_vertical(::FiniteDifferenceGrid) = true
-has_vertical(::ExtrudedFiniteDifferenceGrid) = true
+has_vertical(::AbstractSpectralElementGrid) = false
+has_vertical(::AbstractFiniteDifferenceGrid) = true
+has_vertical(::AbstractExtrudedFiniteDifferenceGrid) = true
+has_vertical(::LevelGrid) = false
 
 """
     get_mask(grid::AbstractGrid)

@@ -4,6 +4,109 @@ ClimaCore.jl Release Notes
 main
 -------
 
+v1.0.5
+-------
+
+- ![][badge-✨feature/enhancement] Finite difference operators are now applied
+  through the same `Operators.apply_operator` API as spectral element operators,
+  one column at a time. A broadcast over several finite difference operators is
+  evaluated in a single pass over each column whenever possible: operators whose
+  arguments contain no other stencils are evaluated wherever they are read, and
+  all other operators are evaluated once per column into registers instead of
+  being recomputed at every point that reads them. Linear operators are applied
+  as products with their band matrices. The CUDA extension no longer contains
+  any finite difference kernels, so GPU evaluation goes through the generic slice
+  loops with static shared memory, and the `CLIMA_FD_MAX_THREADS` environment
+  variable has been removed. Since GPU index arithmetic is 32-bit, GPU kernels
+  support at most 2^32 - 1 elements per array and 2^31 - 1 slices per
+  `DataLayouts.foreach_slice` loop. Internal stencil methods no longer take
+  horizontal indices, and `Operators.getidx`, the three-argument
+  `Geometry.LocalGeometry(space, idx, hidx)`, `Geometry.mul_with_projection` and
+  `Geometry.mul_return_type` have been removed.
+- ![][badge-✨feature/enhancement] `GradientC2F`, `DivergenceC2F`, `CurlC2F` and
+  `UpwindBiasedProductC2F` have their own `SetValue` boundary stencils again,
+  which read the closest center of the argument that the operator already reads,
+  so they no longer materialize lazy arguments (or, on GPUs, read the registers
+  of other threads). `UpwindBiasedProductC2F` with a `SetValue` also accepts lazy
+  velocities and an `Extrapolate` at the other boundary, and
+  `MatrixFields.operator_matrix` supports these operators with a `SetValue`.
+  Their constructors no longer return an `Operators.DirichletOperator` for a
+  `SetValue`, and the `Operators.*_c2f_dirichlet` helpers now apply the
+  `SetValue` stencils. `DirichletOperator` is only kept for backward
+  compatibility, and it can be removed in a future breaking release.
+
+v1.0.4
+-------
+
+- ![][badge-✨feature/enhancement] New `Limiters.PositivityLimiter`, the
+  mean-preserving Zhang-Shu positivity limiter for DG states, applied with
+  `apply_limiter!`. In each element it scales fields toward their means to
+  enforce linear floors (e.g. `floors = (; ρ = 1e-6)`) and, optionally, a
+  concave constraint `g(U, aux) ≥ g_min` (e.g. pressure). Element means are
+  preserved exactly.
+
+- ![][badge-🐛bugfix] The `PlaceholderSpace` infrastructure is replaced by a
+  simpler `PlaceholderGrid`, which only stands in for grids in the arguments of
+  GPU kernels launched from the host and is swapped out at the start of each
+  kernel, so CPU and device-side broadcasts no longer pay for it. This fixes GPU
+  compilation of some finite difference broadcasts (e.g., lazy `FCTZalesak`
+  stencils), and spectral element operators now accept broadcasts that combine
+  extruded fields with level fields (e.g., `@. gradh(field * level_field)`).
+
+- ![][badge-✨feature/enhancement] `Remapping.PressureInterpolator` accepts
+  `method = Remapping.LogLinearInPressure()` to interpolate linearly in log
+  pressure. The default `Remapping.LinearInPressure()` interpolates linearly
+  in pressure.
+
+v1.0.3
+-------
+
+- ![][badge-🐛bugfix] Broadcasts over fields with different spaces now recursively
+  traverse the entire expression tree to find the largest shared space. All input
+  fields are checked against the shared space, with strict compatibility rules
+  defined through `Grids.issubgrid` and `Spaces.issubspace`. Broadcast destinations
+  can have different spaces from the inputs, as long as their sizes are consistent.
+
+v1.0.2
+-------
+
+- ![][badge-✨feature/enhancement] New spectral element operator
+  `Operators.LumpedRestriction(quadrature_style)`: within each element, it
+  restricts a field onto the nodal basis of a lower-degree quadrature with a
+  lumped mass matrix and interpolates the result back to the element's own
+  quadrature points, so the output lives on the input's space and composes in
+  one broadcast with other spectral operators (e.g.
+  `@. lumped(norm_sqr(grad(f)))`). The default `GLL{2}` gives the bilinear
+  corner basis; `GL{1}` gives the element mean. It reproduces constants and
+  conserves every element's `WJ`-weighted integral exactly, and it removes the
+  systematic excess of positive-definite gradient invariants like
+  `norm_sqr(grad(f))` at element edges and corners that comes from the
+  end-of-interval error of polynomial differentiation and that DSS cannot
+  remove.
+
+- ![][badge-🚀performance] Reduced compilation latency (TTFX) across grid/space
+  construction, `DataLayout` and `Field` broadcasts, spectral and finite-difference
+  operators, and `FieldVector` broadcasts by eliminating internal `Core.kwcall`
+  forwarding layers and duplicate `ThisThreadPool` loop specializations in
+  `DataLayouts`, making `is_cpu_linear_compatible` a compile-time check in
+  `FieldVector` `copyto!`, avoiding union-splitting in
+  `ExtrudedFiniteDifferenceGrid`, removing unused `LocalGeometry` constructions in
+  `MatrixFields.multiply_matrix_at_index`, and precompiling single-threaded CPU
+  contexts in `precompile_workload.jl`. The package image also shrinks by roughly
+  20% (322 MB to 257 MB).
+
+- ![][badge-🔥behavioralΔ] The `copyto!` methods for `Field`s and `DataLayout`s,
+  including those for spectral and column-stencil operator broadcasts, take the
+  optional `DataMask` as a third positional argument, `copyto!(dest, bc, mask)`,
+  in place of the `mask` keyword argument. A multi-element tuple broadcast into
+  a `DataLayout` writes only the points that the mask marks as active.
+
+- ![][badge-🐛bugfix] Broadcasting a single-element tuple into a `FieldVector`,
+  as in `Y .= (x,)`, no longer throws a `DimensionMismatch`. This is the form
+  `Base.broadcastable` produces for custom scalar types, so it now behaves the
+  same as `Y .= Ref(x)`. The `FieldVector`'s own `BlockedOneTo` axes were
+  previously passed down to each leaf array unchanged.
+
 v1.0.1
 -------
 

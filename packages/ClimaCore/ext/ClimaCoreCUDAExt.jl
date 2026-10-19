@@ -3,7 +3,7 @@ module ClimaCoreCUDAExt
 import NVTX
 import ClimaCore.Limiters
 import ClimaComms
-import ClimaCore: DataLayouts, Fields, Geometry, Utilities
+import ClimaCore: DataLayouts, Grids, Fields, Geometry, Utilities
 import ClimaCore.Geometry: AbstractTensor
 import CUDA
 using CUDA
@@ -19,8 +19,8 @@ include(joinpath("cuda", "adapt.jl"))
 include(joinpath("cuda", "cuda_utils.jl"))
 include(joinpath("cuda", "data_layouts.jl"))
 include(joinpath("cuda", "fields.jl"))
+include(joinpath("cuda", "shuffles.jl"))
 include(joinpath("cuda", "topologies_dss.jl"))
-include(joinpath("cuda", "operators_finite_difference.jl"))
 include(joinpath("cuda", "remapping_distributed.jl"))
 include(joinpath("cuda", "operators_integral.jl"))
 include(joinpath("cuda", "remapping_interpolate_array.jl"))
