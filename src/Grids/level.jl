@@ -8,7 +8,7 @@ weights, and global geometry of `full_grid`, and its local geometry is the
 corresponding level of the local geometry of `full_grid`.
 """
 struct LevelGrid{
-    G <: AbstractExtrudedFiniteDifferenceGrid,
+    G <: Union{AbstractExtrudedFiniteDifferenceGrid, PlaceholderGrid},
     L <: Union{Int, PlusHalf{Int}},
 } <: AbstractGrid
     full_grid::G
@@ -51,6 +51,16 @@ local_geometry_data(levelgrid::LevelGrid{<:Any, PlusHalf{Int}}, ::Nothing) =
     )
 global_geometry(levelgrid::LevelGrid) = global_geometry(levelgrid.full_grid)
 hypsography(levelgrid::LevelGrid) = hypsography(levelgrid.full_grid)
+
+issubgrid(subgrid::LevelGrid, grid::LevelGrid) = subgrid === grid
+maybe_issubgrid(subgrid::LevelGrid, grid::LevelGrid) = true
+for f in (:issubgrid, :maybe_issubgrid)
+    @eval $f(subgrid::LevelGrid, grid::AbstractGrid) = $f(subgrid.full_grid, grid)
+    @eval $f(subgrid::AbstractGrid, grid::LevelGrid) =
+        grid.full_grid isa DeviceExtrudedFiniteDifferenceGrid ?
+        throw(ArgumentError("Cannot compare device-side slices of extruded grids")) :
+        $f(subgrid, grid.full_grid.horizontal_grid)
+end
 
 ## GPU compatibility
 Adapt.adapt_structure(to, grid::LevelGrid) =

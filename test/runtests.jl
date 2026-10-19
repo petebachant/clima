@@ -67,7 +67,7 @@ unit_tests = [
     UnitTest("Fields - multi broadcast fusion"          ,"Fields/unit_field_multi_broadcast_fusion.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Fields - FieldVector flattening"          ,"Fields/unit_fieldvector_flatten.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Fields - inference"                       ,"Fields/inference_fields.jl"; meta = :cpu_only, tier = :inference, subsystem = :fields),
-    UnitTest("Placeholder Fields"                       ,"Operators/unit_common.jl"; tier = :unit, subsystem = :operators),
+    UnitTest("Placeholder Fields"                       ,"Fields/unit_placeholders.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Operators - multi-column vs single column","Operators/unit_multicolumn_column_equivalence.jl"; tier = :unit, subsystem = :operators),
 
     # Spectral Element Operators
@@ -92,6 +92,7 @@ unit_tests = [
     UnitTest("Spectral elem - sphere hyperdiff vec"     ,"Operators/spectralelement/unit_sphere_hyperdiffusion_vec.jl"; tier = :unit, subsystem = :operators),
     UnitTest("Spectral elem - sphere hyperdiff vec conv" ,"Operators/spectralelement/conv_sphere_hyperdiffusion_vec.jl"; tier = :conv, subsystem = :operators),
     UnitTest("Spectral elem - over-integration"         ,"Operators/spectralelement/unit_overintegration.jl"; meta = :cpu_only, tier = :unit, subsystem = :operators),
+    UnitTest("Spectral elem - lumped restriction"       ,"Operators/spectralelement/unit_lumped_restriction.jl"; tier = :unit, subsystem = :operators),
     # Spectral Element - Discontinuous Galerkin (DG) operators
     # The DG interface fluxes have native GPU kernels in ClimaCoreCUDAExt, so
     # the operators need no `allowscalar`; unit_two_point_fluxes and
@@ -159,6 +160,8 @@ unit_tests = [
 
     # Limiters, IO, Remapping
     UnitTest("Limiter"                                  ,"Limiters/unit_limiter.jl"; tier = :unit, subsystem = :limiters),
+    UnitTest("Limiters - Zhang-Shu positivity"          ,"Limiters/positivity_limiter.jl"; tier = :unit, subsystem = :limiters),
+    UnitTest("Limiters - Zhang-Shu zero-allocation"     ,"Limiters/allocs_positivity_limiter.jl"; meta = :cpu_only, tier = :allocs, subsystem = :limiters),
     UnitTest("Limiters - vertical mass borrowing"       ,"Limiters/vertical_mass_borrowing_limiter.jl"; tier = :unit, subsystem = :limiters),
     UnitTest("Limiters - vertical mass borrowing adv"   ,"Limiters/vertical_mass_borrowing_limiter_advection.jl"; tier = :unit, subsystem = :limiters, slow = true), # 2.3 min
     UnitTest("InputOutput - hdf5"                       ,"InputOutput/unit_hdf5.jl"; tier = :unit, subsystem = :io),

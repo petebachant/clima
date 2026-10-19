@@ -32,7 +32,7 @@ end
 @inline each_maskable_slice_index(_, mask::IJHMask, ::typeof(column), args...) =
     ActiveColumnIndices(mask)
 @inline each_maskable_slice_index(_, mask::IJHMask, ::typeof(view), args...) =
-    ActivePointIndices{size(first(args), 1)}(mask)
+    ActivePointIndices{nlevels(first(args))}(mask)
 
 # Every valid mask and slice operator combination has indexable slice indices:
 # NoMask uses the full index ranges, and IJHMask (which only supports column
@@ -75,7 +75,7 @@ Return the [`DataScope`](@ref) that [`foreach_slice`](@ref) assigns to slices of
 the given arguments when parallelizing over `scope`. By default, this is the
 smallest scope, out of `scope` itself and its subsets, that does not require any
 thread to process more than one point from the largest slice returned by `op`.
-When no such scope is available, the largest subset is used in order to minimize
+When no such scope is available, the largest of these scopes is used in order to minimize
 the number of points per thread.
 
 `scope` itself is only used when its thread count is a compile-time constant
@@ -95,21 +95,15 @@ end
     subscope = partition(scope)
     subscope == ThisThread() && return subscope
     max_slice_points > num_threads(partition(subscope)) &&
-        return fits_in_scope(scope, subscope, max_slice_points) ? scope : subscope
+        return slice_exceeds_subscope(scope, subscope, max_slice_points) ? scope : subscope
     return points_subscope(subscope, max_slice_points)
 end
 
-# Whether a slice is too wide for every subset of scope but not for scope
-# itself (re-slicing a slab inside another slab loop's body). A subset would
-# give it half the threads it has points and double the shared memory that
-# scoped_static_array reserves for every buffer the loop allocates.
-@inline function fits_in_scope(scope, subscope, max_slice_points)
-    scope_threads = static_num_threads(scope)
-    subscope_threads = static_num_threads(subscope)
-    isnothing(scope_threads) && return false
-    isnothing(subscope_threads) && return false
-    return subscope_threads < max_slice_points <= scope_threads
-end
+# Whether every subset of scope is too small for a slice (re-slicing in a slice loop): a
+# subset's stride would not match outer register arrays, and shared buffers would double.
+@inline slice_exceeds_subscope(scope, subscope, max_slice_points) =
+    !isnothing(static_num_threads(scope)) &&
+    something(static_num_threads(subscope), typemax(Int)) < max_slice_points
 
 # The single definition of the slice-loop keyword defaults; every entry point
 # slurps its keyword arguments and unpacks them here.
@@ -130,7 +124,10 @@ of the following:
 
 Each slice is assigned to a [`slice_subscope`](@ref) of `scope`, by default the
 largest available [`DataScope`](@ref) that can access every argument, and a
-[`DataMask`](@ref) may be used to skip a particular subset of slices.
+[`DataMask`](@ref) may be used to skip a particular subset of slices. On CUDA
+devices, `foreach_slice` supports at most `2^31 - 1` slices and 31 arguments
+after `f`, since Julia does not infer calls that splat more than 32 values,
+which would leave dynamic calls in the kernel.
 
 Statements in `f` execute in order at the slice's scope: same-shaped pointwise
 broadcasts assign every point to the same thread in each statement, and
@@ -142,14 +139,24 @@ makes this `f(index, slices...)`, like in a loop over `Base.enumerate(arg)`.
 """
 @inline function foreach_slice(op::O, f::F, args...; kwargs...) where {O, F}
     (mask, enumerate) = slice_loop_flags(; kwargs...)
+    return _foreach_slice(op, f, mask, enumerate, args...)
+end
+
+@inline function _foreach_slice(
+    op::O,
+    f::F,
+    mask,
+    enumerate,
+    args...,
+) where {O, F}
     unrolled_allequal(Base.Fix1(each_slice_index, op), args) ||
         throw(DimensionMismatch("Inputs to foreach_slice must have compatible dimensions"))
     scope = DataScope(args...)
-    # Go straight onto the loop barrier for scopes without setup: every layer
-    # of keyword-argument forwarding adds a Core.kwcall method and a hidden
-    # body method per loop, each re-optimized with the whole loop inlined.
+    # Go straight onto the loop barrier for scopes without setup: every
+    # forwarding layer adds a method instance per loop, inferred with the whole
+    # loop inlined into it.
     return needs_loop_setup(scope) ?
-           foreach_slice(scope, op, f, args...; mask, enumerate) :
+           _foreach_slice(scope, op, f, mask, enumerate, args...) :
            scoped_slice_loop(
         slice_subscope(scope, op, args...), scope, op, f, mask, enumerate, args...,
     )
@@ -161,8 +168,11 @@ for (name, op, ref) in (
     (:foreach_slab, :slab, "[`slab`](@ref)"),
     (:foreach_column, :column, "[`column`](@ref)"),
 )
-    # The body of foreach_slice is replicated instead of forwarded to, since a
-    # forwarding layer takes about as much inference as the loop it forwards to.
+    # These wrappers unpack the public keyword arguments once, at the entry
+    # point, and pass them on positionally. Everything below them is positional
+    # because each keyword-forwarding layer adds a Core.kwcall method instance
+    # and a hidden body method instance per loop, each inferred with the whole
+    # loop inlined into it, whether or not it is @inline.
     @eval begin
         """
             $($name)(f, args...; mask = NoMask(), enumerate = Val(false))
@@ -171,78 +181,68 @@ for (name, op, ref) in (
         """
         @inline function $name(f::F, args...; kwargs...) where {F}
             (mask, enumerate) = slice_loop_flags(; kwargs...)
-            unrolled_allequal(Base.Fix1(each_slice_index, $op), args) ||
-                throw(
-                    DimensionMismatch(
-                        "Inputs to foreach_slice must have compatible dimensions",
-                    ),
-                )
-            scope = DataScope(args...)
-            return needs_loop_setup(scope) ?
-                   foreach_slice(scope, $op, f, args...; mask, enumerate) :
-                   scoped_slice_loop(
-                slice_subscope(scope, $op, args...),
-                scope,
-                $op,
-                f,
-                mask,
-                enumerate,
-                args...,
-            )
+            return _foreach_slice($op, f, mask, enumerate, args...)
         end
     end
 end
 
 # Whether looping over a DataScope requires work before and after the loop,
-# done by the scope's own foreach_slice method; extend alongside every method.
+# done by the scope's own _foreach_slice method; extend alongside every method.
 @inline needs_loop_setup(::DataScope) = false
 
 # A thread pool has to be resolved before looping over it, and given back afterward.
 @inline needs_loop_setup(::ThisThreadPool) = true
-@inline function foreach_slice(
+@inline function _foreach_slice(
     scope::ThisThreadPool,
     op::O,
     f::F,
-    args...;
-    kwargs...,
+    mask,
+    enumerate,
+    args...,
 ) where {O, F}
-    pool_thread_info() == (0, 0) ||
-        return foreach_pool_slice(num_threads(scope), scope, op, f, args...; kwargs...)
-    threads = resolve_pool_threads()
+    # A single-threaded pool takes a shortcut around the whole claim/release
+    # protocol. This is exactly equivalent to running it: claim_pool_threads
+    # returns 0 without touching POOL_THREADS_IN_USE when the pool has one
+    # thread, and PENDING_POOL_LOOPS is only incremented to be decremented
+    # again, so no shared state would change. Folding one_thread into in_pool
+    # is what skips the release in the finally block, and it cannot mask a real
+    # nested loop: pool_thread_info is only set by launch_pool_threads and by a
+    # resolve_pool_threads call that claims threads, and a one-thread pool
+    # reaches neither.
+    one_thread = isone(default_pool_size())
+    in_pool = one_thread || pool_thread_info() != (0, 0)
+    # The thread count stays an Int: a run-time-typed scope is a union in every call below.
+    threads =
+        one_thread ? 1 : (in_pool ? num_threads(scope) : resolve_pool_threads())
     try
-        return foreach_pool_slice(threads, scope, op, f, args...; kwargs...)
+        return isone(threads) ?
+               scoped_slice_loop(
+            ThisThread(), ThisThread(), op, f, mask, enumerate, args...,
+        ) :
+               parallelize_over(
+            () -> scoped_slice_loop(
+                slice_subscope(scope, op, args...), scope, op, f, mask, enumerate,
+                args...,
+            ),
+            scope,
+        )
     finally
-        release_pool_threads()
+        in_pool || release_pool_threads()
     end
 end
 
-# Loop over the threads a pool loop resolved to. The count is passed as an integer rather
-# than as a resolved scope, because a scope whose type is only known at run time becomes a
-# union at every call below it, which uses up inference budget that the point loops need.
-@inline foreach_pool_slice(
-    threads::Int,
-    scope::ThisThreadPool,
-    op::O,
-    f::F,
-    args...;
-    mask,
-    enumerate,
+@inline _foreach_slice(
+    scope::DataScope, op::O, f::F, mask, enumerate, args...,
 ) where {O, F} =
-    isone(threads) ? foreach_slice(ThisThread(), op, f, args...; mask, enumerate) :
-    parallelize_over(
-        () -> scoped_slice_loop(
-            slice_subscope(scope, op, args...), scope, op, f, mask, enumerate, args...,
-        ),
-        scope,
+    scoped_slice_loop(
+        slice_subscope(scope, op, args...), scope, op, f, mask, enumerate, args...,
     )
 
 @inline function foreach_slice(
     scope::DataScope, op::O, f::F, args...; kwargs...,
 ) where {O, F}
     (mask, enumerate) = slice_loop_flags(; kwargs...)
-    return scoped_slice_loop(
-        slice_subscope(scope, op, args...), scope, op, f, mask, enumerate, args...,
-    )
+    return _foreach_slice(scope, op, f, mask, enumerate, args...)
 end
 
 # The loop body lives behind a function barrier so that the subscope is a
@@ -267,12 +267,37 @@ end
 ) where {O, F}
     indices = subscope_slice_indices(subscope, scope, mask, op, args...)
     scoped_args = unrolled_map(Base.Fix2(reassign, subscope), args)
-    @simd_if (op == view && simd_over_indices(indices)) for i in 1:length(indices)
-        index = @inbounds indices[i]
+    @simd_if (op == view && simd_over_indices(indices)) for i in index_positions(indices)
+        index = @inbounds slice_index(indices, i)
         slices = @inbounds slice_every_arg(op, index, scoped_args...)
         @inline enumerate isa Val{true} ? f(index, slices...) : f(slices...)
     end
 end
+
+# Strided subsets (see StridedRange) are iterated by value, in their own integer type, so
+# that GPUs neither divide out their length nor emulate a 64-bit loop counter.
+@inline index_positions(indices) = 1:length(indices)
+@inline index_positions(range::StridedRange) = range
+@inline index_positions(strided::StridedCartesianIndices) = strided.view_range
+const StridedActiveIndices = Union{
+    ActiveColumnIndices{<:Any, <:StridedRange},
+    ActivePointIndices{<:Any, <:Any, <:StridedRange},
+}
+@inline index_positions(indices::StridedActiveIndices) = indices.indices
+Base.@propagate_inbounds slice_index(::StridedRange, i) = i
+Base.@propagate_inbounds slice_index(strided::StridedCartesianIndices, i) =
+    single_axis_cartesian_index(strided.indices, i)
+Base.@propagate_inbounds slice_index(indices::StridedActiveIndices, i) =
+    active_index(indices, i)
+
+# When only the first axis of CartesianIndices is longer than 1, i is the position on it:
+# LLVM does not always remove Base's division, which keeps CPU loops from vectorizing.
+Base.@propagate_inbounds slice_index(indices, i) = indices[i]
+Base.@propagate_inbounds slice_index(indices::CartesianIndices, i) =
+    ndims(indices) > 1 && unrolled_all(isone, Base.tail(size(indices))) ?
+    CartesianIndex(
+        indices.indices[1][i], unrolled_map(first, Base.tail(indices.indices))...,
+    ) : indices[i]
 
 # One slice of every argument. A generated function rather than an unrolled_map
 # over a closure (two method instances per slice loop per argument-type
@@ -282,9 +307,44 @@ end
     Base.@_propagate_inbounds_meta
     return Base.Cartesian.@ntuple $N n -> $(
         O === typeof(view) ? :(view(getfield(args, n), index)) :
-        :(op(getfield(args, n), Tuple(index)...))
+        :(slice_arg(op, getfield(args, n), Tuple(index)...))
     )
 end
+
+# Slices at a slice loop's own (valid) indices, so that types can skip their own checks
+# (see Fields.slice_arg): Julia 1.10 keeps checks that @inbounds makes dead in the IR.
+Base.@propagate_inbounds slice_arg(op::O, arg, indices...) where {O} = op(arg, indices...)
+
+"""
+    update_points!(f, op, data, slice_op)
+
+Replace each value `x` at a point `index` of `data` with `op(x, f(index))` (or `f(index)`
+if `op` is `nothing`), where the points are the slices that `slice_op` returns (e.g.,
+`view`, or `column` for the single-point columns of a slab). Unlike [`foreach_point`](@ref),
+this can be specialized for a [`DataScope`](@ref) to call `f` with all of its threads in
+rounds, in which a thread without a point calls `f` at the last point and discards the
+result, so that `f` can read values that every thread of the scope must read together (see
+`Operators.allows_branching`).
+"""
+@inline function update_points!(f::F, op::O, data, slice_op::S) where {F, O, S}
+    update_point!(index, point) =
+        (@inbounds point[] = updated_value(op, point, @inline f(index)))
+    scope = DataScope(data)
+    needs_loop_setup(scope) ?
+    _foreach_slice(slice_op, update_point!, NoMask(), Val(true), data) :
+    scoped_slice_loop(
+        slice_subscope(scope, slice_op, data),
+        scope,
+        slice_op,
+        update_point!,
+        NoMask(),
+        Val(true),
+        data,
+    )
+    return data
+end
+@inline updated_value(::Nothing, _, value) = value
+@inline updated_value(op::O, point, value) where {O} = op(point[], value)
 
 # Alternative to scoped_slice_loop that generates ordinary, unfused for loops,
 # with every slice processed by the full scope instead of a slice_subscope.
@@ -439,29 +499,52 @@ right-associative, and `init` seeds the fold when it is given.
     return dest
 end
 
+# Every copyto! into a DataLayout takes its mask as an optional positional
+# argument rather than a keyword, so that callers in Fields and Operators reach
+# the loop without a Core.kwcall layer. Each keyword layer is a separate method
+# instance with the whole loop inlined into it, and costs inference time even
+# when it is @inline and has no recursion limit.
+#
 # Replicate Base's scalar broadcast copyto!, where data .= value becomes fill!,
 # and any other scalar broadcast becomes a pointwise loop. Since materialize!
 # attaches dest's axes, but foreach_point strips dest of its axes, the scalar
 # broadcast must also have its axes dropped, mirroring how Base's instantiate
-# drops scalar broadcast axes. The StaticArrayStyle{0} and AbstractBlockStyle{0}
-# methods avoid ambiguities with StaticArrays and BlockArrays.
+# drops scalar broadcast axes.
+@inline function _copyto_scalar_broadcast!(
+    dest::DataLayout,
+    bc,
+    mask::DataMask = NoMask(),
+)
+    if bc.f === identity && isone(length(bc.args)) && Broadcast.isflat(bc)
+        @inbounds arg = first(bc.args)
+        return @inbounds fill!(dest, arg isa Tuple ? first(arg) : arg[]; mask)
+    end
+    bc_without_axes = Broadcast.Broadcasted(bc.style, bc.f, bc.args)
+    _foreach_slice(
+        view,
+        dest_point -> (@inbounds dest_point[] = first(bc_without_axes)),
+        mask,
+        Val(false),
+        dest,
+    )
+    call_post_op_callback() && post_op_callback(dest, dest, bc; mask)
+    return dest
+end
+
+# The StaticArrayStyle{0} and AbstractBlockStyle{0} methods avoid ambiguities
+# with StaticArrays and BlockArrays. ClimaCoreCUDAExt adds the corresponding
+# AbstractGPUArrayStyle{0} method, which cannot be defined here because
+# GPUArrays is not a dependency of ClimaCore.
 for S in (
     :(<:Broadcast.AbstractArrayStyle{0}),
     :(<:StaticArrays.StaticArrayStyle{0}),
     :(<:BlockArrays.AbstractBlockStyle{0}),
 )
-    @eval @inline Base.copyto!(dest::DataLayout, bc::Broadcast.Broadcasted{$S}; kwargs...) =
-        if bc.f === identity && isone(length(bc.args)) && Broadcast.isflat(bc)
-            @inbounds arg = first(bc.args)
-            @inbounds fill!(dest, arg isa Tuple ? first(arg) : arg[]; kwargs...)
-        else
-            bc_without_axes = Broadcast.Broadcasted(bc.style, bc.f, bc.args)
-            foreach_point(dest; kwargs...) do dest_point
-                @inbounds dest_point[] = first(bc_without_axes)
-            end
-            call_post_op_callback() && post_op_callback(dest, dest, bc; kwargs...)
-            dest
-        end
+    @eval @inline Base.copyto!(
+        dest::DataLayout,
+        bc::Broadcast.Broadcasted{$S},
+        mask::DataMask = NoMask(),
+    ) = _copyto_scalar_broadcast!(dest, bc, mask)
 end
 
 @inline is_scalar_or_length_one(arg) = true
@@ -469,22 +552,52 @@ end
 @inline is_scalar_or_length_one(bc::Broadcast.Broadcasted) =
     unrolled_all(is_scalar_or_length_one, bc.args)
 
-# Handle single-element tuples in DataLayout broadcasts the same way as Refs.
-# For multi-element tuples, fall back to Base's default copyto! implementation.
+# Single-element tuples are handled the same way as Refs. A multi-element tuple
+# is indexed along the first dimension of dest, as in Base, and each active
+# point of dest reads the broadcast at its own Cartesian index.
 @inline function Base.copyto!(
     dest::DataLayout,
-    bc::Broadcast.Broadcasted{Broadcast.Style{Tuple}};
-    kwargs...,
+    bc::Broadcast.Broadcasted{Broadcast.Style{Tuple}},
+    mask::DataMask = NoMask(),
 )
-    style_type = is_scalar_or_length_one(bc) ? Broadcast.DefaultArrayStyle{0} : Nothing
-    return copyto!(dest, convert(Broadcast.Broadcasted{style_type}, bc); kwargs...)
+    is_scalar_or_length_one(bc) && return copyto!(
+        dest,
+        convert(Broadcast.Broadcasted{Broadcast.DefaultArrayStyle{0}}, bc),
+        mask,
+    )
+    bc_with_axes = Broadcast.instantiate(
+        Broadcast.Broadcasted{Nothing}(bc.f, bc.args, map(Base.OneTo, size(dest))),
+    )
+    _foreach_slice(
+        view,
+        (index, dest_point) -> (@inbounds dest_point[] = bc_with_axes[index]),
+        mask,
+        Val(true),
+        dest,
+    )
+    call_post_op_callback() && post_op_callback(dest, dest, bc; mask)
+    return dest
 end
 
-@inline function Base.copyto!(dest::DataLayout, arg::MaybeLazyDataLayout; kwargs...)
-    foreach_point(dest, arg; kwargs...) do dest_point, arg_point
-        @inbounds dest_point[] = arg_point[]
-    end
-    call_post_op_callback() && post_op_callback(dest, dest, arg; kwargs...)
+@inline function Base.copyto!(
+    dest::DataLayout,
+    arg::MaybeLazyDataLayout,
+    mask::DataMask = NoMask(),
+)
+    dest_and_arg = Broadcast.broadcasted(tuple, dest, arg)
+    size(dest) == size(dest_and_arg) ||
+        throw(DimensionMismatch("DataLayout broadcast result exceeds destination size"))
+    _foreach_slice(
+        view,
+        dest_and_arg_point -> begin
+            @inbounds (dest_point, arg_point) = dest_and_arg_point.args
+            @inbounds dest_point[] = arg_point[]
+        end,
+        mask,
+        Val(false),
+        dest_and_arg,
+    )
+    call_post_op_callback() && post_op_callback(dest, dest, arg; mask)
     return dest
 end
 
@@ -498,8 +611,7 @@ end
     return bc
 end
 
-@inline Base.copy(arg::MaybeLazyDataLayout; kwargs...) =
-    copyto!(similar(arg), arg; kwargs...)
+@inline Base.copy(arg::MaybeLazyDataLayout) = copyto!(similar(arg), arg)
 
 # Add axes to LazyDataLayouts and AutoBroadcaster wrappers to DataLayouts before
 # reducing them. Remove all AutoBroadcaster wrappers after obtaining the result.
