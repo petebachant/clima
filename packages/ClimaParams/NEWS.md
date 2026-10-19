@@ -3,6 +3,77 @@ ClimaParams.jl Release Notes
 main
 -------
 
+v1.3.3
+-------
+- Normalize the dimensional inputs of the Khairoutdinov and Kogan (2000)
+  warm-rain rates: add `KK2000_reference_cloud_droplet_number_concentration`
+  (`N_ref`, 1e6 m⁻³, i.e. 1 cm⁻³, the unit of the original fit) and
+  `KK2000_reference_air_density` (`ρ_ref`, 1 kg m⁻³), so that the rates read
+  `A q_lcl^a (N_d/N_ref)^b (ρ/ρ_ref)^c` and `A (q_lcl q_rai)^a (ρ/ρ_ref)^b`
+  with `A` in s⁻¹. The default of `KK2000_autoconversion_coeff_A` changes
+  from `7.42e13` (the coefficient for `N_d` in m⁻³) to the published `1350`;
+  the two agree to 0.02 %, the rounding of that unit conversion.
+
+v1.3.2
+-------
+- Add `precipitation_timescale_updraft_ratio` (default `1.0`, unitless): the
+  0-moment precipitation formation timescale for EDMF updraft condensate in
+  ClimaAtmos is this ratio times `precipitation_timescale`. A ratio (rather than
+  a second absolute timescale) keeps the two timescales tied by default and is
+  easier to calibrate.
+- Add parameters for the Kessler (1969) / IFS (Tiedtke 1993) below-cloud evaporation
+  of the 0-moment precipitation flux (CloudMicrophysics `Evaporation0M`):
+  `precipitation_evaporation_coefficient` (`k_E`, `0.0` = off; IFS uses 5.44e-4 s^-1),
+  `precipitation_evaporation_rh_crit` (`RH_c`, 0.9),
+  `precipitation_evaporation_area_fraction` (`a_p`, 0.3),
+  `precipitation_evaporation_flux_scale` (`α₂`, 5.09e-3 kg m^-2 s^-1), and
+  `precipitation_evaporation_exponent` (`α₃`, 0.5777).
+
+v1.3.1
+-------
+- Add the parameters of the Raupach (1994) canopy roughness model in
+  SurfaceFluxes.jl (`RaupachRoughnessParams`), with the defaults of the paper:
+  `raupach_element_drag_coefficient` (`C_R`, 0.3),
+  `raupach_substrate_drag_coefficient` (`C_S`, 0.003),
+  `raupach_displacement_coefficient` (`c_d1`, 7.5),
+  `raupach_frontal_area_ratio` (frontal per plant area index, 0.5),
+  `raupach_minimum_frontal_area_index` (`λ_min`, 0.0),
+  `raupach_max_ustar_to_canopy_wind_ratio` (`(u★/U_h)_max`, 0.3), and
+  `raupach_roughness_sublayer_depth_ratio` (`c_w`, 2.0), which sets the
+  roughness-sublayer influence function `Ψ_h = ln c_w - 1 + 1/c_w`.
+
+v1.3.0
+-------
+- Add `sgs_variance_vertical_scale_factor` (default `1.0`): multiplier
+  `c_Δz` on the vertical grid scale `Δz` in the resolved vertical-gradient
+  SGS variance term in ClimaAtmos, `variance += c_g (c_Δz Δz)² (∂_z ψ)²`.
+- Change the default of `sgs_variance_horizontal_scale_factor` from `3.0`
+  to `1.0`, so the horizontal effective coefficient is `c_g · c_Δx² = 1/12`
+  — the uniform-box exact value, matching the new vertical factor.
+
+v1.2.1
+-------
+- Restore the parameters removed or renamed in v1.1.17 and v1.2.0, which broke
+  downstream packages. They are deprecated and will be removed in v2.0:
+  - `mixing_length_alpha`, `mixing_length_l_0`, `mixing_length_tke_max`,
+    `mixing_length_min`
+  - `rain_autoconversion_timescale_stratiform`,
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform`
+
+v1.2.0
+-------
+- Rename the stratiform Kessler autoconversion parameters to dimensionless
+  scale factors on their convective counterparts, both with default `1.0`
+  (so the classic velocity-independent Kessler scheme is recovered by default):
+  - `rain_autoconversion_timescale_stratiform` (was 1000.0 s) →
+    `rain_autoconversion_timescale_stratiform_scale` (1.0, unitless);
+    stratiform timescale is `rain_autoconversion_timescale` times this.
+  - `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform`
+    (was 5e-4) →
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale`
+    (1.0, unitless); stratiform threshold is
+    `cloud_liquid_water_specific_humidity_autoconversion_threshold` times this.
+
 v1.1.17
 -------
 - Rework the EDMF empirical `l_TKE` closure parameters:
