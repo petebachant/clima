@@ -70,13 +70,16 @@ The README is the first thing most users and agents see. Keep it short and curre
 
 [docs-stable-img]: https://img.shields.io/badge/docs-stable-blue.svg
 [docs-stable-url]: https://CliMA.github.io/<Package>.jl/stable/
+
+[version-img]: https://img.shields.io/github/v/release/CliMA/<Package>.jl
+[version-url]: https://github.com/CliMA/<Package>.jl/releases
 ~~~
 
 Row conventions:
 
 - **Omit rows that do not apply.** Drop the Buildkite badge in a repo with no Buildkite pipeline (or one that does not build `main` — see below) rather than shipping a badge that reads `unknown`.
 - **Add rows where warranted.** A repo with a Zenodo DOI or a JOSS paper gets a **DOI** and/or **JOSS** row; keep the existing DOI identifier exactly as-is when reformatting a table.
-- **Version** points at the JuliaHub badge for registered packages: `https://juliahub.com/docs/General/<Package>/stable/version.svg`. Some packages only resolve at `https://juliahub.com/docs/<Package>/version.svg` — fetch the URL and check for a 200 before committing it.
+- **Version** points at the shields.io GitHub release badge, `https://img.shields.io/github/v/release/CliMA/<Package>.jl`, which shows the latest tag, and links to the repo's releases page.
 
 **Badges must track `main`, and must be able to.** A badge that misreports status trains everyone to ignore it. Two independent requirements:
 
@@ -222,6 +225,7 @@ Each bullet starts with the backticked identifier. For complex options, list val
 - **Prefer Unicode for simple expressions**: α, β, ρ, ∂, ∇, ≤, ∈ all render inline and read more naturally than `\alpha`, `\beta`, etc., matching the variable names in the code.
 - **Use LaTeX for complex layout**: fractions, integrals with bounds, multi-line alignment.
 - **Inline:** double backticks, ``` ``α · β`` ```. **Display:** fenced ` ```math ` block.
+- **Accents:** use `\widehat` and `\widetilde`, never `\hat` or `\tilde`. The narrow forms do not render in the docs build.
 
 ~~~markdown
 ```math
