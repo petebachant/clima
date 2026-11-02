@@ -40,7 +40,7 @@ allowing for prescribed sensible heat flux conditions. See the inputs container.
         return shf_in
     end
     thermo_params = SFP.thermodynamics_params(param_set)
-    Φ_sfc = surface_geopotential(inputs)
+    Φ_sfc = surface_geopotential(param_set, inputs)
     Φ_int = interior_geopotential(param_set, inputs)
     DSE_int = TD.dry_static_energy(thermo_params, T_int, Φ_int)
     DSE_sfc = TD.dry_static_energy(thermo_params, T_sfc, Φ_sfc)
@@ -83,7 +83,7 @@ Useful for computing fluxes from variables available inside the solver loop.
 
     # Compute conductance
     g_h = heat_conductance(param_set, ζ, ustar, inputs, z0m, z0h, scheme)
-    q_vap_int = inputs.q_tot_int - inputs.q_liq_int - inputs.q_ice_int
+    q_vap_int = interior_vapor_specific_humidity(inputs)
 
     # Compute evaporation (needed for SHF correction)
     E = evaporation(
@@ -198,7 +198,7 @@ friction velocity `ustar`, roughness lengths, and surface state.
 )
     # Compute conductance
     g_h = heat_conductance(param_set, ζ, ustar, inputs, z0m, z0h, scheme)
-    q_vap_int = inputs.q_tot_int - inputs.q_liq_int - inputs.q_ice_int
+    q_vap_int = interior_vapor_specific_humidity(inputs)
 
     return evaporation(
         param_set,
@@ -312,6 +312,11 @@ It is approximated by linearizing the density perturbations with respect to temp
 
     B ≈ (g / ρ_sfc) * ( SHF / (cp_m * T_sfc) + (ε_vd - 1) * LHF / LH_v0 )
 
+This form serves the prescribed-flux modes, where the fluxes are given and `ζ` is not.
+The MOST solve and its outputs use the exact form `B = -u_*^3 ζ / (κ Δz_eff)` of
+[`buoyancy_flux(param_set, ζ, ustar, inputs)`](@ref buoyancy_flux); the linearization
+differs from it by about a percent in strongly convective conditions.
+
 Where:
  - `cp_m` is the specific heat of moist air, calculated using `q_tot_sfc`, `q_liq_sfc`, and `q_ice_sfc`.
  - `ε_vd` is the ratio of gas constants for water vapor and dry air.
@@ -398,6 +403,10 @@ The relationship is derived from the definition of the Obukhov length:
     ζ = Δz / L
     => B = -(u_*^3 * ζ) / (κ * Δz)
 
+This is the buoyancy flux of the stability solve, consistent with its virtual potential
+temperatures; the prescribed-flux modes use the linearized form of
+[`buoyancy_flux(param_set, shf, lhf, T_sfc, ρ_sfc, ...)`](@ref buoyancy_flux) instead.
+
 # Arguments
 - `param_set`: Parameter set.
 - `ζ`: Monin-Obukhov stability parameter.
@@ -411,7 +420,7 @@ The relationship is derived from the definition of the Obukhov length:
     inputs,
 )
     κ = SFP.von_karman_const(param_set)
-    Δz_eff = effective_height(inputs)
+    Δz_eff = effective_height(param_set, inputs)
     return -(ustar^3 * ζ) / (κ * Δz_eff)
 end
 
@@ -457,7 +466,8 @@ end
 """
     state_bulk_richardson_number(param_set, inputs, T_sfc, ρ_sfc, ΔU, q_vap_sfc)
 
-Computes the bulk Richardson number from the given state.
+Computes the bulk Richardson number from the given state (see
+[`bulk_richardson_number_of_state`](@ref)).
 
 # Arguments
 - `param_set`: Parameter set.
@@ -477,11 +487,52 @@ Returns the bulk Richardson number.
     ΔU,
     q_vap_sfc = 0,
 )
-    FT = eltype(param_set)
-    grav = SFP.grav(param_set)
-    thermo_params = SFP.thermodynamics_params(param_set)
+    theta_v_sfc, theta_v_int =
+        virtual_pottemps(param_set, inputs, T_sfc, ρ_sfc, q_vap_sfc)
+    return bulk_richardson_number_of_state(
+        param_set,
+        inputs,
+        theta_v_sfc - theta_v_int,
+        theta_v_int,
+        ΔU,
+    )
+end
 
-    q_tot_int = inputs.q_tot_int
+"""
+    bulk_richardson_number_of_state(param_set, inputs, Δθ_v, θ_v_int, ΔU)
+
+Bulk Richardson number `-g Δz_eff Δθ_v / (θ_v_int ΔU²)` of the state, from the virtual
+potential temperature excess `Δθ_v` of the surface over the interior air and the
+interior value `θ_v_int` [K] (see [`virtual_pottemps`](@ref)) and the effective wind
+speed `ΔU` [m/s].
+"""
+@inline function bulk_richardson_number_of_state(param_set::APS, inputs, Δθ_v, θ_v_int, ΔU)
+    grav = SFP.grav(param_set)
+    Δz_eff = effective_height(param_set, inputs)
+    return -(grav * Δz_eff * Δθ_v) / (θ_v_int * non_zero(ΔU)^2)
+end
+
+"""
+    virtual_pottemps(param_set, inputs, T_sfc, ρ_sfc, q_vap_sfc = 0)
+
+Return the virtual potential temperatures `(θ_v_sfc, θ_v_int)` [K] of the surface and
+of the interior air. The stability solve evaluates ``Δθ_v = θ_v_sfc - θ_v_int`` once per
+surface state, for both the convective gustiness ([`free_convection_wind_speed`](@ref))
+and the bulk Richardson number of the state
+([`bulk_richardson_number_of_state`](@ref)). The condensate
+concentration is taken to be the same at the surface and in the interior. The interior
+value is read from `inputs.θ_v_int` when the MOST solver has stored it (see
+[`with_interior_virtual_pottemp`](@ref)).
+
+# Arguments
+- `param_set`: Parameter set.
+- `inputs`: The inputs container. See [`build_surface_flux_inputs`](@ref SurfaceFluxes.build_surface_flux_inputs).
+- `T_sfc`: Surface temperature [K].
+- `ρ_sfc`: Surface air density [kg/m³].
+- `q_vap_sfc`: Surface vapor specific humidity [kg/kg]. Default: 0.
+"""
+@inline function virtual_pottemps(param_set::APS, inputs, T_sfc, ρ_sfc, q_vap_sfc = 0)
+    thermo_params = SFP.thermodynamics_params(param_set)
     q_liq_int = inputs.q_liq_int
     q_ice_int = inputs.q_ice_int
 
@@ -489,19 +540,37 @@ Returns the bulk Richardson number.
     q_tot_sfc = q_vap_sfc + q_liq_int + q_ice_int
     theta_v_sfc =
         TD.virtual_pottemp(thermo_params, T_sfc, ρ_sfc, q_tot_sfc, q_liq_int, q_ice_int)
-    theta_v_int = TD.virtual_pottemp(
+    return theta_v_sfc, interior_virtual_pottemp(param_set, inputs)
+end
+
+"""
+    interior_virtual_pottemp(param_set, inputs)
+
+Return the virtual potential temperature of the interior air [K]: `inputs.θ_v_int` if
+stored (see [`with_interior_virtual_pottemp`](@ref)), otherwise evaluated from the
+interior state.
+"""
+@inline function interior_virtual_pottemp(param_set::APS, inputs)
+    θ_v_int = get(inputs, :θ_v_int, nothing)
+    θ_v_int === nothing || return θ_v_int
+    thermo_params = SFP.thermodynamics_params(param_set)
+    return TD.virtual_pottemp(
         thermo_params,
         inputs.T_int,
         inputs.ρ_int,
-        q_tot_int,
-        q_liq_int,
-        q_ice_int,
+        inputs.q_tot_int,
+        inputs.q_liq_int,
+        inputs.q_ice_int,
     )
-
-    Δtheta_v = theta_v_int - theta_v_sfc
-    theta_v_ref = theta_v_int
-    Δz_eff = effective_height(inputs)
-
-    Rib_state = (grav * Δz_eff * Δtheta_v) / (theta_v_ref * non_zero(ΔU)^2)
-    return Rib_state
 end
+
+"""
+    with_interior_virtual_pottemp(inputs, param_set)
+
+Return `inputs` with the field `θ_v_int` set to the virtual potential temperature of the
+interior air [K], which is constant during a solve. The MOST solver calls this once per
+solve, so that [`virtual_pottemps`](@ref) reads the stored value in each residual
+evaluation.
+"""
+@inline with_interior_virtual_pottemp(inputs, param_set::APS) =
+    (; inputs..., θ_v_int = interior_virtual_pottemp(param_set, inputs))

@@ -17,7 +17,7 @@ Compute the drag coefficient `Cd` for momentum exchange.
     Cd = (κ / F̂_m)^2
 
 where `F̂_m = F_m + P_m` is the RSL-corrected dimensionless velocity profile
-(`P_m ≤ 0` from [`rsl_profile_correction`](@ref)).
+(see [`rsl_corrected_profile`](@ref); `F̂_m = F_m` without RSL).
 """
 function drag_coefficient(
     param_set::APS,
@@ -30,10 +30,16 @@ function drag_coefficient(
     uf_params = SFP.uf_params(param_set)
     κ = SFP.von_karman_const(param_set)
 
-    F_m =
-        UF.dimensionless_profile(uf_params, Δz_eff, ζ, z0m, UF.MomentumTransport(), scheme)
-    P_m = rsl_profile_correction(rsl_model, Δz_eff, z0m, UF.MomentumTransport())
-    Cd = (κ / (F_m + P_m))^2
+    F̂_m = rsl_corrected_profile(
+        uf_params,
+        rsl_model,
+        Δz_eff,
+        ζ,
+        z0m,
+        UF.MomentumTransport(),
+        scheme,
+    )
+    Cd = (κ / F̂_m)^2
     return Cd
 end
 
@@ -65,9 +71,9 @@ Compute the heat exchange coefficient `Ch` for scalar exchange.
     Ch = κ² / (F̂_m · F̂_h),
 
 where `F̂_m = F_m + P_m` and `F̂_h = F_h + P_h` are the RSL-corrected dimensionless
-profiles for momentum and scalars respectively (corrections from
-[`rsl_profile_correction`](@ref)). For the finite-volume case, this corresponds to
-the formulation in Nishizawa & Kitamura (2018), Eqs. 21 & 22 (with Pr_0 absorbed into F_h).
+profiles for momentum and scalars respectively (see [`rsl_corrected_profile`](@ref)).
+For the finite-volume case, this corresponds to the formulation in Nishizawa & Kitamura
+(2018), Eqs. 21 & 22 (with Pr_0 absorbed into F_h).
 
 # Arguments
 - `param_set`: Parameter set
@@ -90,22 +96,42 @@ function heat_exchange_coefficient(
     uf_params = SFP.uf_params(param_set)
     κ = SFP.von_karman_const(param_set)
 
-    F_m =
-        UF.dimensionless_profile(uf_params, Δz_eff, ζ, z0m, UF.MomentumTransport(), scheme)
-    F_h = UF.dimensionless_profile(uf_params, Δz_eff, ζ, z0h, UF.HeatTransport(), scheme)
-    P_m = rsl_profile_correction(rsl_model, Δz_eff, z0m, UF.MomentumTransport())
-    P_h = rsl_profile_correction(rsl_model, Δz_eff, z0h, UF.HeatTransport())
+    F̂_m = rsl_corrected_profile(
+        uf_params,
+        rsl_model,
+        Δz_eff,
+        ζ,
+        z0m,
+        UF.MomentumTransport(),
+        scheme,
+    )
+    F̂_h =
+        rsl_corrected_profile(
+            uf_params,
+            rsl_model,
+            Δz_eff,
+            ζ,
+            z0h,
+            UF.HeatTransport(),
+            scheme,
+        )
 
-    Ch = κ^2 / ((F_m + P_m) * (F_h + P_h))
+    Ch = κ^2 / (F̂_m * F̂_h)
     return Ch
 end
 
 """
     heat_conductance(param_set, ζ, ustar, inputs, z0m, z0h, scheme)
 
-Compute the heat conductance `g_h` (speed * Ch), including any gustiness factor in the wind speed.
-Calculates windspeed and exchange coefficient internally from Monin-Obukhov variables.
+Compute the heat conductance `g_h = Ch ΔU` [m/s] at stability parameter `ζ`
+and friction velocity `ustar`, where `Ch = ϕ_m ϕ_h` is the heat exchange
+coefficient at the capped stability parameter ([`MaxHeatFluxStabilityCap`](@ref),
+[`capped_stability`](@ref), [`physical_scale_coeff`](@ref)) and `ΔU` is the
+effective wind speed including gustiness ([`gustiness_value`](@ref)).
 
+Inside the stability solve, when `inputs` stores the profile coefficients
+([`with_profile_coefficients`](@ref)) and the gustiness is independent of
+`ustar`, `ustar = ϕ_m ΔU` holds and `heat_conductance` returns `ustar ϕ_h`.
 
 # Arguments
 - `param_set`: Parameter set.
@@ -125,12 +151,19 @@ function heat_conductance(
     z0h,
     scheme = UF.PointValueScheme(),
 )
-    # Compute Ch (pass RSL model from inputs)
-    Δz_eff = effective_height(inputs)
-    Ch = heat_exchange_coefficient(param_set, ζ, z0m, z0h, Δz_eff, scheme, inputs.rsl_model)
-
-    # Compute windspeed with gustiness (using windspeed helper which handles b_flux)
-    current_speed = windspeed(param_set, ζ, ustar, inputs)
-
-    return Ch * current_speed
+    ϕ_h = physical_scale_coeff(param_set, inputs, scheme, ζ, z0h, UF.HeatTransport())
+    if ustar_implies_windspeed(inputs)
+        return ustar * ϕ_h
+    end
+    ϕ_m = physical_scale_coeff(param_set, inputs, scheme, ζ, z0m, UF.MomentumTransport())
+    current_speed = windspeed(param_set, ζ, ustar, inputs, scheme)
+    return ϕ_m * ϕ_h * current_speed
 end
+
+# True when `u_star = ϕ_m ΔU` holds with the stored profile coefficient
+# `inputs.ϕ_m`: `ϕ_m` is stored, `ustar` is not prescribed, and the gustiness
+# model does not depend on `ustar`.
+@inline ustar_implies_windspeed(inputs) =
+    get(inputs, :ϕ_m, nothing) !== nothing &&
+    inputs.ustar === nothing &&
+    !depends_on_ustar(inputs.gustiness_model)
