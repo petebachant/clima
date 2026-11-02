@@ -4,7 +4,7 @@ import ClimaCore: Domains, Geometry, Grids, Fields, Meshes, Spaces
 import ClimaCore.Remapping: Remapper, interpolate, interpolate!
 import ClimaCore.Remapping: AbstractRemappingMethod, SpectralElementRemapping
 import ..Schedules: EveryStepSchedule
-import ClimaUtilities.TimeManager: ITime, date
+import ClimaUtilities.TimeManager: ITime, epoch
 
 import NCDatasets
 import NVTX
@@ -29,7 +29,6 @@ struct NetCDFWriter{
     HPTS,
     VPTS,
     GA <: Union{AbstractDict{String, String}, Nothing},
-    TIME,
     HRM <: AbstractRemappingMethod,
 } <: AbstractWriter
     """The base folder where to save the files."""
@@ -91,13 +90,8 @@ struct NetCDFWriter{
     """Global attributes in each NetCDF file"""
     global_attribs::GA
 
-    """Initial time of the simulation"""
-    init_time::TIME
-
     """Horizontal interpolation method for remapping. Passed to `ClimaCore.Remapping.Remapper`."""
     horizontal_method::HRM
-
-    # TODO: Add option to write dates as time
 end
 
 """
@@ -137,7 +131,7 @@ Keyword arguments
                    a boolean callable that takes as a single argument the `integrator`.
                    `sync_schedule` can also be set as `nothing`, in which case we let
                    handling buffered writes to disk.
-- `start_date`: Date of the beginning of the simulation.
+- `start_date`: `Date` or `DateTime` of the beginning of the simulation (`t = 0`).
 - `horizontal_pts`: A tuple of vectors of floats meaning Long-Lat or X-Y (the details depend
                     on the configuration being simulated).
 - `global_attribs`: Optional dictionary of global attributes to include in all NetCDF files
@@ -145,11 +139,6 @@ Keyword arguments
                     metadata such as `source`, `creation_date`, or `frequency`. Must be
                     `nothing` or a subtype of `AbstractDict{String, String}`. Default is
                     `nothing`.
-- `init_time`: The time that the simulation is initialized with. The default is `0.0`. The
-               initial time of the simulation does not need to be zero. For instance, when
-               restarting a simulation, the initial time of the simulation is non-zero. If
-               the simulation does not begin at `t = 0` and nothing is passed in, then the
-               result could be wrong.
 - `horizontal_method`: Horizontal interpolation for remapping to the output grid.
   `BilinearRemapping()` (default) uses bilinear on the 2-point cell (1D/2D horizontal);
   `SpectralElementRemapping()` uses Lagrange polynomial at spectral element quadrature points.
@@ -166,7 +155,6 @@ function NetCDFWriter(
     start_date = nothing,
     horizontal_pts = nothing,
     global_attribs = nothing,
-    init_time = 0.0,
     horizontal_method::AbstractRemappingMethod = SpectralElementRemapping(),
 )
     if z_sampling_method isa RealPressureLevelsMethod &&
@@ -264,7 +252,6 @@ function NetCDFWriter(
         typeof(hpts),
         typeof(vpts),
         typeof(global_attribs),
-        typeof(init_time),
         typeof(horizontal_method),
     }(
         output_dir,
@@ -281,7 +268,6 @@ function NetCDFWriter(
         hpts,
         vpts,
         global_attribs,
-        init_time,
         horizontal_method,
     )
 end
@@ -296,7 +282,6 @@ function NetCDFWriter(
     z_sampling_method = LevelsMethod(),
     start_date = nothing,
     global_attribs = nothing,
-    init_time = 0.0,
     horizontal_method::AbstractRemappingMethod = SpectralElementRemapping(),
 )
     if z_sampling_method isa RealPressureLevelsMethod &&
@@ -355,7 +340,6 @@ function NetCDFWriter(
         Nothing,
         typeof(vpts),
         typeof(global_attribs),
-        typeof(init_time),
         typeof(horizontal_method),
     }(
         output_dir,
@@ -372,7 +356,6 @@ function NetCDFWriter(
         nothing,
         vpts,
         global_attribs,
-        init_time,
         horizontal_method,
     )
 end
@@ -385,7 +368,6 @@ function NetCDFWriter(
                     EveryStepSchedule() : nothing,
     start_date = nothing,
     global_attribs = nothing,
-    init_time = 0.0,
     kwargs...,
 )
     comms_ctx = ClimaComms.context(space)
@@ -405,7 +387,6 @@ function NetCDFWriter(
         Nothing,
         Nothing,
         typeof(global_attribs),
-        typeof(init_time),
         typeof(horizontal_method),
     }(
         output_dir,
@@ -422,7 +403,6 @@ function NetCDFWriter(
         nothing,
         nothing,
         global_attribs,
-        init_time,
         horizontal_method,
     )
 end
@@ -523,7 +503,15 @@ NVTX.@annotate function interpolate_field!(
 end
 
 """
-    write_field!(writer::NetCDFWriter, field::Fields.Field, diagnostic, u, p, t)
+    write_field!(
+        writer::NetCDFWriter,
+        field::Fields.Field,
+        diagnostic,
+        u,
+        p,
+        t,
+        window_start,
+    )
 
 Save the resampled `field` produced by `diagnostic` as directed by the `writer`.
 
@@ -535,12 +523,11 @@ The target file is determined by `output_short_name(diagnostic)`. If the target 
 exists, append to it. If not, create a new file. If the file does not contain dimensions,
 they are added the first time something is written.
 
-Time handling:
-- For reduced diagnostics: timestamps are stored at the START of the reduction period, with
-  time_bnds showing [start, end] of the period. For the first write, t=0 is assumed; for
-  subsequent writes, the end of the previous period is used.
-- For instantaneous diagnostics: timestamps are stored at the current time, with time_bnds
-  showing [previous_time, current_time].
+Time handling, where `window_start` is the start of the output window that ends at `t`:
+- For reduced diagnostics: timestamps are stored at `window_start`, with time_bnds showing
+  [window_start, t].
+- For instantaneous diagnostics: timestamps are stored at `t`, with time_bnds showing
+  [window_start, t].
 
 Attributes are appended to the dataset:
 - `short_name`
@@ -556,6 +543,7 @@ NVTX.@annotate function write_field!(
     u,
     p,
     t,
+    window_start,
 )
     # Only the root process has to write
     ClimaComms.iamroot(ClimaComms.context(field)) || return nothing
@@ -600,13 +588,17 @@ NVTX.@annotate function write_field!(
 
     nc = writer.open_files[output_path]
 
+    start_date = get_start_date(writer, p)
+    t isa ITime && check_start_date(t, start_date)
+    window_start isa ITime && check_start_date(window_start, start_date)
+
     # Save as associated float if t is ITime
     TT = typeof(float(t))
     # Define time coordinate
     add_time_maybe!(
         nc,
         TT;
-        units = "s",
+        time_units_and_calendar(start_date)...,
         axis = "T",
         standard_name = "time",
         long_name = "Time",
@@ -623,27 +615,8 @@ NVTX.@annotate function write_field!(
         writer.interpolated_physical_z,
     )
 
-    start_date = get_start_date(writer, p)
-
-    add_time_bounds_maybe!(
-        nc,
-        TT;
-        comments = "time bounds for each time value",
-        units = "s",
-    )
-
-    if !isnothing(start_date)
-        add_date_maybe!(
-            nc;
-            units = "seconds since $start_date",
-            bounds = "date_bnds",
-        )
-        add_date_bounds_maybe!(
-            nc;
-            comments = "date bounds for each date value",
-            units = "seconds since $start_date",
-        )
-    end
+    # Following the CF conventions, time_bnds inherits units and calendar from time
+    add_time_bounds_maybe!(nc, TT)
 
     (v, temporal_size) = get_var_and_t_index!(
         nc,
@@ -665,15 +638,7 @@ NVTX.@annotate function write_field!(
     # - For instantaneous diagnostics: store time as the current time, with
     #   time_bnds showing [previous_time, current_time].
     isa_time_reduction = !isnothing(diagnostic.reduction_time_func)
-    (; init_time) = writer
-    append_temporal_values!(
-        nc,
-        isa_time_reduction,
-        t,
-        start_date,
-        init_time,
-        time_index,
-    )
+    append_time_values!(nc, isa_time_reduction, time_index, t, window_start)
 
     colons = ntuple(_ -> Colon(), length(dim_names))
     v[time_index, colons...] = interpolated_field
@@ -687,13 +652,48 @@ end
 """
     get_start_date(writer::NetCDFWriter, p)
 
-Get the start date for the simulation.
+Get the start date for the simulation as a `DateTime`, or `nothing` if there is none.
 """
 function get_start_date(writer::NetCDFWriter, p)
-    if isnothing(writer.start_date) && hasproperty(p, :start_date)
-        return getproperty(p, :start_date)
+    start_date = writer.start_date
+    if isnothing(start_date) && hasproperty(p, :start_date)
+        start_date = getproperty(p, :start_date)
     end
-    return writer.start_date
+    return isnothing(start_date) ? nothing : Dates.DateTime(start_date)
+end
+
+"""
+    check_start_date(t::ITime, start_date)
+
+Error if `t` is an `ITime` whose epoch is not `start_date`.
+"""
+function check_start_date(t::ITime, start_date)
+    t_epoch = epoch(t)
+    if !isnothing(t_epoch) && !isnothing(start_date) && t_epoch != start_date
+        error(
+            "start_date $start_date does not match the epoch $t_epoch of the time",
+        )
+    end
+    return nothing
+end
+
+"""
+    time_units_and_calendar(start_date)
+
+Return the `units` attribute of the `time` coordinate and, if there is a `start_date`, its
+`calendar` attribute. With a `start_date`, times are seconds since `start_date`, so they can
+be decoded as dates.
+"""
+time_units_and_calendar(::Nothing) = (; units = "s")
+function time_units_and_calendar(start_date::Dates.DateTime)
+    reference_date = replace(string(start_date), "T" => " ")
+    # proleptic_gregorian is the calendar of Dates.DateTime
+    # In the future, if we support CFTime.jl with ITime, then this function
+    # should be updated to support different calendar systems
+    return (;
+        units = "seconds since $reference_date",
+        calendar = "proleptic_gregorian",
+    )
 end
 
 """
@@ -741,6 +741,9 @@ function get_var_and_t_index!(
         v.attrib["long_name"] = output_long_name(diagnostic)::String
         v.attrib["units"] = var.units::String
         v.attrib["comments"] = var.comments::String
+        if haskey(nc, "z_physical")
+            v.attrib["coordinates"] = "z_physical"
+        end
         if !isnothing(start_date) && !haskey(v.attrib, "start_date")
             v.attrib["start_date"] = string(start_date)::String
         end
@@ -750,112 +753,20 @@ function get_var_and_t_index!(
 end
 
 """
-    append_temporal_values!(
-        nc,
-        isa_time_reduction,
-        t,
-        start_date,
-        init_time,
-        time_index,
-    )
-
-Append temporal data to the temporal dimensions of `nc`.
-
-The temporal dimensions are `time`, `time_bnds`, `date`, and `date_bnds`.
-
-Time handling for reduced vs instantaneous diagnostics:
-- For reduced diagnostics: store time as the START of the reduction period, with
-  time_bnds showing [start, end] of the period.
-- For instantaneous diagnostics: store time as the current time, with time_bnds
-  showing [previous_time, current_time].
-"""
-function append_temporal_values!(
-    nc,
-    isa_time_reduction,
-    t,
-    start_date,
-    init_time,
-    time_index,
-)
-    append_time_values!(nc, isa_time_reduction, time_index, t, init_time)
-    append_date_values!(
-        nc,
-        isa_time_reduction,
-        time_index,
-        t,
-        start_date,
-        init_time,
-    )
-    return nothing
-end
-
-"""
-    append_date_values!(
-        nc,
-        isa_time_reduction,
-        time_index,
-        t,
-        start_date,
-        init_time,
-    )
-
-Append date values to the `date` and `date_bnds` dimension in `nc`.
-"""
-function append_date_values!(
-    nc,
-    isa_time_reduction,
-    time_index,
-    t,
-    start_date,
-    init_time,
-)
-    # FIXME: We are hardcoding p.start_date !
-    # FIXME: We are rounding t
-    if !isnothing(start_date)
-        # TODO: Use ITime here
-        curr_date = start_date + Dates.Millisecond(round(1000 * float(t)))
-        date_type = typeof(curr_date) # not necessarily a Dates.DateTime
-
-        if time_index == 1
-            init_date =
-                init_time isa ITime ? date(init_time) :
-                (start_date + Dates.Millisecond(round(1000 * float(init_time))))
-        end
-        if isa_time_reduction
-            date_to_save =
-                time_index == 1 ? init_date :
-                date_type(nc["date_bnds"][2, time_index - 1])
-        else
-            date_to_save = curr_date
-        end
-        nc["date"][time_index] = date_to_save
-        nc["date_bnds"][:, time_index] =
-            time_index == 1 ? [init_date; curr_date] :
-            [date_type(nc["date_bnds"][2, time_index - 1]); curr_date]
-    end
-end
-
-"""
-    append_time_values!(nc, isa_time_reduction, time_index, t, init_time)
+    append_time_values!(nc, isa_time_reduction, time_index, t, window_start)
 
 Append time values to the `time` and `time_bnds` dimension in `nc`.
 """
-function append_time_values!(nc, isa_time_reduction, time_index, t, init_time)
+function append_time_values!(
+    nc,
+    isa_time_reduction,
+    time_index,
+    t,
+    window_start,
+)
     # TODO: Use ITime here
-    if isa_time_reduction
-        # For reductions, timestamp at the start of the reduction period.
-        # Assume t=0 for the first write or use the end of the previous period.
-        time_to_save =
-            time_index == 1 ? float(init_time) :
-            nc["time_bnds"][2, time_index - 1]
-    else
-        # For instantaneous diagnostics, use current time
-        time_to_save = float(t)
-    end
-    nc["time"][time_index] = time_to_save
-    nc["time_bnds"][:, time_index] =
-        time_index == 1 ? [float(init_time); float(t)] :
-        [nc["time_bnds"][2, time_index - 1]; float(t)]
+    nc["time"][time_index] = isa_time_reduction ? float(window_start) : float(t)
+    nc["time_bnds"][:, time_index] = [float(window_start); float(t)]
     return nothing
 end
 

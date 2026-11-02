@@ -21,7 +21,7 @@ include("reduction_identities.jl")
 A struct that contains the scheduled diagnostics, ancillary data and areas of memory needed
 to store and accumulate results.
 """
-struct DiagnosticsHandler{SD, V <: Vector{Int}, STORAGE, ACC <: Dict, COUNT}
+struct DiagnosticsHandler{SD, V <: Vector{Int}, STORAGE, ACC <: Dict, COUNT, WS}
     """An iterable with the `ScheduledDiagnostic`s that are scheduled."""
     scheduled_diagnostics::SD
 
@@ -39,6 +39,10 @@ struct DiagnosticsHandler{SD, V <: Vector{Int}, STORAGE, ACC <: Dict, COUNT}
     """Container holding a counter that tracks how many times the given
     diagnostics was computed from the last time it was output to disk."""
     counters::COUNT
+
+    """Container holding the start of the current output window of each
+    diagnostic, which is the time of its last output or the initial time."""
+    window_starts::WS
 end
 
 """
@@ -66,7 +70,9 @@ An object to instantiate and manage storage spaces for `ScheduledDiagnostics`.
 The `DiagnosticsHandler` calls `compute!(nothing, Y, p, t)` for each diagnostic, or
 `compute(Y, p, t)`, whichever is available. The result is used to allocate the areas of
 memory for storage and accumulation. For diagnostics without reduction,
-`write_field!(output_writer, result, diagnostic, Y, p, t)` is called too.
+`write_field!(output_writer, result, diagnostic, Y, p, t, t)` is called too. Reduction 
+windows are over the interval `(tᵢ, tᵢ₊₁]`, so the state at the initial `t` is not part 
+of the first window. The first output window of every diagnostic starts at `t`.
 
 Note: initializing a `DiagnosticsHandler` can be expensive.
 
@@ -85,6 +91,9 @@ function DiagnosticsHandler(scheduled_diagnostics, Y, p, t; dt = nothing)
     # key-ed over the diagnostic index
     accumulators = Dict{Int, Any}()
     counters = Int[]
+    # Untyped because `integrator.t` can have a different type than `t` (e.g.,
+    # ITimes with different periods), and ITimes do not convert between types
+    window_starts = []
     scheduled_diagnostics_keys = Int[]
 
     # NOTE: unique requires isequal and hash to both be implemented. We don't really want to
@@ -114,7 +123,8 @@ function DiagnosticsHandler(scheduled_diagnostics, Y, p, t; dt = nothing)
         # We call `copy` to acquire ownership of the data in case compute! returned a
         # reference.
         push!(storage, copy(out_field))
-        push!(counters, 1)
+        push!(counters, 0)
+        push!(window_starts, t)
 
         # If it is not a reduction, call the output writer as well
         if !isa_time_reduction
@@ -136,16 +146,13 @@ function DiagnosticsHandler(scheduled_diagnostics, Y, p, t; dt = nothing)
                     t,
                 )
             end
-            write_field!(diag.output_writer, storage[i], diag, Y, p, t)
+            write_field!(diag.output_writer, storage[i], diag, Y, p, t, t)
         else
-            # Add to the accumulator
-
-            # We use similar + .= instead of copy because CUDA 5.2 does not supported nested
-            # wrappers with view(reshape(view)) objects. See discussion in
-            # https://github.com/CliMA/ClimaAtmos.jl/pull/2579 and
-            # https://github.com/JuliaGPU/Adapt.jl/issues/21
             accumulators[i] = similar(storage[i])
-            accumulators[i] .= storage[i]
+            fill!(
+                parent(accumulators[i]),
+                identity_of_reduction(diag.reduction_time_func),
+            )
         end
     end
     storage = value_types(storage)[storage...]
@@ -157,6 +164,7 @@ function DiagnosticsHandler(scheduled_diagnostics, Y, p, t; dt = nothing)
         storage,
         accumulators,
         counters,
+        window_starts,
     )
 end
 
@@ -477,6 +485,7 @@ NVTX.@annotate function orchestrate_diagnostics(
             integrator.u,
             integrator.p,
             integrator.t,
+            diagnostic_handler.window_starts[diag_index],
         )
     end
 
@@ -499,8 +508,9 @@ NVTX.@annotate function orchestrate_diagnostics(
             identity = identity_of_reduction(diag.reduction_time_func)
             fill!(parent(diagnostic_handler.accumulators[diag_index]), identity)
         end
-        # Reset counter
+        # Reset counter and start the next output window
         diagnostic_handler.counters[diag_index] = 0
+        diagnostic_handler.window_starts[diag_index] = integrator.t
     end
 
     return nothing
