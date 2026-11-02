@@ -11,6 +11,8 @@ TwoStream
 compute_col_gas!
 compute_relative_humidity!
 compute_optical_props!
+add_cloud_optics_lw!
+add_cloud_optics_sw!
 ```
 
 ```@docs
@@ -26,6 +28,7 @@ compute_τ_rayleigh
 
 ```@docs
 build_cloud_mask!
+add_cloud_optics_1scalar!
 add_cloud_optics_2stream!
 compute_lookup_cld_liq_props
 compute_lookup_cld_ice_props
