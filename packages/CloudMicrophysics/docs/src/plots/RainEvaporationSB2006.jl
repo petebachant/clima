@@ -20,15 +20,14 @@ function rain_evaporation_CPU(
     q_tot, q_lcl, q_icl, q_rai, q_sno, ρ, N_rai, T,
 )
     FT = eltype(q_tot)
-    ϵₘ = UT.ϵ_numerics_2M_M(FT)
-    ϵₙ = UT.ϵ_numerics_2M_N(FT)
+    ϵ = UT.ϵ_numerics(FT)
 
     ∂ₜρn_rai = FT(0)
     ∂ₜq_rai = FT(0)
     S = TDI.supersaturation_over_liquid(tps, q_tot, q_lcl + q_rai, q_icl + q_sno, ρ, T)
 
     # If there are no raindrops or conditions are supersaturated, no evaporation occurs
-    (N_rai ≤ ϵₙ || S ≥ 0) && return (; ∂ₜρn_rai, ∂ₜq_rai)
+    (N_rai ≤ ϵ || S ≥ 0) && return (; ∂ₜρn_rai, ∂ₜq_rai)
 
     (; ν_air, D_vapor) = aps
     (; av, bv, α, β, ρ0) = evap
@@ -56,7 +55,7 @@ function rain_evaporation_CPU(
     # When xr = 0 ∂ₜρn_rai becomes NaN. We replace NaN with 0 which is the limit of
     # ∂ₜρn_rai for xr -> 0.
     ∂ₜρn_rai = ifelse(xr_mean / x_star < eps(FT), FT(0), ∂ₜρn_rai)
-    ∂ₜq_rai = ifelse(q_rai < ϵₘ, FT(0), ∂ₜq_rai)
+    ∂ₜq_rai = ifelse(q_rai < ϵ, FT(0), ∂ₜq_rai)
 
     return (; ∂ₜρn_rai, ∂ₜq_rai)
 end
@@ -92,7 +91,7 @@ evap_qᵣ_3n = [CM2.rain_evaporation(SB2006, aps, tps, qₜ, qₗ, qᵢ, _qᵣ, 
 evap_Nᵣ_3n = [CM2.rain_evaporation(SB2006, aps, tps, qₜ, qₗ, qᵢ, qᵣ, qₛ, ρ, _Nᵣ, T).∂ₜq_rai for _Nᵣ in Nᵣ_range]
 evap_T_3n = [CM2.rain_evaporation(SB2006, aps, tps, qₜ, qₗ, qᵢ, qᵣ, qₛ, ρ, Nᵣ, _T).∂ₜq_rai for _T in T_range]
 
-fig = MK.Figure(resolution = (800, 600))
+fig = MK.Figure(size = (800, 600))
 
 ax1 = MK.Axis(fig[1, 1], xlabel = "q_rain [g/kg]", ylabel = "evap rate [1/cm3/s]")
 ax2 = MK.Axis(fig[2, 1], xlabel = "N_rain [1/cm3]", ylabel = "evap rate [1/cm3/s]")
