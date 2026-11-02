@@ -33,7 +33,10 @@ exist. The `NetCDFWriter` does not overwrite existing data and will error out if
 existing data is inconsistent with the new one.
 
 Optionally (recommended), you can pass an optional argument `start_date`, which
-will be saved as an attribute of your NetCDF file, easily accessible.
+sets the units and calendar of `time`. Following the CF conventions, `time` has
+units `seconds since <start_date>` and calendar `proleptic_gregorian`. Without a
+`start_date`, `time` is in seconds. The `start_date` is also saved as an
+attribute of each variable.
 
 `NetCDFWriter`s take as one of the inputs the desired number of points along
 each of the dimensions. For the horizontal dimensions, points are sampled
@@ -97,7 +100,7 @@ from `OrderedCollections.jl`.
 ```@docs; canonical = false
 ClimaDiagnostics.Writers.NetCDFWriter(space::Spaces.AbstractSpace, output_dir)
 ClimaDiagnostics.Writers.interpolate_field!(writer::ClimaDiagnostics.Writers.NetCDFWriter, field, diagnostic, u, p, t)
-ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.NetCDFWriter, field, diagnostic, u, p, t)
+ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.NetCDFWriter, field, diagnostic, u, p, t, window_start)
 ClimaDiagnostics.Writers.sync(writer::ClimaDiagnostics.Writers.NetCDFWriter)
 Base.close(writer::ClimaDiagnostics.Writers.NetCDFWriter)
 ```
@@ -164,7 +167,7 @@ interactive work and debugging.
 
 ```@docs
 ClimaDiagnostics.Writers.DictWriter()
-ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.DictWriter, field, diagnostic, u, p, t)
+ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.DictWriter, field, diagnostic, u, p, t, window_start)
 ```
 
 ## `HDF5Writer`
@@ -181,6 +184,6 @@ is being output.
 
 ```@docs; canonical=false
 ClimaDiagnostics.Writers.HDF5Writer
-ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.HDF5Writer, field, diagnostic, u, p, t)
+ClimaDiagnostics.Writers.write_field!(writer::ClimaDiagnostics.Writers.HDF5Writer, field, diagnostic, u, p, t, window_start)
 Base.close(writer::ClimaDiagnostics.Writers.HDF5Writer)
 ```
