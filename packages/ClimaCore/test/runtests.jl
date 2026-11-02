@@ -67,7 +67,7 @@ unit_tests = [
     UnitTest("Fields - multi broadcast fusion"          ,"Fields/unit_field_multi_broadcast_fusion.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Fields - FieldVector flattening"          ,"Fields/unit_fieldvector_flatten.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Fields - inference"                       ,"Fields/inference_fields.jl"; meta = :cpu_only, tier = :inference, subsystem = :fields),
-    UnitTest("Placeholder Fields"                       ,"Operators/unit_common.jl"; tier = :unit, subsystem = :operators),
+    UnitTest("Placeholder Fields"                       ,"Fields/unit_placeholders.jl"; tier = :unit, subsystem = :fields),
     UnitTest("Operators - multi-column vs single column","Operators/unit_multicolumn_column_equivalence.jl"; tier = :unit, subsystem = :operators),
 
     # Spectral Element Operators
@@ -92,6 +92,7 @@ unit_tests = [
     UnitTest("Spectral elem - sphere hyperdiff vec"     ,"Operators/spectralelement/unit_sphere_hyperdiffusion_vec.jl"; tier = :unit, subsystem = :operators),
     UnitTest("Spectral elem - sphere hyperdiff vec conv" ,"Operators/spectralelement/conv_sphere_hyperdiffusion_vec.jl"; tier = :conv, subsystem = :operators),
     UnitTest("Spectral elem - over-integration"         ,"Operators/spectralelement/unit_overintegration.jl"; meta = :cpu_only, tier = :unit, subsystem = :operators),
+    UnitTest("Spectral elem - lumped restriction"       ,"Operators/spectralelement/unit_lumped_restriction.jl"; tier = :unit, subsystem = :operators),
     # Spectral Element - Discontinuous Galerkin (DG) operators
     # The DG interface fluxes have native GPU kernels in ClimaCoreCUDAExt, so
     # the operators need no `allowscalar`; unit_two_point_fluxes and
@@ -159,6 +160,8 @@ unit_tests = [
 
     # Limiters, IO, Remapping
     UnitTest("Limiter"                                  ,"Limiters/unit_limiter.jl"; tier = :unit, subsystem = :limiters),
+    UnitTest("Limiters - Zhang-Shu positivity"          ,"Limiters/positivity_limiter.jl"; tier = :unit, subsystem = :limiters),
+    UnitTest("Limiters - Zhang-Shu zero-allocation"     ,"Limiters/allocs_positivity_limiter.jl"; meta = :cpu_only, tier = :allocs, subsystem = :limiters),
     UnitTest("Limiters - vertical mass borrowing"       ,"Limiters/vertical_mass_borrowing_limiter.jl"; tier = :unit, subsystem = :limiters),
     UnitTest("Limiters - vertical mass borrowing adv"   ,"Limiters/vertical_mass_borrowing_limiter_advection.jl"; tier = :unit, subsystem = :limiters, slow = true), # 2.3 min
     UnitTest("InputOutput - hdf5"                       ,"InputOutput/unit_hdf5.jl"; tier = :unit, subsystem = :io),
@@ -201,6 +204,7 @@ unit_tests = [
     UnitTest("Spaces - CUDA extruded spaces"            ,"Spaces/extruded_cuda.jl"; meta = :gpu_only, tier = :gpu, subsystem = :spaces),
     UnitTest("Spaces - CUDA point spaces"               ,"Spaces/point_cuda.jl"; meta = :gpu_only, tier = :gpu, subsystem = :spaces),
     UnitTest("Operators - spectral element CUDA"        ,"Operators/spectralelement/gpu_rectilinear.jl"; meta = :gpu_only, tier = :gpu, subsystem = :gpu),
+    UnitTest("Operators - shared memory levels CUDA"    ,"Operators/gpu_shared_memory_levels.jl"; meta = :gpu_only, tier = :gpu, subsystem = :gpu),
     UnitTest("Operators - DG face kernels CPU vs GPU"   ,"Operators/spectralelement/gpu_dg_face_kernels.jl"; meta = :gpu_only, tier = :gpu, subsystem = :gpu),
     UnitTest("Operators - finite difference CUDA"       ,"Operators/hybrid/gpu_ops.jl"; meta = :gpu_only, tier = :gpu, subsystem = :gpu),
     UnitTest("Operators - FD broadcasting edge cases"   ,"Operators/finitedifference/broadcasting_edge_cases.jl"; meta = :gpu_only, tier = :gpu, subsystem = :operators),
@@ -259,19 +263,21 @@ end
 
 # Optional CLI / Environment-based test filtering:
 # e.g. TEST_TIER=unit, TEST_EXCLUDE_TIER=conv,inference, TEST_SUBSYSTEM=operators,
-# TEST_EXCLUDE_SUBSYSTEM=operators, TEST_TAG=dg, TEST_FAST=true,
-# TEST_EXCLUDE_SLOW=true
+# TEST_EXCLUDE_SUBSYSTEM=operators, TEST_TAG=dg, TEST_EXCLUDE_TAG=integrals,
+# TEST_FAST=true, TEST_EXCLUDE_SLOW=true
 let
     tier_filter = get(ENV, "TEST_TIER", nothing)
     exclude_tier_filter = get(ENV, "TEST_EXCLUDE_TIER", nothing)
     subsystem_filter = get(ENV, "TEST_SUBSYSTEM", nothing)
     exclude_subsystem_filter = get(ENV, "TEST_EXCLUDE_SUBSYSTEM", nothing)
     tag_filter = get(ENV, "TEST_TAG", nothing)
+    exclude_tag_filter = get(ENV, "TEST_EXCLUDE_TAG", nothing)
     fast_filter = get(ENV, "TEST_FAST", "false") == "true"
     exclude_slow_filter = get(ENV, "TEST_EXCLUDE_SLOW", "false") == "true"
     if !isnothing(tier_filter) || !isnothing(exclude_tier_filter) ||
        !isnothing(subsystem_filter) || !isnothing(exclude_subsystem_filter) ||
-       !isnothing(tag_filter) || fast_filter || exclude_slow_filter
+       !isnothing(tag_filter) || !isnothing(exclude_tag_filter) || fast_filter ||
+       exclude_slow_filter
         filtered = filter_tests(
             unit_tests;
             tier = tier_filter,
@@ -279,6 +285,7 @@ let
             subsystem = subsystem_filter,
             exclude_subsystem = exclude_subsystem_filter,
             tag = tag_filter,
+            exclude_tag = exclude_tag_filter,
             fast = fast_filter,
             exclude_slow = exclude_slow_filter,
         )
@@ -308,6 +315,7 @@ if isempty(unit_tests)
                 "TEST_SUBSYSTEM",
                 "TEST_EXCLUDE_SUBSYSTEM",
                 "TEST_TAG",
+                "TEST_EXCLUDE_TAG",
                 "TEST_FAST",
                 "TEST_EXCLUDE_SLOW",
             ) if haskey(ENV, k)

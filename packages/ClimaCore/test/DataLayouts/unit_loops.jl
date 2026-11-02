@@ -79,20 +79,47 @@ function strict_pairwise_sum(values, ifirst, ilast)
     return value
 end
 
+# The level is checked at every entry point, on every device, so that a misspelled level
+# does not pass on CPUs and fail on the first GPU run.
+@testset "shared memory levels are checked on every device" begin
+    device = ClimaComms.device()
+    data = test_data(device, Float64, 1, 4)
+    body!(c) = (fill!(c, 1); nothing)
+    for level in (:auto, :none, :medium, :large, :max, 0, 100)
+        @test isnothing(DataLayouts.foreach_column(body!, data; shmem = Val(level)))
+        @test isnothing(DataLayouts.foreach_point(body!, data; shmem = Val(level)))
+    end
+    for level in (Val(:high), Val(:Auto), Val(-1), Val(1.5), :max, 100, nothing)
+        @test_throws ArgumentError DataLayouts.foreach_column(body!, data; shmem = level)
+        @test_throws ArgumentError DataLayouts.foreach_slice(
+            DataLayouts.DataScope(data), DataLayouts.column, body!, data; shmem = level,
+        )
+    end
+    # The register cap is checked the same way.
+    for cap in (:auto, :none, 32, 255)
+        @test isnothing(DataLayouts.foreach_column(body!, data; maxregs = Val(cap)))
+        @test isnothing(DataLayouts.foreach_point(body!, data; maxregs = Val(cap)))
+    end
+    for cap in (Val(:device), Val(:Auto), Val(0), Val(-8), Val(1.5), :auto, 64, nothing)
+        @test_throws ArgumentError DataLayouts.foreach_column(body!, data; maxregs = cap)
+        @test_throws ArgumentError DataLayouts.foreach_slice(
+            DataLayouts.DataScope(data), DataLayouts.column, body!, data; maxregs = cap,
+        )
+    end
+end
+
 @testset "reduction accuracy and masks" begin
     device = ClimaComms.device()
 
     # Layouts with several components use Cartesian indexing, whose indices are
-    # stored in a CartesianIndices object. Every single-threaded reduction
-    # should be identical to a strict pairwise reduction over positions (Base's
-    # mapreduce falls back to a sequential fold for CartesianIndices, whose
-    # roundoff error grows linearly with the number of points, while the
-    # roundoff error of a pairwise reduction only grows logarithmically). The
-    # reference is written out by hand because the @simd blocks in Base's
-    # mapreduce and in safe_mapreduce reassociate values at contiguous
-    # positions whenever bounds checking is disabled. Multithreaded and GPU
-    # reductions partition the points across threads, so they are only
-    # approximately pairwise.
+    # stored in a CartesianIndices object. Single-threaded reductions split the
+    # points like a strict pairwise reduction over positions (Base's mapreduce
+    # falls back to a sequential fold for CartesianIndices, whose roundoff error
+    # grows linearly with the number of points, while the roundoff error of a
+    # pairwise reduction only grows logarithmically), but the @simd loops in
+    # safe_mapreduce reassociate the values in each block, so they only match the
+    # reference to a few ulps. Multithreaded and GPU reductions partition the
+    # points across threads, and they require a looser error bound.
     (Ni, Nj, Nh) = (4, 4, 5)
     array = Float32.(rand(64, Ni, Nj, 2, Nh)) ./ 3
     T = Tuple{Float32, Float32}
@@ -100,7 +127,7 @@ end
     first_values = vec(Array(parent(data))[:, :, :, 1, :])
     pairwise_sum = strict_pairwise_sum(first_values, 1, length(first_values))
     if device isa ClimaComms.CPUSingleThreaded
-        @test sum(value -> value[1], data) == pairwise_sum
+        @test sum(value -> value[1], data) ≈ pairwise_sum rtol = 4 * eps(Float32)
     else
         @test sum(value -> value[1], data) ≈ pairwise_sum
     end
@@ -109,6 +136,21 @@ end
     data = test_data(device, Float64, 1, 4)
     mask = DataLayouts.IJHMask(data)
     @test DataLayouts.reduce_points(+, data; mask, init = 0.0) == sum(Array(parent(data)))
+
+    # An init value of a wider type than the points widens the fold on every device (the
+    # warp results of a GPU block are stored with the widened type, which sizes the block's
+    # shared memory).
+    data32 = test_data(device, Float32, 1, 64)
+    values32 = Array(parent(data32))
+    @test DataLayouts.reduce_points(+, data32; init = 0.0) === sum(Float64, values32)
+    @test DataLayouts.reduce_points(max, data32; init = -Inf) === maximum(Float64, values32)
+
+    # A container init value is combined with the containers in the data, and the result has
+    # a concrete type (on GPUs, its size is the size of the block's warp results). Like the
+    # init of Base.reduce, it must be a neutral element, since every thread may fold it.
+    data = DataLayouts.VIJFH{T, 64, Ni, Nj, nothing}(device_array(device, array))
+    result = @inferred reduce(+, data; init = (0.0f0, 0.0f0))
+    @test collect(result) ≈ [sum(array[:, :, :, f, :]) for f in 1:2]
 end
 
 @testset "0-dimensional data in broadcast expressions [$FT]" for FT in (Float32, Float64)
@@ -120,6 +162,31 @@ end
     # the single point of any 0-dimensional data in that expression.
     @test parent(data .+ point) == parent(data) .+ Array(parent(point))[]
     @test parent(point .+ data) == parent(data) .+ Array(parent(point))[]
+end
+
+# A multi-element tuple is indexed along the first (level) dimension, as in Base,
+# and an IJHMask leaves inactive columns untouched, as for any other broadcast.
+@testset "multi-element tuple broadcasts with a mask" begin
+    device = ClimaComms.device()
+    data = test_data(device, Float64, 1, 3)
+    fill!(parent(data), 0)
+    mask = DataLayouts.IJHMask(data)
+    is_active_copy = Array(parent(DataLayouts.is_active(mask)))
+    is_active_copy[1, 1, 1, 1, 1] = false
+    copyto!(parent(DataLayouts.is_active(mask)), is_active_copy)
+    DataLayouts.set_mask_maps!(mask)
+    bc = Base.broadcasted(identity, (1.0, 2.0, 3.0))
+    copyto!(data, bc, mask)
+    parent_copy = Array(parent(data))
+    @test parent_copy[:, 1, 1, 1, 1] == zeros(3)
+    @test parent_copy[:, 2, 1, 1, 1] == [1.0, 2.0, 3.0]
+    @test parent_copy[:, 4, 4, 1, 5] == [1.0, 2.0, 3.0]
+    ArrayType = ClimaComms.array_type(device){Float64}
+    for data in (data, DataLayouts.VIJHF{Float64, 3, 2, 2, 1}(ArrayType))
+        data .= (1.0, 2.0, 3.0)
+        parent_copy = Array(parent(data))
+        @test all(v -> all(==(v), selectdim(parent_copy, 1, v)), 1:3)
+    end
 end
 
 parent_broadcasted(data::DataLayouts.DataLayout) = parent(data)
@@ -152,6 +219,25 @@ parent_broadcasted(bc::DataLayouts.LazyDataLayout) =
     # Genuinely mismatched extents throw before any kernel is launched.
     mismatched_volume = test_data(device, Float64, 1, 7)
     @test_throws DimensionMismatch volume .+ mismatched_volume
+end
+
+# Broadcasts whose source corresponds to a slice of the destination must use the
+# destination axes when materializing. Broadcasts whose destination corresponds
+# to a slice of the source should throw a DimensionMismatch error.
+@testset "extruding broadcast axes" begin
+    device = ClimaComms.device()
+    dest = test_data(device, Float64, 1, 10)
+    src = test_data(device, Float64, 1, 10)
+    for src_slice in (
+        view(src, 1),
+        DataLayouts.level(src, 1),
+        DataLayouts.slab(src, 1, 1),
+        DataLayouts.column(src, 1, 1, 1),
+    )
+        dest .= src_slice
+        @test all(parent(dest) .== parent(src_slice))
+        @test_throws DimensionMismatch src_slice .= dest
+    end
 end
 
 # Measure allocations from a top-level function, since the @allocated macro has
@@ -239,6 +325,86 @@ end
     end
 end
 
+
+# A Tuple or NamedTuple argument of a slice loop is a container of arguments, which can be
+# nested or empty, and its slice is the same container of their slices. Every argument in a
+# container is scoped, masked, and checked for compatible dimensions like the other arguments,
+# and a container can hold more arguments than a call can splat.
+@testset "containers of loop arguments [$FT]" for FT in (Float32, Float64)
+    device = ClimaComms.device()
+    (a, b, c, dest) = ntuple(_ -> test_data(device, FT, 1, 10), 4)
+    (a_array, b_array, c_array) = map(data -> Array(parent(data)), (a, b, c))
+
+    nested_args = (a, (; b, c = (c,), e = ((),)))
+    DataLayouts.foreach_column((), dest, nested_args) do e1, dest, (a, (; b, c, e))
+        n = length(e1) + length(e[1])
+        @. dest = a + b * c[1] + n
+    end
+    @test Array(parent(dest)) == a_array .+ b_array .* c_array
+    DataLayouts.foreach_point((; dest, args = (a, b))) do (; dest, args)
+        dest[] = args[1][] - args[2][]
+    end
+    @test Array(parent(dest)) == a_array .- b_array
+
+    # Level slices need a static number of elements.
+    (a_levels, dest_levels) =
+        map(data -> DataLayouts.VIJFH{FT, 10, 4, 4, 5}(parent(data)), (a, dest))
+    DataLayouts.foreach_level(
+        (dest_levels, (a_levels,));
+        enumerate = Val(true),
+    ) do v, (dest, (a,))
+        @. dest = a * v[1]
+    end
+    @test Array(parent(dest)) == a_array .* (1:10)
+    DataLayouts.foreach_column((; dest, a); enumerate = Val(true)) do index, (; dest, a)
+        fill!(dest, sum(a) + index[3])
+    end
+    @test Array(parent(dest)) ==
+          repeat(sum(a_array; dims = 1), 10) .+ reshape(1:5, 1, 1, 1, 1, 5)
+
+    mask = DataLayouts.IJHMask(dest)
+    is_active = Array(parent(DataLayouts.is_active(mask)))
+    is_active[1, 1, 1, 1, 1] = false
+    copyto!(parent(DataLayouts.is_active(mask)), is_active)
+    DataLayouts.set_mask_maps!(mask)
+    fill!(parent(dest), 0)
+    DataLayouts.foreach_column((dest, (a,)), (;); mask) do (dest, (a,)), e
+        n = length(e)
+        @. dest = a + n
+    end
+    DataLayouts.foreach_point(((),), (; a, dest); mask) do e, (; a, dest)
+        dest[] += a[] + length(e[1])
+    end
+    masked_array = 2 .* a_array
+    masked_array[:, 1, 1, :, 1] .= 0
+    @test Array(parent(dest)) == masked_array
+
+    # Point loops over containers use linear indices like loops over the same arguments, and a
+    # NamedTuple of more values than a call can splat is sliced without allocating.
+    @test DataLayouts.each_maskable_slice_index(DataLayouts.NoMask(), view, dest, (a, b)) ==
+          eachindex(dest, a, b)
+    names = ntuple(n -> Symbol(:x, n), 40)
+    args = NamedTuple{names}(ntuple(_ -> test_data(device, FT, 1, 4), 40))
+    sums = test_data(device, FT, 1, 4)
+    sum_args!(sums, args) = DataLayouts.foreach_column(sums, args) do sums, args
+        fill!(sums, 0)
+        for n in 1:40
+            @. sums += n * args[n]
+        end
+    end
+    sum_args!(sums, args)
+    @test Array(parent(sums)) == sum(n -> n .* Array(parent(args[n])), 1:40)
+    if device isa ClimaComms.CPUSingleThreaded && TU.allocation_checks_meaningful()
+        @test measured_allocations(Base.Fix2(sum_args!, args), sums) == 0
+    end
+
+    @test_throws DimensionMismatch DataLayouts.foreach_point(
+        Returns(nothing),
+        dest,
+        (a, test_data(device, FT, 1, 1)),
+    )
+    @test_throws ArgumentError DataLayouts.foreach_column(Returns(nothing), (), ((;),))
+end
 
 @testset "thread pool resolution and sharing" begin
     device = ClimaComms.device()
@@ -357,25 +523,13 @@ end
     @test static_points(DataLayouts.column, bc) === Val{7}
 end
 
-# Every range subindex of a StridedRange must give back another StridedRange:
-# the generic AbstractArray fallback allocates a Vector and throws an
-# interpolated size error, neither of which can be compiled for a GPU.
-@testset "range subsets of a StridedRange" begin
-    range = DataLayouts.StridedRange(3, 5, 4) # 3:5:18
-    values = collect(range)
-    @test values == [3, 8, 13, 18]
-
-    for sub in (Base.OneTo(3), 2:4, 2:2:4, 4:-2:2, 3:2, DataLayouts.StridedRange(2, 2, 2))
-        subset = range[sub]
-        @test subset isa DataLayouts.StridedRange
-        @test collect(subset) == values[sub]
-    end
-
-    # Views of views must reindex without allocating.
+# Views of views of StridedRanges must reindex without allocating (range subsets are
+# tested with the 32-bit index helpers below).
+@testset "views of views of StridedRanges" begin
     array = reshape(collect(1:24), 4, 6)
-    for outer in (DataLayouts.StridedRange(2, 4, 3), 2:4:14)
+    for outer in (DataLayouts.StridedRange(2, 4, 10), 2:4:14)
         outer_view = view(array, outer)
-        for inner in (Base.OneTo(2), 2:3, DataLayouts.StridedRange(1, 2, 2))
+        for inner in (Base.OneTo(2), 2:3, DataLayouts.StridedRange(1, 2, 3))
             @test collect(view(outer_view, inner)) == collect(outer_view)[inner]
         end
     end
@@ -393,6 +547,66 @@ DataLayouts.static_num_threads(::FakeGroup{N}) where {N} = N
 # Rank of the thread currently "running", stepped through by one CPU thread.
 const FAKE_RANK = Ref(1)
 DataLayouts.thread_rank(::FakeGroup) = FAKE_RANK[]
+
+# The 32-bit index helpers of GPU kernels must agree with Base on every index.
+@testset "32-bit index helpers agree with Base" begin
+    for dims in ((7,), (3, 5), (4, 1, 6, 2), (1, 63, 1, 1), (5, 4, 4, 1, 7))
+        cartesian = CartesianIndices(dims)
+        offset = CartesianIndices(map(d -> 3:(d + 2), dims))
+        for i in 1:prod(dims)
+            for T in (Int32, UInt32)
+                @test DataLayouts.cartesian_index_from_linear(dims, T(i)) == cartesian[i]
+            end
+            for T in (Int, Int32, UInt32)
+                @test DataLayouts.single_axis_cartesian_index(offset, T(i)) == offset[i]
+            end
+        end
+    end
+
+    for I in (Int32, UInt32, Int), start in 1:4, step in 1:3, stop in 0:12
+        range = DataLayouts.StridedRange(I(start), I(step), I(stop))
+        values = collect(start:step:stop)
+        @test collect(range) == values
+        @test length(range) == length(values)
+        @test isempty(range) == isempty(values)
+        isempty(values) || @test last(range) == last(values)
+        # Every range subindex must give back a range of an inferrable type: the generic
+        # fallback allocates a Vector and builds an error string, which GPUs cannot
+        # compile. Subindices whose steps are positive by type give StridedRanges.
+        n = length(values)
+        for sub in (Base.OneTo(n), 2:n, 1:UInt(2):n, DataLayouts.StridedRange(2, 2, n))
+            @test (@inferred range[sub]) isa DataLayouts.StridedRange
+            @test collect(range[sub]) == values[collect(sub)]
+        end
+        for sub in (1:2:n, n:-1:1, n:-2:1, 1:-1:2)
+            @test (@inferred range[sub]) isa AbstractRange{Int}
+            @test collect(range[sub]) == values[collect(sub)]
+        end
+    end
+    for I in (Int32, UInt32, Int), n in 1:5, n_indices in 0:11, rank in 1:n
+        @test collect(DataLayouts.strided_range(I(rank), I(n), n_indices)) ==
+              collect(rank:n:n_indices)
+    end
+
+    # The Cartesian methods of a RegisterArray address the same storage as its
+    # linear methods, for points owned by any thread.
+    for (array_size, F) in (
+            ((1, 4, 4, 3, 1), 4),
+            ((9, 1, 1, 2, 1), 4),
+            ((5, 1, 1, 1, 1), 4),
+            ((6, 1, 1, 1), nothing),
+        ),
+        Stride in (1, 2, 4, 16)
+
+        (; Nf, Np) = DataLayouts.register_array_params(array_size, Val(F))
+        storage = StaticArrays.MArray{Tuple{cld(Np, Stride) * Nf}, Float64}(undef)
+        array = DataLayouts.RegisterArray{array_size, F, Stride}(storage)
+        for (i, index) in enumerate(CartesianIndices(array_size))
+            @test DataLayouts.register_index(array, Tuple(index)) ==
+                  DataLayouts.register_index(array, i)
+        end
+    end
+end
 
 @testset "RegisterArray stores one thread's points" begin
     for Nq in (2, 4, 5, 17), Nf in (1, 3), N in (2, 4, 16, 32, 256)
@@ -426,10 +640,38 @@ DataLayouts.thread_rank(::FakeGroup) = FAKE_RANK[]
     @test is_register(FakeGroup{16}())
     @test !is_register(DataLayouts.ThisThread())
     @test !is_register(DataLayouts.ThisThreadPool()) # no static_num_threads
+
+    # Points of a column in registers are accessed through the Cartesian methods
+    # of the array, also at linear indices (see has_cartesian_components).
+    T = Tuple{Float64, Float64}
+    column = DataLayouts.VIJFH{T, 9, 1, 1, 1}(Array{Float64})
+    registers =
+        DataLayouts.register_similar(DataLayouts.reassign(column, FakeGroup{16}()), T)
+    @test DataLayouts.parent_type(registers) <: DataLayouts.RegisterArray
+    for v in 1:9
+        registers[v] = (v, -v)
+        @test registers[v] == registers[CartesianIndex(v, 1, 1, 1)] == (v, -v)
+        view(registers, v)[] = (2v, 3v)
+        @test registers[CartesianIndex(v, 1, 1, 1)] == (2v, 3v)
+        @test first(DataLayouts.array_and_index_args(registers, v)[2]) ==
+              CartesianIndex(v, 1, 1, 1)
+    end
+
+    # Field views and frozen point views of registers stay in the scope's registers.
+    @test DataLayouts.stored_in_scope_registers(registers.:2)
+    for v in 1:9
+        registers[v] = (v, -v)
+        registers.:2[v] = 4v
+        @test registers[v] == (v, 4v)
+        frozen_point =
+            DataLayouts.unchecked_rebuild(view(registers, v), StaticArrays.SArray)
+        @test parent(parent(frozen_point)).array isa StaticArrays.SArray
+        @test frozen_point[] == (v, 4v)
+    end
 end
 
 # A launch unit holding only part of a subscope silently skips some points; see
-# the whole subscopes invariant in DataLayouts.subscope_launch_threads.
+# the whole subscopes invariant in DataLayouts.subscope_indices.
 # visited_points returns the points of an Np-point slice that a subscope of N
 # threads reaches when only its first `present` threads were launched.
 function visited_points(::FakeGroup{N}, present, Np) where {N}
@@ -447,29 +689,15 @@ function visited_points(::FakeGroup{N}, present, Np) where {N}
     return sort!(points)
 end
 
-# Threads of the last subscope in a launch unit of the given size, which is a
-# whole subscope only when the size is a multiple of the subscope's thread count.
-present_threads(threads, N) = threads % N == 0 ? N : threads % N
-
 @testset "a launch unit holds whole subscopes" begin
-    # Every sub-block width that the GPU scope chain descends through, against
-    # every block size that an occupancy search over whole warps could return.
-    for N in (2, 4, 8, 16, 32, 64, 128, 256), max_threads in 32:32:256
-        max_threads < N && continue
-        threads = DataLayouts.subscope_launch_threads(FakeGroup{N}(), max_threads)
-        @test threads % N == 0
-        @test N <= threads <= max_threads
-
+    # Every sub-block width that the GPU scope chain descends through.
+    for N in (2, 4, 8, 16, 32, 64, 128, 256)
         # With whole subscopes, every point of a slice is visited exactly once.
         for Np in (max(N - 1, 1), N, N + 1, 3N + 1)
-            @test visited_points(FakeGroup{N}(), present_threads(threads, N), Np) ==
-                  collect(1:Np)
+            @test visited_points(FakeGroup{N}(), N, Np) == collect(1:Np)
         end
 
-        # Rounding the block size to whole warps instead is what loses points.
-        if max_threads % N != 0
-            @test visited_points(FakeGroup{N}(), present_threads(max_threads, N), N) !=
-                  collect(1:N)
-        end
+        # A launch unit holding only part of a subscope is what loses points.
+        @test visited_points(FakeGroup{N}(), N - 1, N) != collect(1:N)
     end
 end

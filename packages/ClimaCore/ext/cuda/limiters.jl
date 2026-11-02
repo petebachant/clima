@@ -4,6 +4,8 @@ import ClimaCore.Limiters:
     compute_neighbor_bounds_local!,
     apply_limiter!,
     apply_limit_slab!,
+    PositivityLimiter,
+    apply_positivity_slab!,
     VerticalMassBorrowingLimiter,
     column_massborrow!
 import ClimaCore: DataLayouts, Spaces, Topologies, Fields
@@ -44,8 +46,8 @@ function compute_element_bounds_kernel!(limiter, ρq, ρ)
     (Nv, Ni, Nj, Nh) = size(ρ)
     n = (Nv, Nh)
     tidx = thread_index()
-    @inbounds if valid_range(tidx, prod(n))
-        (v, h) = kernel_indexes(tidx, n).I
+    @inbounds if 1 <= tidx <= prod(n)
+        (v, h) = DataLayouts.cartesian_index_from_linear(n, tidx).I
         (; q_bounds) = limiter
         local q_min, q_max
         slab_ρq = slab(ρq, v, h)
@@ -102,8 +104,8 @@ function compute_neighbor_bounds_local_kernel!(
     (Nv, _, _, Nh) = size(q_bounds_nbr)
     n = (Nv, Nh)
     tidx = thread_index()
-    @inbounds if valid_range(tidx, prod(n))
-        (v, h) = kernel_indexes(tidx, n).I
+    @inbounds if 1 <= tidx <= prod(n)
+        (v, h) = DataLayouts.cartesian_index_from_linear(n, tidx).I
         q_bounds = Base.broadcastable(limiter.q_bounds)
         slab_q_bounds = slab(q_bounds, v, h)
         q_min = slab_q_bounds[1]
@@ -150,8 +152,8 @@ function apply_limiter_kernel!(limiter::QuasiMonotoneLimiter, ρq_data, ρ_data,
     (Nv, _, _, Nh) = size(ρq_data)
     n = (Nv, Nh)
     tidx = thread_index()
-    @inbounds if valid_range(tidx, prod(n))
-        (v, h) = kernel_indexes(tidx, n).I
+    @inbounds if 1 <= tidx <= prod(n)
+        (v, h) = DataLayouts.cartesian_index_from_linear(n, tidx).I
         # Convergence statistics are discarded on GPUs (no warning on failure).
         apply_limit_slab!(
             slab(ρq_data, v, h),
@@ -159,6 +161,54 @@ function apply_limiter_kernel!(limiter::QuasiMonotoneLimiter, ρq_data, ρ_data,
             slab(WJ_data, v, h),
             slab(q_bounds_nbr, v, h),
             rtol,
+        )
+    end
+    return nothing
+end
+
+function apply_limiter!(
+    states::Tuple,
+    aux,
+    lim::PositivityLimiter,
+    dev::ClimaComms.CUDADevice,
+)
+    dstates = map(Fields.field_values, states)
+    (Nv, _, _, Nh) = size(first(dstates))
+    nthreads, nblocks = config_threadblock(Nv, Nh)
+    args = (
+        lim,
+        dstates,
+        aux === nothing ? nothing : Fields.field_values(aux),
+        Spaces.local_geometry_data(axes(first(states))).WJ,
+    )
+    auto_launch!(
+        apply_positivity_limiter_kernel!,
+        args;
+        threads_s = nthreads,
+        blocks_s = nblocks,
+    )
+    # Once per state: the callback inspects one `Field` result.
+    call_post_op_callback() &&
+        foreach(s -> post_op_callback(s, s, aux, lim, dev), states)
+    return nothing
+end
+
+function apply_positivity_limiter_kernel!(
+    lim::PositivityLimiter,
+    dstates,
+    daux,
+    dWJ,
+)
+    (Nv, _, _, Nh) = size(first(dstates))
+    n = (Nv, Nh)
+    tidx = thread_index()
+    @inbounds if 1 <= tidx <= prod(n)
+        (v, h) = DataLayouts.cartesian_index_from_linear(n, tidx).I
+        apply_positivity_slab!(
+            lim,
+            map(d -> @inbounds(slab(d, v, h)), dstates),
+            daux === nothing ? nothing : slab(daux, v, h),
+            slab(dWJ, v, h),
         )
     end
     return nothing
@@ -230,12 +280,12 @@ function apply_limiter_kernel!(
     q_min_tuple,
 ) where {LM <: VerticalMassBorrowingLimiter}
     (_, Ni, _, Nh) = size(q_data)
-    j_idx, i_idx = divrem(CUDA.threadIdx().x - Int32(1), Ni)
-    j_idx += Int32(1)
-    i_idx += Int32(1)
+    j_idx, i_idx = divrem(CUDA.threadIdx().x - UInt32(1), Ni)
+    j_idx += UInt32(1)
+    i_idx += UInt32(1)
     f_idx = CUDA.threadIdx().y
     # each z in a block is a different element
-    h_idx = CUDA.blockDim().z * (CUDA.blockIdx().x - Int32(1)) + CUDA.threadIdx().z
+    h_idx = CUDA.blockDim().z * (CUDA.blockIdx().x - UInt32(1)) + CUDA.threadIdx().z
     @inbounds if h_idx <= Nh
         q_min = q_min_tuple[f_idx]
         q_column_data = column(q_data, i_idx, j_idx, h_idx)
