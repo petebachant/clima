@@ -53,8 +53,8 @@ import NVTX
 import Adapt
 using UnrolledUtilities
 
-import ..Utilities: PlusHalf, half, new, recursive_bottom_eltype
-import ..Utilities: @drop_recursion_limits
+import ..Utilities: PlusHalf, half, new, recursive_bottom_eltype, return_type
+import ..Utilities: @drop_recursion_limits, @drop_constprop
 import ..Utilities: AutoBroadcaster, is_auto_broadcastable, auto_broadcasted
 import ..Utilities: add_auto_broadcasters, drop_auto_broadcasters
 import ..DataLayouts
@@ -64,8 +64,6 @@ import ..Topologies
 import ..Spaces
 import ..Fields
 import ..Operators
-using ..Geometry:
-    mul_with_projection, mul_return_type, basis1, basis2, tensor_type
 
 export DiagonalMatrixRow,
     BidiagonalMatrixRow,
@@ -77,12 +75,7 @@ export FieldMatrixWithSolver
 
 include("band_matrix_row.jl")
 
-const ColumnwiseBandMatrixField{V, S} = Fields.Field{
-    V, S,
-} where {
-    V <: DataLayout{<:BandMatrixRow},
-    S <: Union{Spaces.AbstractSpace, Operators.PlaceholderSpace}, # so that this can exist inside cuda kernels
-}
+const ColumnwiseBandMatrixField = Fields.Field{<:DataLayout{<:BandMatrixRow}}
 
 include("matrix_shape.jl")
 include("matrix_multiplication.jl")
@@ -98,22 +91,27 @@ include("field_matrix_solver.jl")
 include("field_matrix_iterative_solver.jl")
 include("field_matrix_with_solver.jl")
 
+# Extend the recursion limit removal in Operators to the methods defined above.
+@drop_recursion_limits Operators.stencil_value, Operators.stencil_interior,
+matrix_row_value, projected_value
+@drop_constprop Operators.stencil_value, matrix_row_value
+
 # Evaluate multiplications in left-associative order. This should technically be
 # right-associative, but flipping the order worsens performance in GPU kernels,
 # where the second argument of each matrix product is cached. Left-associativity
 # makes the first argument grow in bandwidth when multiplying a chain of
 # matrices, whereas right-associativity makes the second argument grow instead.
-Base.broadcasted(::Fields.AbstractFieldStyle, ::typeof(*), arg, args...) =
-    unrolled_reduce((x, y) -> Base.broadcasted(*, x, y), args; init = arg)
+@inline Base.broadcasted(::Fields.AbstractFieldStyle, ::typeof(*), arg, args...) =
+    unrolled_reduce(@inline((x, y) -> Base.broadcasted(*, x, y)), args; init = arg)
 
-Base.broadcasted(style::Fields.AbstractFieldStyle, ::typeof(*), x, y) =
+@inline Base.broadcasted(style::Fields.AbstractFieldStyle, ::typeof(*), x, y) =
     check_entry(FieldNamePair, x) && check_entry(FieldName, y) ?
-    Base.broadcasted(MultiplyColumnwiseBandMatrixField(), x, y) :
+    Base.broadcasted(MultiplyColumnwiseBandMatrixField(), x, projected_operand(x, y)) :
     auto_broadcasted(style, *, (x, y))
 
 function Base.broadcasted(
     ::MultiplyColumnwiseBandMatrixField,
-    x::Fields.PointField,
+    x::Union{Fields.PointField, Fields.SpectralElementField},
     y,
 )
     @assert eltype(x) <: DiagonalMatrixRow

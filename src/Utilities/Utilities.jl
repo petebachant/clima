@@ -2,6 +2,7 @@ module Utilities
 
 using UnrolledUtilities
 
+import Adapt
 import ForwardDiff
 import InteractiveUtils
 
@@ -107,28 +108,6 @@ include("cache.jl")
 include("safe_mapreduce.jl")
 
 """
-    cart_ind(n::NTuple, i::Integer)
-
-Return the `CartesianIndex` `CartesianIndices(map(Base.OneTo, n))[i]` for an array
-of size `n` and linear index `i`.
-"""
-Base.@propagate_inbounds cart_ind(n::NTuple, i::Integer) =
-    @inbounds CartesianIndices(map(x -> Base.OneTo(x), n))[i]
-
-"""
-    linear_ind(n::NTuple, ci::CartesianIndex)
-    linear_ind(n::NTuple, t::NTuple)
-
-Return the linear index `LinearIndices(map(Base.OneTo, n))[ci]` for an array of
-size `n` and Cartesian index `ci`. The method for a tuple `t` wraps it in a
-`CartesianIndex` first.
-"""
-Base.@propagate_inbounds linear_ind(n::NTuple, ci::CartesianIndex) =
-    @inbounds LinearIndices(map(x -> Base.OneTo(x), n))[ci]
-Base.@propagate_inbounds linear_ind(n::NTuple, loc::NTuple) =
-    linear_ind(n, CartesianIndex(loc))
-
-"""
     stable_view(array, indices...)
 
 Return a view of `array` like `view(array, indices...)`, with two modifications
@@ -167,9 +146,88 @@ Base.@propagate_inbounds function stable_view(array::AbstractArray, indices...)
     end
     converted = Base.to_indices(array, indices)
     @boundscheck checkbounds(array, converted...)
-    reshaped = Base._maybe_reshape_parent(array, Base.index_ndims(converted...))
-    return Base.unsafe_view(reshaped, converted...)
+    return converted_view(array, converted)
 end
+
+"""
+    unchecked_stable_view(array, indices...)
+
+Like [`stable_view`](@ref) for one index per dimension of `array`, but without the bounds
+check, whose code Julia 1.10 keeps in the optimized IR of callers even under `@inbounds`.
+"""
+@inline unchecked_stable_view(array::AbstractArray, indices...) =
+    converted_view(array, Base.to_indices(array, indices))
+@inline converted_view(array, converted) = Base.unsafe_view(
+    Base._maybe_reshape_parent(array, Base.index_ndims(converted...)),
+    converted...,
+)
+
+"""
+    linear_index_and_stride(I, array, index, Val(F))
+
+Return a dense array that holds the entries of `array`, along with the linear
+index into it of an entry of `array` and the distance between the linear indices
+of consecutive entries along dimension `F`. The entry is at index 1 along `F` and
+at the Cartesian `index` along the other dimensions; when `F` is `nothing`,
+`index` has a coordinate along every dimension and the distance is 1. The `array`
+can be dense or a view that indexes every dimension of a dense parent with a unit
+range. Integer arithmetic is in type `I`, such as `UInt32` in GPU kernels, where a
+64-bit integer operation takes several instructions. When `F` is not `nothing`, the
+linear index is an `Int`, with the offset along `F` of any views added after the
+conversion.
+"""
+@inline function linear_index_and_stride(::Type{I}, array, index, ::Val{F}) where {I, F}
+    # The offset along F of struct field views (see DataLayouts.property_view) is a constant
+    # in kernels, which folds into the immediate offsets of memory accesses when it is added
+    # to the Int index (like the offsets of components; see struct_index), so that the fields
+    # of a point share one address; added in type I, it could wrap, so each would need its own.
+    f_offset = isnothing(F) ? 0 : view_offset(array, Val(F))
+    full_index =
+        isnothing(F) ? index :
+        (
+            ntuple(d -> index[d], Val(F - 1))...,
+            1 - f_offset,
+            ntuple(d -> index[F - 1 + d], Val(length(index) - F + 1))...,
+        )
+    (dense_array, dense_index) =
+        dense_array_and_index(array, unrolled_map(i -> i % I, full_index))
+    sizes = unrolled_map(n -> n % I, size(dense_array))
+    offset = linear_offset(dense_index, sizes)
+    isnothing(F) && return (dense_array, (offset + one(I), one(I)))
+    stride = axis_stride(sizes, Val(F))
+    # Sign extension is exact (offsets fit in 31 bits; see the CUDA extension's index count).
+    return (dense_array, (Int(signed(offset)) + Int(f_offset % I * stride) + 1, stride))
+end
+
+const UnitRangeSubArray{A} = SubArray{
+    <:Any,
+    <:Any,
+    A,
+    <:Tuple{Vararg{Union{Base.Slice{Base.OneTo{Int}}, UnitRange{Int}}}},
+}
+
+# The offset along dimension d of the views stacked on an array (0 for the array itself).
+@inline view_offset(array::UnitRangeSubArray, ::Val{d}) where {d} =
+    first(array.indices[d]) - 1 + view_offset(parent(array), Val(d))
+@inline view_offset(array, ::Val) = 0
+
+dense_array_and_index(array::DenseArray, index) = (array, index)
+dense_array_and_index(array::UnitRangeSubArray, index) = dense_array_and_index(
+    parent(array),
+    unrolled_map(parent_coordinate, index, array.indices),
+)
+
+@inline parent_coordinate(i, ::Base.Slice) = i
+@inline parent_coordinate(i, range) = i + (first(range) - 1) % typeof(i)
+
+linear_offset(index::Tuple{Any}, _) = first(index) - one(first(index))
+linear_offset(index, sizes) =
+    first(index) - one(first(index)) +
+    first(sizes) * linear_offset(Base.tail(index), Base.tail(sizes))
+
+axis_stride(sizes, ::Val{1}) = one(first(sizes))
+axis_stride(sizes, ::Val{F}) where {F} =
+    first(sizes) * axis_stride(Base.tail(sizes), Val(F - 1))
 
 """
     unionall_type(T)
@@ -218,22 +276,26 @@ Return a statically inferrable analogue of `Val.(fieldtypes(T))`. Functions of
 outputs.
 """
 @inline fieldtype_vals(::Type{T}) where {T} =
-    ntuple(Val ∘ Base.Fix1(fieldtype, T), Val(fieldcount(T)))
+    ntuple(i -> Val(fieldtype(T, i)), Val(fieldcount(T)))
 
 # :new may be called with uninitialized fields as of JuliaLang/julia#52169, but
-# this leads to segfaults or other compiler errors for immutable DataType fields
+# this leads to segfaults or other compiler errors for immutable DataType fields.
+# The message is generated, so that no kernel that reaches this has to infer how
+# to print a type.
 @inline can_alloc_uninitialized(::Tuple{Bool, Val{T}}) where {T <: Type} =
-    throw(ArgumentError("Cannot allocate unspecified $T"))
+    throw(ArgumentError(unspecified_type_string(Val(T))))
 @inline can_alloc_uninitialized((mutable, _)::Tuple{Bool, Val{Type{T}}}) where {T} =
     mutable
 @inline can_alloc_uninitialized((mutable, _)::Tuple{Bool, Val{T}}) where {T} =
     if T isa Union{Union, UnionAll}
         throw(ArgumentError("Cannot allocate value of ambiguous type $T"))
     else
-        mutable_flags = ntuple(Base.Fix1(!isconst, T), Val(fieldcount(T)))
+        mutable_flags = ntuple(i -> !isconst(T, i), Val(fieldcount(T)))
         flags_and_type_vals = zip(mutable_flags, fieldtype_vals(T))
         mutable || unrolled_all(can_alloc_uninitialized, flags_and_type_vals)
     end
+
+@generated unspecified_type_string(::Val{T}) where {T} = "Cannot allocate unspecified $T"
 
 """
     new(T, [fields])
@@ -279,13 +341,13 @@ julia> new(@NamedTuple{a::DataType, b::Int, c::Complex{Int}}, (Int, 1, 1 + 2im))
 @inline nested_new(::Val{T}) where {names, T <: NamedTuple{names}} =
     NamedTuple{names}(unrolled_map(maybe_nested_new, fieldtype_vals(T)))
 
-struct InferenceError <: Exception
-    f::Any
-    args_type::Type{<:Tuple}
-end
-function Base.showerror(io::IO, (; f, args_type)::InferenceError)
+# Types as parameters, so that throwing this allocates nothing and compiles in GPU kernels.
+struct InferenceError{F, T <: Tuple} <: Exception end
+InferenceError(::F, ::Type{T}) where {F, T} = InferenceError{F, T}()
+function Base.showerror(io::IO, ::InferenceError{F, T}) where {F, T}
     println(io, "Concrete type of result could not be inferred:\n")
-    InteractiveUtils.code_warntype(io, f, args_type)
+    Base.issingletontype(F) ? InteractiveUtils.code_warntype(io, F.instance, T) :
+    print(io, "Function of type $F with arguments of types $T")
 end
 
 """
@@ -299,15 +361,18 @@ the more generic `DataType` value).
 
 """
     return_type(f, T)
+    return_type(f, args...)
 
 Return `Core.Compiler.return_type(f, T)`, after checking that the result satisfies
 [`is_inferred_type`](@ref) whenever `T` does; otherwise throw an `InferenceError`.
 Used in place of `Core.Compiler.return_type` to flag deteriorations in type
-inference before they can lead to behavioral changes.
+inference before they can lead to behavioral changes. When given arguments `args`
+instead of their type `T`, this uses `T = typeof(args)`.
 """
 @inline return_type(f::F, ::Type{T}) where {F, T} =
     is_inferred_type(T) && !is_inferred_type(Core.Compiler.return_type(f, T)) ?
     throw(InferenceError(f, T)) : Core.Compiler.return_type(f, T)
+@inline return_type(f::F, args...) where {F} = return_type(f, typeof(args))
 
 """
     unsafe_eltype(itr)
