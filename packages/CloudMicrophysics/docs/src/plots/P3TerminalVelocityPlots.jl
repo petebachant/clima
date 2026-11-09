@@ -6,8 +6,8 @@ import CairoMakie: Makie
 
 FT = Float64
 
-params = CMP.ParametersP3(FT; slope_law = :constant)
-params_noar = CMP.ParametersP3(FT; slope_law = :constant, aspect_ratio = CMP.NoAspectRatio())
+params = CMP.ParametersP3(FT; slope = CMP.SlopeConstant(FT))
+params_noar = CMP.ParametersP3(FT; slope = CMP.SlopeConstant(FT), aspect_ratio = CMP.NoAspectRatio())
 
 function get_values(
     params::CMP.ParametersP3,
@@ -20,28 +20,29 @@ function get_values(
     y_resolution::Int,
 ) where {FT}
     F_rims = range(FT(0), stop = FT(1 - eps(FT)), length = x_resolution)
-    ρ_rims = range(FT(25), stop = FT(975), length = y_resolution)
+    ρ_rims = range(P3.rime_density_bounds(params)..., length = y_resolution)
 
     V_m = zeros(x_resolution, y_resolution)
     V_m_ϕ = zeros(x_resolution, y_resolution)
     D_m = zeros(x_resolution, y_resolution)
     D_m_regimes = zeros(x_resolution, y_resolution)
     ϕᵢ = zeros(x_resolution, y_resolution)
+    quad = CMP.Microphysics2MParams(FT; with_ice = true).ice.integration  # the package default rule
 
     for i in 1:x_resolution
         for j in 1:y_resolution
             F_rim = F_rims[i]
             ρ_rim = ρ_rims[j]
-            state = P3.P3State(params, L, N, F_rim, ρ_rim)
-            state_noar = P3.P3State(params_noar, L, N, F_rim, ρ_rim)
-            logλ = P3.get_distribution_logλ(state)
-            V_m[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state_noar, logλ)
-            V_m_ϕ[i, j] = P3.ice_terminal_velocity_mass_weighted(Chen2022, ρ_a, state, logλ)
-            D_m[i, j] = P3.D_m(state, logλ)
+            L_rim = F_rim * L
+            state = P3.P3State(params, quad, L, N, L_rim, L_rim / ρ_rim)
+            state_noar = P3.P3State(params_noar, quad, L, N, L_rim, L_rim / ρ_rim)
+            V_m[i, j] = P3.ice_terminal_velocities(Chen2022, state_noar, ρ_a).v_m
+            V_m_ϕ[i, j] = P3.ice_terminal_velocities(Chen2022, state, ρ_a).v_m
+            D_m[i, j] = P3.D_m(state.particles, state.dist)
             D_m_regimes[i, j] = D_m[i, j]
-            ϕᵢ[i, j] = P3.ϕᵢ(state, D_m[i, j])
+            ϕᵢ[i, j] = P3.ϕᵢ(state.particles, D_m[i, j])
 
-            (; D_th, D_gr, D_cr) = state
+            (; D_th, D_gr, D_cr) = state.particles
             # plot the regimes
             if D_th > D_m[i, j]
                 # small spherical ice
@@ -202,7 +203,7 @@ function figure_2()
     row += 1
     title = "Vₘ (ϕᵢ = 1) with small Dₘ"
     make_plots(row, 1, F_rims, ρ_rims; cfvals = V_m_s, cvals = D_m_s, title)
-    title = "Vₘ (ϕᵢ = 1) with medium Dₘ",
+    title = "Vₘ (ϕᵢ = 1) with medium Dₘ"
     make_plots(row, 2, F_rimm, ρ_rimm; cfvals = V_m_m, cvals = D_m_m, title)
     title = "Vₘ (ϕᵢ = 1) with large Dₘ"
     make_plots(row, 3, F_riml, ρ_riml; cfvals = V_m_l, cvals = D_m_l, title)

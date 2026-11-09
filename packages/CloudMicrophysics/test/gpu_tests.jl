@@ -410,6 +410,17 @@ end
     )
 end
 
+@kernel inbounds = true function test_average_bulk_tendencies_1m_verbose_kernel!(
+    mp, tps, output, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt,
+)
+    i = @index(Global, Linear)
+    CM1M = BMT.Microphysics1Moment()
+    output[i] = BMT.bulk_microphysics_tendencies(BMT.LinearizedAverageVerbose(),
+        CM1M, mp, tps, ρ[i], T[i], w[i], q_tot[i], q_lcl[i], q_icl[i], q_rai[i], q_sno[i],
+        Δt[i], 2,
+    ).S_acnv_lcl_rai
+end
+
 
 
 @kernel inbounds = true function test_bulk_tendencies_2m_warm_kernel!(
@@ -427,35 +438,28 @@ end
 )
     i = @index(Global, Linear)
     CM2M = BMT.Microphysics2Moment()
-    # The 2M+P3 entry point takes `logλ` explicitly; compute it from the P3
-    # prognostic state (matches host-side usage, see bulk_tendencies_tests.jl).
-    L_ice = q_ice[i] * ρ[i]
-    N_ice = n_ice[i] * ρ[i]
-    F_rim = q_rim[i] / q_ice[i]
-    ρ_rim = q_rim[i] * ρ[i] / (b_rim[i] * ρ[i])
-    state = P3.P3State(mp.ice.scheme, L_ice, N_ice, F_rim, ρ_rim)
-    logλ = P3.get_distribution_logλ(state)
     output[i] = BMT.bulk_microphysics_tendencies(
         CM2M, mp, tps, ρ[i], T[i], q_tot[i], q_lcl[i], n_lcl[i], q_rai[i], n_rai[i],
-        q_ice[i], n_ice[i], q_rim[i], b_rim[i], logλ,
+        q_ice[i], n_ice[i], q_rim[i], b_rim[i],
     )
 end
 
-@kernel inbounds = true function test_P3_get_distribution_logλ_kernel!(
-    p3_params, output, L_ice, N_ice, F_rim, ρ_rim,
+@kernel inbounds = true function test_P3_distribution_logλ_kernel!(
+    p3_params, quad, output, L_ice, N_ice, F_rim, ρ_rim,
 )
     i = @index(Global, Linear)
-    state = P3.P3State(p3_params, L_ice[i], N_ice[i], F_rim[i], ρ_rim[i])
-    output[i] = P3.get_distribution_logλ(state)
+    ρq_rim = F_rim[i] * L_ice[i]
+    state = P3.P3State(p3_params, quad, L_ice[i], N_ice[i], ρq_rim, ρq_rim / ρ_rim[i])
+    output[i] = state.dist.logλ
 end
 
 @kernel inbounds = true function test_P3_ice_self_collection_kernel!(
-    p3_params, vel_params, output, L_ice, N_ice, F_rim, ρ_rim, ρₐ,
+    p3_params, quad, vel_params, output, L_ice, N_ice, F_rim, ρ_rim, ρₐ,
 )
     i = @index(Global, Linear)
-    state = P3.P3State(p3_params, L_ice[i], N_ice[i], F_rim[i], ρ_rim[i])
-    logλ = P3.get_distribution_logλ(state)
-    output[i] = P3.ice_self_collection(state, logλ, vel_params, ρₐ[i])
+    ρq_rim = F_rim[i] * L_ice[i]
+    state = P3.P3State(p3_params, quad, L_ice[i], N_ice[i], ρq_rim, ρq_rim / ρ_rim[i])
+    output[i] = P3.ice_self_collection(vel_params, state, ρₐ[i])
 end
 
 # Evaluates the fast incomplete-gamma approximations on the device. This is the
@@ -548,13 +552,21 @@ function test_gpu(FT)
     mp_1m_2M = CMP.Microphysics1MParams(FT;
         rain_autoconversion = CMP.PrescribedNd(),
     )
-    # Kessler1M with different quiescent and convective regime values (velocity dependent)
+    # Khairoutdinov and Kogan (2000) autoconversion and accretion with a prescribed droplet number
+    mp_1m_kk = CMP.Microphysics1MParams(FT;
+        rain_autoconversion = CMP.KK2000Autoconversion(),
+        cloud_liquid_rain_accretion = CMP.KK2000Accretion(),
+    )
+    # Kessler1M with different quiescent and convective regime values (velocity dependent).
+    # Stratiform ("slow") values are scale factors on the convective ("fast") defaults:
+    # τ_slow = 1000 s · 14.4 = 14400 s;  q_slow = 5·10⁻⁴ · 2.0 = 1·10⁻³.
     mp_1m_vd = CMP.Microphysics1MParams(
         CP.create_toml_dict(FT;
             override_file = Dict(
-                "rain_autoconversion_timescale_stratiform" => Dict("value" => 14400.0, "type" => "float"),
-                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform" =>
-                    Dict("value" => 1e-3, "type" => "float"),
+                "rain_autoconversion_timescale_stratiform_scale" =>
+                    Dict("value" => 14.4, "type" => "float"),
+                "cloud_liquid_water_specific_humidity_autoconversion_threshold_stratiform_scale" =>
+                    Dict("value" => 2.0, "type" => "float"),
             ),
         ),
     )
@@ -647,8 +659,8 @@ function test_gpu(FT)
         # test that terminal velocity is callable and returns a reasonable value
         TT.@test v_term.lcl_stokes ≈ FT(0.021314907475574747)  # CloudLiquid with Stokes velocity
         TT.@test v_term.lci_chen2022 ≈ FT(0.01696129041896599)   # CloudIce with Chen2022 small ice
-        TT.@test v_term.rai_chen2022 ≈ FT(6.9241079942767305)    # Rain with Chen2022 rain
-        TT.@test v_term.sno_chen2022 ≈ FT(0.9514450529349796)    # Snow with Chen2022 large ice
+        TT.@test v_term.rai_chen2022 ≈ FT(5.6926728181788775)    # Rain with Chen2022 rain
+        TT.@test v_term.sno_chen2022 ≈ FT(0.9069269283566964)    # Snow with Chen2022 large ice
     end
 
     TT.@testset "0-moment microphysics kernels" begin
@@ -736,6 +748,12 @@ function test_gpu(FT)
         # q_lcl = 0 → zero rate regardless of w
         TT.@test out[3] == FT(0)
 
+        # KK2000 autoconversion with a prescribed droplet number
+        kernel!(mp_1m_kk, tps, output, ql, w_arr; ndrange)
+        out = Array(output)
+        TT.@test out[1] > FT(0)
+        TT.@test out[3] == FT(0)
+
         DT = @NamedTuple{
             liq_rai::FT, ice_sno::FT, liq_sno::FT, ice_rai::FT,
             rai_sink::FT, sno_rai::FT, rai_sno::FT,
@@ -803,6 +821,12 @@ function test_gpu(FT)
         TT.@test out1_opt.sno_rai ≈ FT(2.466313958248222e-4)
         TT.@test out1_opt.rai_sno ≈ FT(6.830957197816771e-5)
 
+        # KK2000 cloud liquid + rain accretion
+        kernel_opt!(mp_1m_kk, tps, output, ρ, T_arr, qi, qs, ql, qr; ndrange)
+        out0_kk, out1_kk = Array(output)
+        TT.@test out0_kk.liq_rai == FT(0)
+        TT.@test out1_kk.liq_rai > FT(0)
+
         (; output, ndrange) = setup_output(3, FT)
 
         T_freeze = FT(273.15)
@@ -837,7 +861,7 @@ function test_gpu(FT)
             TT.@test S_LD2004 ≈ FT(1.6963072465911614e-6)
             TT.@test S_TC1980 ≈ FT(3.5482867084128596e-6)
             TT.@test S_B1994 ≈ FT(9.825462758968215e-7)
-            TT.@test S_KK2000 ≈ FT(5.855332513368727e-8)
+            TT.@test S_KK2000 ≈ FT(5.854386977448622e-8)
         end
 
         TT.@testset "accretion" begin
@@ -1253,6 +1277,19 @@ function test_gpu(FT)
             TT.@test all(isfinite, tendencies)
         end
 
+        # 1M LinearizedAverageVerbose: rate of one process
+        (; output) = setup_output(ndrange, FT)
+        kernel! = test_average_bulk_tendencies_1m_verbose_kernel!(backend, work_groups)
+        TT.@testset "1M average verbose" begin
+            kernel!(mp_1m, tps, output, ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt; ndrange)
+            TT.@test allequal(Array(output))
+            inputs = map(x -> Array(x)[1], (ρ, T, w, q_tot, q_lcl, q_icl, q_rai, q_sno, Δt))
+            cpu = BMT.bulk_microphysics_tendencies(
+                BMT.LinearizedAverageVerbose(), BMT.Microphysics1Moment(), mp_1m, tps, inputs..., 2,
+            )
+            TT.@test Array(output)[1] ≈ cpu.S_acnv_lcl_rai
+        end
+
         # 1M Kessler1M with velocity-dependent regime values and nonzero w
         (; output) = setup_output(ndrange, DT)
         w_vd = constant_data(FT(3.0); ndrange)
@@ -1314,8 +1351,9 @@ function test_gpu(FT)
         end
     end  # TT.@testset "Bulk microphysics tendencies kernels"
 
-    TT.@testset "P3 get_distribution_logλ" begin
+    TT.@testset "P3 distribution logλ" begin
         p3_params = CMP.ParametersP3(FT)
+        quad = P3.GaussLegendre(FT, 16)
 
         (; output, ndrange) = setup_output(10, FT)
 
@@ -1324,8 +1362,8 @@ function test_gpu(FT)
         F_rim = constant_data(FT(0.5); ndrange)
         ρ_rim = constant_data(FT(400); ndrange)
 
-        kernel! = test_P3_get_distribution_logλ_kernel!(backend, work_groups)
-        kernel!(p3_params, output, L_ice, N_ice, F_rim, ρ_rim; ndrange)
+        kernel! = test_P3_distribution_logλ_kernel!(backend, work_groups)
+        kernel!(p3_params, quad, output, L_ice, N_ice, F_rim, ρ_rim; ndrange)
         out = Array(output)
 
         TT.@test allequal(out)
@@ -1345,13 +1383,77 @@ function test_gpu(FT)
         ρₐ = constant_data(FT(1.2); ndrange)
 
         kernel! = test_P3_ice_self_collection_kernel!(backend, work_groups)
-        kernel!(p3_params, Ch2022, output, L_ice, N_ice, F_rim, ρ_rim, ρₐ; ndrange)
+        quad = P3.GaussLegendre(FT, 16)
+        kernel!(p3_params, quad, Ch2022, output, L_ice, N_ice, F_rim, ρ_rim, ρₐ; ndrange)
         out = Array(output)
 
         TT.@test allequal(out)
         res = out[1]
         TT.@test isfinite(res.dNdt)
         TT.@test res.dNdt > 0
+    end
+
+    TT.@testset "P3 lookup tables" begin
+        # Coarse tables built on the device and on the host
+        grid = P3.P3TableGrid(
+            mp_2m_p3;
+            ice = (; logλ = 16, w = 5, ρ_rim = 3, logρₐ = 3),
+            cloud_collision = (; logλ = 8, w = 3, ρ_rim = 2, logρₐ = 2, cloud_logx̄ = 4),
+            rain_collision = (; logλ = 8, w = 3, ρ_rim = 2, logρₐ = 2, rain_logx̄ = 3),
+            rime_density = (; logλ = 4, w = 2, ρ_rim = 2, logρₐ = 2, cloud_logx̄ = 3, rain_logx̄ = 2, logR = 8),
+            wet_set = (;
+                logλ = 4, w = 3, ρ_rim = 2, logρₐ = 2, cloud_logx̄ = 3, rain_logx̄ = 2,
+                logD = 8, number_logit = 9, μ = 8,
+            ),
+        )
+        mp_host = P3.with_tables(mp_2m_p3, Array; grid)
+        mp_device = P3.with_tables(mp_2m_p3, ArrayType; grid)
+        tables_host, tables_device = mp_host.ice.integration, mp_device.ice.integration
+        TT.@test P3.tables_are_current(mp_device)
+        for name in keys(tables_host.groups)
+            TT.@test tables_device.groups[name].data isa ArrayType
+            TT.@test Array(tables_device.groups[name].data) ≈ tables_host.groups[name].data rtol = sqrt(eps(FT))
+        end
+
+        # Self-collection with the state built in a kernel and in a broadcast
+        (; output, ndrange) = setup_output(10, @NamedTuple{dNdt::FT})
+        L_ice = constant_data(FT(1e-4); ndrange)
+        N_ice = constant_data(FT(1e4); ndrange)
+        F_rim = constant_data(FT(0.5); ndrange)
+        ρ_rim = constant_data(FT(400); ndrange)
+        ρₐ = constant_data(FT(1.2); ndrange)
+        kernel! = test_P3_ice_self_collection_kernel!(backend, work_groups)
+        kernel!(p3_params, tables_device, Ch2022, output, L_ice, N_ice, F_rim, ρ_rim, ρₐ; ndrange)
+        state_host = P3.P3State(p3_params, tables_host, FT(1e-4), FT(1e4), FT(0.5e-4), FT(0.5e-4 / 400))
+        expected = P3.ice_self_collection(Ch2022, state_host, FT(1.2)).dNdt
+        TT.@test all(r -> r.dNdt ≈ expected, Array(output))
+        rates = P3.ice_self_collection.(
+            Ref(Ch2022),
+            P3.P3State.(p3_params, tables_device, L_ice, N_ice, F_rim .* L_ice, F_rim .* L_ice ./ ρ_rim), ρₐ,
+        )
+        TT.@test all(r -> r.dNdt ≈ expected, Array(rates))
+
+        # Bulk tendencies of 2M+P3 under the tables
+        DT_p3 = @NamedTuple{
+            dq_lcl_dt::FT, dn_lcl_dt::FT, dq_rai_dt::FT, dn_rai_dt::FT,
+            dq_ice_dt::FT, dn_ice_dt::FT, dq_rim_dt::FT, db_rim_dt::FT, dn_lcl_activation_dt::FT,
+        }
+        (; output) = setup_output(ndrange, DT_p3)
+        inputs = map(
+            v -> constant_data(FT(v); ndrange),
+            (0.9, 263, 8e-3, 3e-4, 1e8, 1e-4, 1e4, 1e-4, 1e5, 3e-5, 1e-7),
+        )
+        kernel! = test_bulk_tendencies_2m_p3_kernel!(backend, work_groups)
+        if VERSION < v"1.12"
+            # As for the quadrature, the 2M+P3 tendency kernel needs the inference of Julia 1.12
+            TT.@test_broken VERSION >= v"1.12"
+        else
+            kernel!(mp_device, tps, output, inputs...; ndrange)
+            expected = BMT.bulk_microphysics_tendencies(
+                BMT.Microphysics2Moment(), mp_host, tps, map(x -> Array(x)[1], inputs)...,
+            )
+            TT.@test all(t -> all(map(≈, t, expected)), Array(output))
+        end
     end
 
     TT.@testset "incomplete gamma (UT vs SpecialFunctions) on device" begin

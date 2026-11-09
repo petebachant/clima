@@ -215,7 +215,7 @@ L_\mathrm{ice} &= \int_{0}^{∞} m(D) N'(D) \mathrm{d}D
 
 To close the system of equations, it has been customary (e.g. [MorrisonMilbrandt2015](@cite)) to assume $μ$ to be a function of $λ$, $μ = μ(λ)$.
 
-## Calculating shape parameters
+## [Calculating shape parameters](@id P3-shape-parameters)
 
 Given the system
 
@@ -242,6 +242,14 @@ we seek to solve for $N_0$ and $λ$. This is most conveniently achieved by first
 - \log\left( ∫_{0}^{∞} D^μ e^{-λD}\ \mathrm{d}D \right)
 - \log\left(\frac{L_\mathrm{ice}}{N_\mathrm{ice}}\right) 
 ```
+
+The slope is a derived quantity of the ice state.
+Before the solve, the distribution construction bounds the ice number so that the mean particle mass $L_\mathrm{ice} / N_\mathrm{ice}$ lies between the mass of a newly nucleated crystal (a solid-ice sphere of diameter $D_\mathrm{nuc}$) and a largest mean mass of $10^{-4}$ kg.
+The root then lies in the search interval of the solve, from $\log λ = 2$ to the slope at which the mean particle mass equals the nucleation mass.
+Some of the gamma functions used to evaluate $\log λ$ do not have analytical derivatives, so $\log λ$ is treated as a constant with respect to the state when using automatic differentiation.
+$\log λ$ and the other distribution parameters are stored in the [`CloudMicrophysics.P3Scheme.P3Distribution`](@ref) type.
+The [`CloudMicrophysics.P3Scheme.P3State`](@ref) holds the prognostic moments, and constructs the distribution from them and from the [`CloudMicrophysics.P3Scheme.P3Particles`](@ref), the mass, area, and size thresholds of a particle.
+The process rates read the distribution from the state to compute the integrals over the distribution.
 
 !!! details "Computing Distribution Integrals Using Gamma Functions"
     The integrals presented above can be evaluated analytically using the Gamma function family. Here we present the key 
@@ -328,18 +336,24 @@ typically with lower and upper limiters. In [MorrisonMilbrandt2015](@cite), the 
     6 & \text{if } μ > 6
 \end{cases}
 ```
-which looks like this:
+This hard-limited form is compared here with the smooth form, `SmoothSlopePowerLaw`, which `ParametersP3` uses by default:
 
 ```@example
 include("plots/P3SlopeParameterizations.jl")
 
 nothing # hide
 ```
-![](P3SlopeParameterizations_power_law.svg)
+![](P3SlopeParameterizations_slope_laws.svg)
 
-With this choice, it appears that some values of $\log(L/N)$ gives rise to multiple solutions for $λ$, as seen in the plot below. Each vertical line shows a different solution for $λ$ for a given value of $\log(L/N)$. The right panel shows the number concentration distribution $N'(D)$ for the different solutions.
+The vertical lines mark the transitions in the hard-limited relation.
+
+For the ice state shown here, the hard limits give three solutions for $\lambda$ at the same $\log(L/N)$.
+The smooth form gives one solution.
+The left panel marks the roots of each shape residual, and the right panel shows the corresponding number distributions $N'(D)$.
 
 ![](P3SlopeParameterizations_multiple_solutions.svg)
+
+The smooth form replaces the hard limits with smooth transitions, because the lower limit can make $\log(L/N)$ nonmonotonic in $\lambda$.
 
 #### $μ$ as a constant
 
@@ -349,7 +363,7 @@ An alternative parameterization for $μ$ is a constant value:
 μ = μ_{const}
 ```
 
-## Terminal Velocity
+## [Terminal Velocity](@id P3-terminal-velocity)
 
 We use the Chen et al. [Chen2022](@cite) velocity parameterization,
   see [here](https://clima.github.io/CloudMicrophysics.jl/dev/TerminalVelocity.html#Chen-et.-al.-2022) for details.
@@ -488,24 +502,12 @@ To continue with the same plotting format as we see above for terminal velocity,
   ``\phi``. This is because we want ``V_{ice}(D_{p})`` (velocity of a mixed-phase particle treating it as an ice particle
   with the same D).
 
-```@example
-nothing
-# include("plots/P3TerminalVelocityPlots_WithFliq.jl")
-# ![](MorrisonandMilbrandtFig2_with_F_liq.svg)
-```
-
 Visualizing mass-weighted terminal velocity as a function of ``F_{liq}``, ``F_{rim}`` with ``ρ_{rim} = 900 kg m^{-3}`` for small,
   medium, and large particles, we have mostly graupel (``D_{gr} < D < D_{cr}``) for small ``D_m`` and mostly partially rimed ice
   (``D > D_{cr}``) for medium and large ``D_m``. Thus, we can attribute the non-monotonic behavior of velocity with ``F_liq`` in the
   medium and large ``D_m`` plots to the variations in ``ϕ`` caused by nonspherical particle shape, whereas the small ``D_m`` plot
   confirms a more monotonic change in ``V_m`` for spherical ice. The ``L`` and ``N`` values used to generate small, medium, and large ``D_{m}``
   are the same as in the plot above.
-
-```@example
-nothing
-# include("plots/P3TerminalVelocity_F_liq_rim.jl")
-# ![](P3TerminalVelocity_F_liq_rim.svg)
-```
 
 When modifying process rates, we now need to consider whether they are concerned with the ice core or the whole particle, 
   in addition to whether they become sources and sinks of different prognostic variables with the inclusion of ``F_{liq}``.
@@ -580,12 +582,12 @@ Ice phase:
     There are numerous differences between the P3 scheme in Morrison & Milbrandt (2015) and the P3 scheme in this package:
     - the maximum freezing rate (wet growth limit) is computed at the particle level, instead of as a bulk process
     - changes in rime volume due to (dry) collisions with cloud and rain are computed at the particle level, with a local rime density evaluated as a function of both the liquid and ice particle diameters
-    - in the wet growth regime, the densification process is computed as a rapidly adjusting bulk process, instead of instantenous particle-level densification. We also scale by the fraction of the mass rate that undergoes wet growth.
+    - in the wet growth regime, the densification process is computed as a rapidly adjusting bulk process, instead of instantenous particle-level densification. We also scale by the fraction of the collected liquid mass that is shed.
 
 
 Below, we describe the different processes in more detail.
 
-### Collisions with liquid droplets (``\textcolor{brown}{\textsf{COL}}``)
+### [Collisions with liquid droplets (``\textcolor{brown}{\textsf{COL}}``)](@id P3-collisions)
 
 At a high level, collisions between liquid droplets (cloud or rain) and ice particles lead to sources and sinks of the form:
 
@@ -672,6 +674,7 @@ The maximum freezing rate is based on Musil (1970) [Musil1970](@cite),
 ```
 where the first term in the numerator is the heat transfer rate to the air surrounding the hailstone,
  and the second term is evaporative cooling. The denominator is the heat that must be dissipated by the hailstone.
+The latent heats ``L_v`` and ``L_f`` are evaluated at the freezing temperature, the temperature of the particle surface.
 
 !!! details "Symbol definitions"
     | Symbol     | Units | Description |
@@ -748,6 +751,17 @@ We assume that all shed droplets are shed at some fixed diameter $D_\text{shd}$.
     (the corresponding number source from shed cloud water is currently
     neglected).
 
+The particles that collect more liquid than they can freeze, ``∂_t\mathcal{M}_\text{col}(D_i) > ∂_t\mathcal{M}_\text{max}(D_i)``, form the wet set, where ``f_\text{frz} < 1``.
+The figure shows the collected mass and the maximum freezing rate of one particle for a rimed ice population at -10 °C with cloud and some rain.
+The smallest particles collect mostly rain, about the same mass whatever their diameter, while their maximum freezing rate falls as the diameter decreases.
+The particles below about 0.1 mm therefore form the wet set and shed, and the larger particles freeze all the liquid they collect.
+
+```@example
+include("plots/P3WetSet.jl")
+nothing # hide
+```
+![](P3WetSet.svg)
+
 Finally, how does this affect the rime volume? 
 
 Collisions with rain, cloud, and shedded wet growth all contribute to the rime volume.
@@ -790,32 +804,25 @@ The change in rime volume at some diameter $D_i$ is then given by
 
 In the wet growth regime, the rime compacts, rapidly relaxing towards the solid bulk ice density of $916.7$ kg/m³.
 Because the P3 scheme only tracks the bulk rime volume $B_\text{rim}$, the densification rate is applied to the bulk rime volume.
-As a measure of the "intensity" of wet growth, we use the fraction of the total liquid collection that occurs by particles in wet growth regime,
+The intensity of wet growth is measured by the fraction of the collected liquid mass that is shed,
 ```math
-\begin{align*}
-f_\text{wet} 
-&= \frac{
-  ∫_0^∞ \mathbb{1}_\text{wet}(D_i) ⋅ ∂_t \mathcal{M}_{col}(D_i) N'(D_i) \mathrm{d}D_i
-}{∫_0^∞ ∂_t \mathcal{M}_\text{col}(D_i) N'(D_i) \mathrm{d}D_i
-}, \\
-&= \frac{
-  ∫_0^∞ \mathbb{1}_\text{wet}(D_i) ⋅ ∂_t \mathcal{M}_{col}(D_i) N'(D_i) \mathrm{d}D_i
-}{\textcolor{brown}{\text{QCFRZ} + \text{QCSHD} + \text{QRFRZ} + \text{QRSHD}}
-},
-\end{align*}
+f_\text{shd}
+= \frac{\textcolor{brown}{\text{QCSHD} + \text{QRSHD}}}
+{\textcolor{brown}{\text{QCFRZ} + \text{QCSHD} + \text{QRFRZ} + \text{QRSHD}}},
 ```
-where $\mathbb{1}_\text{wet}(D_i)$ is the indicator function for particles in the wet growth regime.
+which is zero when all collected liquid freezes, and approaches one when little of it freezes.
+Densification requires freezing, so $f_\text{shd}$ is zero at and above the freezing temperature.
 
 !!! note "Bulk rime volume change from wet growth"
     The bulk rate of rime volume change is then given by
     ```math
     \begin{align*}
     \textcolor{brown}{\text{QIWET}}
-      &= f_\text{wet} ⋅ \frac{1}{τ_\text{wet}} (L_\text{ice} - L_\text{rim})
-      = f_\text{wet} ⋅ \frac{1}{τ_\text{wet}}  L_\text{ice} (1 - F_{rim})
+      &= f_\text{shd} ⋅ \frac{1}{τ_\text{wet}} (L_\text{ice} - L_\text{rim})
+      = f_\text{shd} ⋅ \frac{1}{τ_\text{wet}}  L_\text{ice} (1 - F_{rim})
     \\
     \textcolor{brown}{\text{BIWET}}
-      &= f_\text{wet} ⋅ \frac{1}{τ_\text{wet}} \left(\frac{L_\text{ice}}{ρ^*} - B_\text{rim}\right) \\
+      &= f_\text{shd} ⋅ \frac{1}{τ_\text{wet}} \left(\frac{L_\text{ice}}{ρ^*} - B_\text{rim}\right) \\
     \end{align*}
     ```
 
@@ -847,28 +854,137 @@ include("plots/P3ImmersionFreezing.jl")
 ```
 ![](P3_het_ice_nucleation.svg)
 
-### Melting
+### [Melting](@id P3-melting)
 
-Melting rate is derived in the same way as in the
+Melting follows from heat conduction to the particles, as in the
   [1-moment scheme](https://clima.github.io/CloudMicrophysics.jl/dev/Microphysics1M/#Snow-melt).
-We assume the same ventilation factor parameterization as in [SeifertBeheng2006](@cite),
-  and use the terminal velocity parameterization from [Chen2022](@cite).
-The ``dm/dD`` derivative is computed for each P3 size regime.
-The bulk melting rate is computed by numerically integrating over the particle size distribution:
+A particle of diameter ``D`` and capacitance ``C = D/2`` melts at
 ```math
-\left. \frac{dL}{dt} \right|_\mathrm{melt} 
-= \frac{4 \, K_\mathrm{thermo}}{L_f} \left(T - T_\mathrm{freeze}\right)
-  \int_{0}^{\infty} \frac{dm(D)}{dD} \frac{F_v(D) N(D)}{D} \mathrm{d}D
+\frac{dm}{dt} = \frac{2 \pi D \, K_\mathrm{thermo}}{L_f} \left(T - T_\mathrm{freeze}\right) F_v(D),
 ```
-The melting rate for number concentration is assumed to be proportional to the ice content melting rate.
+with ``L_f`` evaluated at ``T_\mathrm{freeze}``, the temperature of the particle surface,
+  and the ventilation factor of [SeifertBeheng2006](@cite) and the terminal velocity of [Chen2022](@cite).
+Mass and number melt at the same fractional rate, that of the particle size distribution:
 ```math
-\left. \frac{dN}{dt} \right|_\mathrm{melt} = \frac{N}{L} \left. \frac{dL}{dt} \right|_\mathrm{melt}
+f = \frac{\int_{0}^{\infty} \frac{dm}{dt} N(D) \, \mathrm{d}D}{\int_{0}^{\infty} m(D) N(D) \, \mathrm{d}D}, \qquad
+\left. \frac{dL}{dt} \right|_\mathrm{melt} = L f, \qquad
+\left. \frac{dN}{dt} \right|_\mathrm{melt} = N f.
 ```
+The size distribution solves the shape problem, so its mass equals ``L``, and ``L f`` is the integral of ``dm/dt`` over the distribution.
+``N`` is the prognostic ice number, so that a step removes at most the number that exists, while the size distribution has the number bounded by the mean particle mass limits.
+The number tendency of ice self-collection scales with the prognostic number in the same way.
 
 ```@example
 include("plots/P3Melting.jl")
 ```
 ![](P3_ice_melt.svg)
+
+## [Lookup tables](@id P3-lookup-tables)
+
+By default, the P3 scheme evaluates the integrals over the ice size distribution of the sections above by quadrature at every call.
+Lookup tables replace these integrals by interpolation in tables that are computed once.
+[`CloudMicrophysics.P3Scheme.with_tables`](@ref) builds the tables from a complete set of parameters and returns a copy of the parameters that uses them:
+
+```julia
+import CloudMicrophysics.Parameters as CMP
+import CloudMicrophysics.P3Scheme as P3
+
+mp = CMP.Microphysics2MParams(Float32; with_ice = true)
+mp = P3.with_tables(mp)
+```
+
+A [`CloudMicrophysics.P3Scheme.P3State`](@ref) built from the returned parameters reads its integrals from the tables, so the process rates need no other change.
+
+!!! warning "Rebuild the tables after a change of the parameters"
+    The tables hold only for the parameters they were built from.
+    After a change of the mass, area or slope laws, the terminal velocities, or the cloud and rain size distributions, build new tables, see [When to rebuild the tables](@ref P3-tables-rebuild).
+
+!!! note "Tables on a GPU"
+    To build the tables on a GPU and store them there, pass the array type of the device:
+    ```julia
+    mp = P3.with_tables(mp, ClimaComms.array_type(device))
+    ```
+
+### Speed and memory
+
+The speedups below were measured in November 2026 in `Float32` on one thread of an Apple M4 Max, and they vary with the machine and the states.
+With the tables, a call of [`CloudMicrophysics.BulkMicrophysicsTendencies.bulk_microphysics_tendencies`](@ref) for the two-moment scheme with P3 ice is about 80 times faster than with quadrature.
+Each tabulated process is faster by the following factor:
+
+| Process | Speedup |
+|:--------|--------:|
+| construction of a `P3State` | 7 |
+| melting | 10 |
+| mean fall speeds | 50 |
+| self-collection | 2000 |
+| liquid-ice collisions, below freezing | 60 |
+| liquid-ice collisions, above freezing | 500 |
+
+On the default grid, the tables take 104 MB in `Float32` and 208 MB in `Float64`.
+They build in about 70 s on 16 CPU threads, and in a few seconds on a GPU after the first call, which compiles the build.
+The times behind these factors are in [Cost of the tables](@ref P3-cost-of-the-tables).
+
+### What is tabulated
+
+Each table stores an integral over the ice size distribution ``N'(D)`` divided by the ice number ``N``, so that it depends only on the shape of the distribution.
+The shape follows from the slope ``\textcolor{blue}{λ}`` and the rime state ``\textcolor{red}{F_{rim}}`` and ``\textcolor{red}{ρ_{rim}}``, and the fall speeds in the integrands depend on the air density ``\textcolor{orange}{ρ_a}``.
+The collision integrals depend also on the shape of the liquid size distribution, which follows from its mean mass ``\textcolor{green}{\bar{x}_l}`` for cloud or rain, ``l ∈ \{c, r\}``.
+At run time, the values are multiplied by the ice number, and by the liquid number ``N_l`` or mass ``L_l``.
+
+The [size distribution](@ref P3-shape-parameters) has the mean particle mass
+```math
+\frac{L}{N}\big(\textcolor{blue}{λ}, \textcolor{red}{F_{rim}}, \textcolor{red}{ρ_{rim}}\big)
+  = \frac{∫_0^∞ m(D) D^μ e^{-λD} \mathrm{d}D}{∫_0^∞ D^μ e^{-λD} \mathrm{d}D},
+```
+and `P3State` finds the slope ``λ`` of a given ``L/N`` by inverting this table.
+The tables below use ``λ`` rather than ``L/N`` as their coordinate.
+
+The [fall speeds](@ref P3-terminal-velocity) ``V_n`` and ``V_m`` are tabulated as functions of ``\big(\textcolor{blue}{λ}, \textcolor{red}{F_{rim}}, \textcolor{red}{ρ_{rim}}, \textcolor{orange}{ρ_a}\big)``, and so are the moments of [melting](@ref P3-melting) and of self-collection ([`ice_self_collection`](@ref CloudMicrophysics.P3Scheme.ice_self_collection)):
+```math
+\begin{aligned}
+M_v &= \frac{1}{N} ∫_0^∞ D^{3/2} v(D)^{1/2} N'(D) \mathrm{d}D,
+\\
+K_{SLF} &= \frac{1}{N^2} ∫_0^∞ ∫_{D_1}^∞ π (r_1 + r_2)^2 |v(D_1) - v(D_2)| N'(D_2) N'(D_1) \mathrm{d}D_2 \mathrm{d}D_1.
+\end{aligned}
+```
+With the ventilation factor ``F_v(D) = a + b \sqrt{D v(D)}``, the melting integral is ``∫ D F_v(D) N'(D) \mathrm{d}D = a M_1 + b N M_v``, and the first moment ``M_1`` has a closed form.
+The coefficients ``a`` and ``b`` depend on the air, and enter at run time.
+
+The [collisions with liquid droplets](@ref P3-collisions) have tables of the collected number and mass of cloud and rain, which give ``\textcolor{brown}{\text{NCCOL}}``, ``\textcolor{brown}{\text{NRCOL}}`` and the collected mass:
+```math
+\frac{1}{N N_l} ∫_0^∞ ∂_t\mathcal{N}_{\text{col},l}(D) N'(D) \mathrm{d}D,
+\qquad
+\frac{1}{N L_l} ∫_0^∞ ∂_t\mathcal{M}_{\text{col},l}(D) N'(D) \mathrm{d}D,
+```
+as functions of ``\big(\textcolor{blue}{λ}, \textcolor{red}{F_{rim}}, \textcolor{red}{ρ_{rim}}, \textcolor{orange}{ρ_a}, \textcolor{green}{\bar{x}_l}\big)``.
+The local rime density depends on the temperature only through ``R_i ∝ 1 / |T - T_\text{freeze}|``, so a table of the mean local rime density of the collected mass on one more coordinate, the ratio ``\textcolor{purple}{R}`` of the mean impact scale to ``|T - T_\text{freeze}|``, covers every temperature below freezing.
+
+The fraction ``f_\text{frz}`` of the collected mass that freezes depends on the temperature and the air through the maximum freezing rate ``∂_t\mathcal{M}_\text{max}``, so the bulk freezing and shedding rates are not tabulated directly.
+Instead, the tables hold the mass ``∂_t\mathcal{M}_{\text{col},l}(D)`` that one particle collects and the diameter dependence ``D^{3/2} v(D)^{1/2}`` of ``∂_t\mathcal{M}_\text{max}``, and the fractions of the integrals that come from the particles below a diameter.
+At run time, these tables locate the wet set ``W = \{D : ∂_t\mathcal{M}_\text{col}(D) > ∂_t\mathcal{M}_\text{max}(D)\}``, and give the frozen and the shed mass as the integrals over the particles outside and inside ``W``.
+
+The temperature, the air properties other than the air density, and the ice and liquid number and mass enter at run time and are not tabulated.
+The tables are uniform in ``\log λ``, in ``1 - \sqrt{1 - F_{rim}}``, which spreads the rime mass fractions near one, in ``ρ_{rim}``, and in ``\log ρ_a``, ``\log \bar{x}_l`` and ``\log R``, and they are read by multilinear interpolation.
+The grids and the evaluation at run time are described in [the lookup tables of the P3 internals](@ref P3-internals-lookup-tables).
+
+### [When to rebuild the tables](@id P3-tables-rebuild)
+
+The tables are valid only for the parameters they were built from: the mass, area and slope laws, the ice density, the nucleated crystal size, the largest mean particle mass, the terminal velocities, and the cloud and rain size distributions.
+After a change to any of these parameters, build new tables with `with_tables`.
+[`CloudMicrophysics.P3Scheme.tables_are_current`](@ref) returns `false` for parameters that differ from those of the tables, and the constructors of the parameters from a parameter dictionary throw an `ArgumentError` for tables built from other parameters.
+The tables support the cloud size distribution `CloudParticlePDF_SB2006` and the limited rain size distribution `RainParticlePDF_SB2006_limited`, and `with_tables` throws an `ArgumentError` for any other.
+
+### Range and derivatives
+
+The tables cover air densities from 0.005 to 1.7 kg/m³, and the axes of the slope and of the liquid mean mass span the mean-mass limits of the size distributions.
+A coordinate outside a table reads the nearest edge of the table, and the derivative along that coordinate is zero there.
+The slope ``λ`` is held constant under differentiation, as for the quadrature.
+The other coordinates keep their derivatives through the interpolation, so the derivatives with respect to the state follow those of the quadrature to the accuracy of the tables.
+
+### Accuracy
+
+On the default grid, the 99th percentile of the relative error against Gauss-Legendre quadrature of order 16 is at most 3% for most rates, and 6% for the rime volume collected from cloud.
+The script `test/p3_tables_accuracy.jl` measures and prints the errors of every rate, for the default grid or for any other grid.
 
 ## Acknowledgments
 
