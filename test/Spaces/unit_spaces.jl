@@ -134,8 +134,7 @@ on_gpu = ClimaComms.device() isa ClimaComms.CUDADevice
     ᶠspace_no_mask = Spaces.face_space(ᶜspace_no_mask)
     ᶠcoords_no_mask = Fields.coordinate_field(ᶠspace_no_mask)
     c_no_mask = Fields.Field(FT, ᶜspace_no_mask)
-    @test_throws ErrorException("Broadcasted spaces are not the same.") @. c_no_mask +
-                                                                           ᶜf
+    @test_throws DimensionMismatch @. c_no_mask + ᶜf
     ᶠf_no_mask = Fields.Field(FT, ᶠspace_no_mask)
     if ClimaComms.device(ᶜspace_no_mask) isa ClimaComms.CUDADevice
         @. c_no_mask = div(Geometry.WVector(foo(ᶠf_no_mask, ᶠcoords_no_mask)))
@@ -254,6 +253,8 @@ on_gpu || @testset "extruded (2d 1×3) finite difference space" begin
     @test Spaces.column(z, 1, 1, 1) isa Fields.Field
     @test_throws BoundsError Spaces.column(z, 1, 2, 1)
     @test Spaces.column(z, 1, 2) isa Fields.Field
+    @test Spaces.column(c_space, 1, 1, 1) isa Spaces.FiniteDifferenceSpace
+    @test_throws BoundsError Spaces.column(c_space, 1, 2, 1)
 end
 
 @testset "finite difference space" begin
@@ -324,11 +325,6 @@ end
 
 end
 
-# `level` and `column` have generic identity fallbacks, so a slice method that is
-# typed only on host grids does not error on a device-side space: it silently
-# returns the space it was handed. GPU kernels slice device-side spaces (see
-# Operators.reconstruct_placeholder_space), and a whole extruded space standing in
-# for one of its levels indexes a level field as if it spanned every level.
 @testset "slicing device-side extruded spaces" begin
     FT = Float64
     # a space with a 2D horizontal grid, and one with a 1D horizontal grid

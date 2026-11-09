@@ -4,6 +4,276 @@ ClimaCore.jl Release Notes
 main
 -------
 
+- ![][badge-🐛bugfix] `ClimaComms.context` and `ClimaComms.device` no longer
+  throw a `TypeError` for every nonempty `FieldVector`. They return the context
+  and device of the first `Field` at any nesting depth that is not a
+  `PointField`, or else of the first `PointField`, and throw an error for a
+  `FieldVector` without a `Field`.
+
+v1.0.8
+-------
+
+- ![][badge-🐛bugfix] Temporaries in a loop over slices (e.g., `temp = @. 10 * x`
+  or `ᶠtemp = @. ᶠinterp(x)` in the function of `DataLayouts.foreach_column`,
+  including operator matrices, vectors, and their levels) stay on the stack on
+  CPUs, since the functions that allocate them, write them, or pass them to
+  other broadcasts are inlined, and operators that read them copy them into
+  immutable arrays; they used to be allocated on the heap in every column. A
+  temporary that is passed to a function that is not inlined is still allocated
+  on the heap.
+- ![][badge-🐛bugfix] In a GPU loop over columns, whether a temporary is stored
+  in the registers of its column is decided at compile time, so a temporary with
+  a single point that is derived from a level of another temporary no longer
+  makes the kernel allocate (and fail to compile) when that decision was left to
+  run time.
+- ![][badge-🐛bugfix] The scalar blocks of a `FieldMatrix` whose entries are
+  covectors (e.g., the derivative of a scalar tendency with respect to a
+  vertical velocity) are writable views of the matrix, like those of other
+  `Tensor` entries; they used to be read-only copies, so a sparse automatic
+  differentiation Jacobian in ClimaAtmos left them uninitialized. A name of all
+  of the components of a `Tensor` entry (`@name(components.data)`) refers to the
+  entry itself; it used to throw an error.
+- ![][badge-✨feature/enhancement] Added
+  `Meshes.BoundaryLayerHyperbolicTangentStretching(dz_surface, dz_top, z_pbl)`
+  for two-scale hyperbolic tangent stretching that refines the boundary layer
+  with scale height `z_pbl` while matching element spacing `dz_surface` at the
+  surface and `dz_top` at the domain top.
+- ![][badge-🐛bugfix] Stretched `IntervalMesh` constructors now depend on the
+  domain only through its height. `GeneralizedExponentialStretching` and
+  `HyperbolicTangentStretching` solved for the target spacings as fractions of
+  the top coordinate rather than the domain height, and all three stretched
+  rules placed `reverse_mode` faces outside the domain when its top was away
+  from zero. `HyperbolicTangentStretching` and
+  `GeneralizedExponentialStretching` evaluate their stretching functions
+  without cancellation at the end faces, so `FT_solve = Float32` solves
+  converge to their residual tolerances.
+- ![][badge-🐛bugfix] `Meshes.truncate_mesh` fits its mesh to the parent faces
+  between the bottom and top of `trunc_domain`, so it handles a raised bottom,
+  and it accepts `reverse_mode` parents such as land meshes. Stretched meshes
+  solved with an `FT_solve` narrower than the domain's float type end exactly at
+  the domain bounds. `HyperbolicTangentStretching` throws an `ArgumentError` for
+  `dz_surface ≥ (z_max - z_min) / nelems`, and `IntervalMesh(domain, faces)`
+  requires at least two faces.
+- ![][badge-🐛bugfix] `Limiters.QuasiMonotoneLimiter` treats a slab whose
+  clipping moves no tracer mass as converged. A slab with no tracer mass, as is
+  common for precipitation tracers, used to report a relative error of `NaN`
+  and count as unconverged on every call. `apply_limiter!` warns only when some
+  slab fails to converge, and its `min_tracer_mass` statistic is the minimum
+  over slabs.
+- ![][badge-🔥behavioralΔ] The default `tol` of `IntervalMesh` with
+  `GeneralizedExponentialStretching` is
+  `sqrt(eps(FT_solve)) * min(dz_bottom, dz_top)`, which places the end
+  spacings to within ~1e-8 in Float64 and ~2e-4 in Float32. The previous
+  default, an absolute residual tolerance of `1e-3`, left end-spacing errors of
+  1% in shallow soil columns (2 m deep, 20 levels, 5 cm surface spacing). Faces
+  of existing stretched meshes move by at most 0.4 mm in ClimaLand's soil
+  configurations. Passing `tol = 1e-3` reproduces the previous meshes.
+
+v1.0.7
+-------
+
+- ![][badge-✨feature/enhancement] Every argument of `DataLayouts.foreach_slice`
+  and its variants can be a `Tuple` or `NamedTuple` of arguments, or a nested
+  container of them, whose slices are passed to the loop's function in the same
+  container, so that GPU loops can have more than 31 arguments.
+- ![][badge-🐛bugfix] On GPUs, a reduction inside a loop over columns (e.g.,
+  `sum` of a column in `foreach_column`) gives its result to every thread of the
+  column; when the number of levels was not a power of two, some threads got a
+  partial result.
+- ![][badge-🐛bugfix] Inside a GPU loop over columns, a temporary with a single
+  point (e.g., `@. 2 * ᶜbottom` with `ᶜbottom = Fields.level(ᶜtemp, 1)`, or the
+  result of an operator on a column with one cell) is stored by every thread of
+  the column, and every thread's copy is written, so that every thread reads its
+  value; only the thread that owned the point used to write it.
+- ![][badge-🐛bugfix] In a GPU loop over columns, a statement whose operators read
+  a Field at neighboring levels (a Field of the loop or a buffer from `similar`)
+  waits for the statements before it, which may have written the Field
+  pointwise; it used to read the values of other threads without synchronizing.
+  When its result is in registers, the statements after it also wait for its
+  reads, so that they cannot overwrite the Field while other threads read it.
+  Likewise, a statement that reads or writes a single point outside of
+  registers (e.g., a level of a Field of the loop), or whose operators read a
+  Field as a boundary value, waits for the statements before it, and the
+  statements after it wait for it.
+- ![][badge-🐛bugfix] The keys of `Utilities.Cache.OBJECT_CACHE` have one
+  concrete type (`Utilities.Cache.ObjectKey`), so that looking up a memoized
+  object (e.g., the rotation and DSS buffer of `cartesian_tensor_divergence!`,
+  the scratch Fields of the DG Laplacian, or the DG connectivity and staging
+  buffers) never allocates; a lookup with a `Tuple` key allocated when it met a
+  different key with the same short hash.
+- ![][badge-🔥behavioralΔ] `Utilities.Cache.clean_cache!(object)` also releases
+  the objects that were cached for `object` (e.g., the buffers of operators on a
+  grid).
+- ![][badge-🚀performance] On GPUs, masked loops with one thread per slice deal
+  their slices out to the warps of all blocks, so that the active slices of a
+  mask run on every multiprocessor.
+- ![][badge-🚀performance] On GPUs, the point views of a `DataLayout` have `Int`
+  offsets, so that the offsets of the struct field views a kernel takes (e.g.,
+  the entries of a `FieldVector`) fold into the immediate offsets of memory
+  accesses, and the fields of a point share one address, which saves registers
+  in kernels that read many fields.
+- ![][badge-🚀performance] On GPUs, a fused loop whose shared buffers are known
+  and exceed the `:medium` level (see the `shmem` keyword of
+  `DataLayouts.foreach_slice`) gets exactly the shared memory that they need,
+  instead of the `:large` or `:max` level, which leaves the rest of the shared
+  memory of a multiprocessor to more blocks and the L1 cache. The buffers of
+  spectral element operators on lower-precision data are sized for their values
+  in the precision of the space.
+
+v1.0.6
+-------
+
+- ![][badge-🔥behavioralΔ] Unmasked point loops use linear indices on CPUs too
+  whenever every argument supports them, except over layouts whose sizes are
+  all static, with several axes longer than 1 and an axis whose length is not a
+  power of two. With `enumerate = Val(true)`, CPU loops then pass `Int` indices
+  instead of `CartesianIndex`es. On CPUs, fills of layouts with dynamic sizes
+  are up to 8x faster, and simple pointwise broadcasts up to about 4x faster.
+- ![][badge-🚀performance] Masked GPU point loops, limiter kernels and DG
+  kernels use 32-bit index arithmetic, with no 64-bit divisions.
+- ![][badge-🚀performance] Points of CPU `Array`s are read and written at one
+  linear index and stride through `DataLayouts.PointView`, like points of GPU
+  kernel arrays, instead of through `SubArray`s.
+- ![][badge-🚀performance] LLVM assumes that parent arrays have the extents
+  fixed by their layout's type (`DataLayouts.assume_extents`), so CPU
+  broadcasts keep constant strides even when `materialize!` is compiled
+  separately from their construction, and fills of layouts whose sizes are all
+  static are up to 34x faster on CPUs.
+- ![][badge-🚀performance] Operator broadcasts compile with less work: internal
+  rebuilds that are valid by construction do not compile array checks, finite
+  difference applications skip two forwarding layers, stencil point updates are
+  inferred without constant propagation, and MatrixFields band products
+  evaluate their rows directly.
+- ![][badge-🚀performance] `inv` of 2-tensors is inlined, speeding up CPU
+  stencils that convert orthonormal vectors (e.g., `WVector`s).
+- ![][badge-🐛bugfix] GPU kernels support at most 2^31 - 1 elements per array
+  (not 2^32 - 1), the same limit as for slices per `DataLayouts.foreach_slice`:
+  `LLVM.jl` can sign-extend 32-bit indices, so they should not use the sign bit.
+- ![][badge-🚀performance] The CUDA extension stores operator buffers in dynamic
+  shared memory, with co-live buffers at offsets known at compile time and every
+  statement of a `DataLayouts.foreach_slice` body inlined, which makes fused
+  finite difference bodies many times faster. The slice loops take an
+  experimental `shmem` keyword (`Val(:auto)`, `Val(:none)`, `Val(:medium)`,
+  `Val(:large)`, `Val(:max)`, or bytes per thread) that sets the most shared
+  memory each slice is given; buffers that do not fit are recomputed, or the
+  loop is launched at the next level with a warning. At the default
+  `Val(:auto)` level, a broadcast whose operators cache nothing, or a loop body
+  over slices of at most a warp, is launched without shared memory (leaving
+  the memory of a multiprocessor to its L1 cache), and a loop body whose
+  buffers exceed a level is compiled again at the next one. `similar` of a
+  slice inside a loop body allocates a shared buffer that the next statement
+  caching values retires. `Operators.apply_operators!` takes an optional
+  `finish` argument that skips the barrier publishing its result, for fused
+  loops that synchronize once per statement. `Restrict` can read
+  register-resident arguments.
+  The slice loops also take an experimental `maxregs` keyword (`Val(:auto)`,
+  `Val(:none)`, or registers per thread) that caps the registers of a GPU
+  kernel: no cap by default, and a count of the caller's choosing, which can
+  speed up fused column loop bodies but slows down heavier pointwise bodies.
+
+v1.0.5
+-------
+
+- ![][badge-✨feature/enhancement] Finite difference operators are now applied
+  through the same `Operators.apply_operator` API as spectral element operators,
+  one column at a time. A broadcast over several finite difference operators is
+  evaluated in a single pass over each column whenever possible: operators whose
+  arguments contain no other stencils are evaluated wherever they are read, and
+  all other operators are evaluated once per column into registers instead of
+  being recomputed at every point that reads them. Linear operators are applied
+  as products with their band matrices. The CUDA extension no longer contains
+  any finite difference kernels, so GPU evaluation goes through the generic slice
+  loops with static shared memory, and the `CLIMA_FD_MAX_THREADS` environment
+  variable has been removed. Since GPU index arithmetic is 32-bit, GPU kernels
+  support at most 2^32 - 1 elements per array and 2^31 - 1 slices per
+  `DataLayouts.foreach_slice` loop. Internal stencil methods no longer take
+  horizontal indices, and `Operators.getidx`, the three-argument
+  `Geometry.LocalGeometry(space, idx, hidx)`, `Geometry.mul_with_projection` and
+  `Geometry.mul_return_type` have been removed.
+- ![][badge-✨feature/enhancement] `GradientC2F`, `DivergenceC2F`, `CurlC2F` and
+  `UpwindBiasedProductC2F` have their own `SetValue` boundary stencils again,
+  which read the closest center of the argument that the operator already reads,
+  so they no longer materialize lazy arguments (or, on GPUs, read the registers
+  of other threads). `UpwindBiasedProductC2F` with a `SetValue` also accepts lazy
+  velocities and an `Extrapolate` at the other boundary, and
+  `MatrixFields.operator_matrix` supports these operators with a `SetValue`.
+  Their constructors no longer return an `Operators.DirichletOperator` for a
+  `SetValue`, and the `Operators.*_c2f_dirichlet` helpers now apply the
+  `SetValue` stencils. `DirichletOperator` is only kept for backward
+  compatibility, and it can be removed in a future breaking release.
+
+v1.0.4
+-------
+
+- ![][badge-✨feature/enhancement] New `Limiters.PositivityLimiter`, the
+  mean-preserving Zhang-Shu positivity limiter for DG states, applied with
+  `apply_limiter!`. In each element it scales fields toward their means to
+  enforce linear floors (e.g. `floors = (; ρ = 1e-6)`) and, optionally, a
+  concave constraint `g(U, aux) ≥ g_min` (e.g. pressure). Element means are
+  preserved exactly.
+
+- ![][badge-🐛bugfix] The `PlaceholderSpace` infrastructure is replaced by a
+  simpler `PlaceholderGrid`, which only stands in for grids in the arguments of
+  GPU kernels launched from the host and is swapped out at the start of each
+  kernel, so CPU and device-side broadcasts no longer pay for it. This fixes GPU
+  compilation of some finite difference broadcasts (e.g., lazy `FCTZalesak`
+  stencils), and spectral element operators now accept broadcasts that combine
+  extruded fields with level fields (e.g., `@. gradh(field * level_field)`).
+
+- ![][badge-✨feature/enhancement] `Remapping.PressureInterpolator` accepts
+  `method = Remapping.LogLinearInPressure()` to interpolate linearly in log
+  pressure. The default `Remapping.LinearInPressure()` interpolates linearly
+  in pressure.
+
+v1.0.3
+-------
+
+- ![][badge-🐛bugfix] Broadcasts over fields with different spaces now recursively
+  traverse the entire expression tree to find the largest shared space. All input
+  fields are checked against the shared space, with strict compatibility rules
+  defined through `Grids.issubgrid` and `Spaces.issubspace`. Broadcast destinations
+  can have different spaces from the inputs, as long as their sizes are consistent.
+
+v1.0.2
+-------
+
+- ![][badge-✨feature/enhancement] New spectral element operator
+  `Operators.LumpedRestriction(quadrature_style)`: within each element, it
+  restricts a field onto the nodal basis of a lower-degree quadrature with a
+  lumped mass matrix and interpolates the result back to the element's own
+  quadrature points, so the output lives on the input's space and composes in
+  one broadcast with other spectral operators (e.g.
+  `@. lumped(norm_sqr(grad(f)))`). The default `GLL{2}` gives the bilinear
+  corner basis; `GL{1}` gives the element mean. It reproduces constants and
+  conserves every element's `WJ`-weighted integral exactly, and it removes the
+  systematic excess of positive-definite gradient invariants like
+  `norm_sqr(grad(f))` at element edges and corners that comes from the
+  end-of-interval error of polynomial differentiation and that DSS cannot
+  remove.
+
+- ![][badge-🚀performance] Reduced compilation latency (TTFX) across grid/space
+  construction, `DataLayout` and `Field` broadcasts, spectral and finite-difference
+  operators, and `FieldVector` broadcasts by eliminating internal `Core.kwcall`
+  forwarding layers and duplicate `ThisThreadPool` loop specializations in
+  `DataLayouts`, making `is_cpu_linear_compatible` a compile-time check in
+  `FieldVector` `copyto!`, avoiding union-splitting in
+  `ExtrudedFiniteDifferenceGrid`, removing unused `LocalGeometry` constructions in
+  `MatrixFields.multiply_matrix_at_index`, and precompiling single-threaded CPU
+  contexts in `precompile_workload.jl`. The package image also shrinks by roughly
+  20% (322 MB to 257 MB).
+
+- ![][badge-🔥behavioralΔ] The `copyto!` methods for `Field`s and `DataLayout`s,
+  including those for spectral and column-stencil operator broadcasts, take the
+  optional `DataMask` as a third positional argument, `copyto!(dest, bc, mask)`,
+  in place of the `mask` keyword argument. A multi-element tuple broadcast into
+  a `DataLayout` writes only the points that the mask marks as active.
+
+- ![][badge-🐛bugfix] Broadcasting a single-element tuple into a `FieldVector`,
+  as in `Y .= (x,)`, no longer throws a `DimensionMismatch`. This is the form
+  `Base.broadcastable` produces for custom scalar types, so it now behaves the
+  same as `Y .= Ref(x)`. The `FieldVector`'s own `BlockedOneTo` axes were
+  previously passed down to each leaf array unchanged.
+
 v1.0.1
 -------
 

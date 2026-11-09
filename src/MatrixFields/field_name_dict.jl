@@ -15,10 +15,9 @@ entries; the parametric constructor takes `key => entry` pairs. `T` is either
     operation as a `FieldMatrix` (e.g. when both appear in the same broadcast
     expression, or when both are passed to a [`FieldMatrixSolver`](@ref)).
 
-A `FieldNameDict` is "lazy" when its entries include `AbstractBroadcasted`
-objects that become `Field`s on materialization. Internal operations produce
-lazy `FieldNameDict`s so that a chain of operations materializes once, in a
-single call to `materialize!`.
+A `FieldNameDict` is "lazy" when its entries include lazy broadcasts that become
+`Field`s on materialization. Internal operations produce lazy `FieldNameDict`s
+so a chain of operations materializes once, in a single call to `materialize!`.
 
 `dict[key]` returns the entry at `key`, including entries nested inside a
 stored entry (e.g. a component of a vector-valued entry); `dict[set]` returns a
@@ -101,9 +100,8 @@ check_entry(::Type{FieldNamePair}, ::ColumnwiseBandMatrixField) = true
 
 is_field_broadcasted(bc) =
     Base.Broadcast.BroadcastStyle(typeof(bc)) isa Fields.AbstractFieldStyle
-check_entry(::Type{FieldName}, entry::Base.AbstractBroadcasted) =
-    is_field_broadcasted(entry)
-check_entry(::Type{FieldNamePair}, entry::Base.AbstractBroadcasted) =
+check_entry(::Type{FieldName}, entry::Fields.LazyField) = is_field_broadcasted(entry)
+check_entry(::Type{FieldNamePair}, entry::Fields.LazyField) =
     is_field_broadcasted(entry) && eltype(entry) <: BandMatrixRow
 
 is_diagonal_matrix_entry(::ScalingFieldMatrixEntry) = true
@@ -129,17 +127,6 @@ function Base.show(io::IO, dict::FieldNameDict)
             print(io, entry)
         end
     end
-end
-
-function Operators.strip_space(dict::FieldNameDict)
-    vals = unrolled_map(values(dict)) do val
-        if val isa Fields.Field
-            Fields.Field(Fields.field_values(val), Operators.PlaceholderSpace())
-        else
-            val
-        end
-    end
-    FieldNameDict(keys(dict), vals)
 end
 
 function Adapt.adapt_structure(to, dict::FieldNameDict)
@@ -202,6 +189,10 @@ get_internal_entry(entry::DiagonalMatrixRow, name_pair::FieldNamePair) =
     DiagonalMatrixRow(get_internal_entry(scaling_value(entry), name_pair))
 get_internal_entry(entry, name_pair) =
     get_internal_entry(entry, name_pair, name_pair)
+
+# The name of all of the components of a Tensor refers to the Tensor itself.
+tensor_name(name) = name == @name(components.data) ? @name() : name
+
 # get_internal_entry to be used on the values held inside a `BandMatrixRow`
 function get_internal_entry(
     entry::T,
@@ -210,6 +201,8 @@ function get_internal_entry(
 ) where {T}
     if name_pair == (@name(), @name())
         return entry
+    elseif T <: Geometry.Tensor && any(==(@name(components.data)), name_pair)
+        return get_internal_entry(entry, map(tensor_name, name_pair), full_key)
     elseif T <: Geometry.Tensor{2} &&
            all(n -> is_child_name(n, @name(components.data)), name_pair)
         # two indices needed to index into a 2d tensor (one can be Colon())
@@ -418,6 +411,18 @@ function field_offset_and_type(
     if name_pair == (@name(), @name()) # recursion base case
         # if S <: T, then its possible to construct a strided view in the indexing function
         return (0, S, S <: T ? Val(:view) : Val(:view_of_blocks))
+    elseif S <: Geometry.Tensor && any(==(@name(components.data)), name_pair)
+        return field_offset_and_type(map(tensor_name, name_pair), T, S, full_key)
+    elseif S <: Geometry.Covector &&
+           name_pair[1] == @name() &&
+           is_child_name(name_pair[2], @name(components.data))
+        # The single row of a Covector is unnamed, so index it like row 1 of a Tensor{2}.
+        return field_offset_and_type(
+            (@name(components.data.:(1)), name_pair[2]),
+            T,
+            S,
+            full_key,
+        )
     elseif S <: Geometry.Tensor{2} &&
            any(n -> is_child_name(n, @name(components.data)), name_pair) # special case to calculate index
         all(n -> is_child_name(n, @name(components.data)), name_pair) ||
@@ -673,11 +678,10 @@ end
 """
     is_lazy(dict)
 
-Return whether the `FieldNameDict` `dict` has any `AbstractBroadcasted`
-entries, i.e. entries that have not been materialized.
+Return whether the `FieldNameDict` `dict` has any `LazyField` entries, i.e.
+entries that have not been materialized.
 """
-is_lazy(dict) =
-    unrolled_any(Base.Fix2(isa, Base.AbstractBroadcasted), values(dict))
+is_lazy(dict) = unrolled_any(Base.Fix2(isa, Fields.LazyField), values(dict))
 
 """
     lazy_main_diagonal(matrix)
@@ -1098,10 +1102,9 @@ function summary_string(field::Fields.Field, indent_level)
         string(typeof(axes(field).staggering).name.name) : "Single Level"
     return "$("    "^indent_level)Field{$(eltype(field)), $staggering_string}"
 end
-function summary_string(bc::Base.AbstractBroadcasted, indent_level)
-    func = bc isa Operators.OperatorBroadcasted ? bc.op : bc.f
+function summary_string(bc::Fields.LazyField, indent_level)
     arg_strings = map(arg -> summary_string(arg, indent_level + 1), bc.args)
     tab = "    "^indent_level
-    return "$(tab)Broadcasted{$func}(\n$(join(arg_strings, ",\n")),\n$tab)"
+    return "$(tab)Broadcasted{$bc.f}(\n$(join(arg_strings, ",\n")),\n$tab)"
 end
 =#
