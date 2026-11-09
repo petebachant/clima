@@ -115,14 +115,23 @@ end
 end
 
 """
-    INP_limiter(tendency, tps, T)
+    INP_limiter(tendency, tps, T; q_lcl = 0, T_dep_max = T_freeze, T_vap_nuc = T_dep_max)
 
-Returns `true` when ice deposition should be suppressed:
-positive tendency (deposition) at T > T_freeze (no INPs available).
+Returns `true` when ice deposition should be suppressed: positive tendency (deposition)
+at `T > T_dep_max`, or at `T > T_vap_nuc` where there is no cloud liquid (`q_lcl` [kg/kg] at most
+the specific humidity minimum of `tps`).
 """
-@inline function INP_limiter(tendency, tps, T)
-    return T > TDI.T_freeze(tps) && tendency > zero(tendency)
+@inline function INP_limiter(tendency, tps, T; q_lcl = zero(T), T_dep_max = TDI.T_freeze(tps), T_vap_nuc = T_dep_max)
+    no_liquid = q_lcl <= TDI.TD.Parameters.q_min(tps)
+    return ((T > T_dep_max) | ((T > T_vap_nuc) & no_liquid)) & (tendency > zero(tendency))
 end
+
+# Deposition temperature limits of the cloud ice formation `opt`, as keyword arguments
+@inline function _ice_deposition_limits(opt::CMP.TemperatureDependentIceNumber, mp)
+    fit = CMP.process_params(mp, opt)
+    return (; fit.T_dep_max, fit.T_vap_nuc)
+end
+@inline _ice_deposition_limits(opt, mp) = (;)
 
 """
     homogeneous_limiter(tendency, T, T_hom)
@@ -184,12 +193,11 @@ Morrison & Milbrandt (2015), https://doi.org/10.1175/JAS-D-14-0065.1.
 - Cloud condensate tendency [kg/kg/s]
 """
 @inline conv_q_vap_to_q_lcl(::Nothing, mp, tps, micro, thermo) = zero(thermo.T)
-@inline conv_q_vap_to_q_lcl(
-    ::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo) =
-    _conv_q_vap_to_q_lcl_const(
-        mp.process_params.cloud_liquid_formation.τ_relax,
-        tps, micro, thermo;
-        T_hom = mp.process_params.cloud_liquid_formation.T_hom)
+@inline function conv_q_vap_to_q_lcl(
+    opt::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo)
+    (; τ_relax, T_hom) = CMP.process_params(mp, opt)
+    return _conv_q_vap_to_q_lcl_const(τ_relax, tps, micro, thermo; T_hom)
+end
 
 # Kernel for `conv_q_vap_to_q_lcl` with a constant relaxation timescale `τ`.
 @inline function _conv_q_vap_to_q_lcl_const(τ, tps::TDI.PS, micro, thermo; T_hom = typeof(τ)(-Inf))
@@ -244,10 +252,11 @@ Morrison & Milbrandt (2015), https://doi.org/10.1175/JAS-D-14-0065.1.
 - Cloud condensate tendency [kg/kg/s]
 """
 @inline conv_q_vap_to_q_icl(::Nothing, mp, tps, micro, thermo) = zero(thermo.T)
-@inline conv_q_vap_to_q_icl(
-    ::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo) =
-    _conv_q_vap_to_q_icl_const(
-        mp.process_params.cloud_ice_formation.τ_relax, tps, micro, thermo)
+@inline function conv_q_vap_to_q_icl(
+    opt::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo)
+    (; τ_relax) = CMP.process_params(mp, opt)
+    return _conv_q_vap_to_q_icl_const(τ_relax, tps, micro, thermo)
+end
 @inline function conv_q_vap_to_q_icl(
     ::CMP.PrescribedIceNumber, mp, tps::TDI.PS, micro, thermo)
     (; q_icl) = micro
@@ -256,16 +265,16 @@ Morrison & Milbrandt (2015), https://doi.org/10.1175/JAS-D-14-0065.1.
     return _conv_q_vap_to_q_icl_const(τ, tps, micro, thermo)
 end
 @inline function conv_q_vap_to_q_icl(
-    ::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo)
+    opt::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo)
     (; q_icl) = micro
     (; ρ, T) = thermo
-    fit = mp.process_params.cloud_ice_formation
+    fit = CMP.process_params(mp, opt)
     τ = τ_relax(mp.cloud.ice, mp.air_properties, fit, q_icl, T, ρ)
-    return _conv_q_vap_to_q_icl_const(τ, tps, micro, thermo)
+    return _conv_q_vap_to_q_icl_const(τ, tps, micro, thermo; _ice_deposition_limits(opt, mp)...)
 end
 
 # Kernel for `conv_q_vap_to_q_icl` with a constant relaxation timescale `τ`
-@inline function _conv_q_vap_to_q_icl_const(τ, tps::TDI.PS, micro, thermo)
+@inline function _conv_q_vap_to_q_icl_const(τ, tps::TDI.PS, micro, thermo; limits...)
     (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
     (; ρ, T) = thermo
 
@@ -290,14 +299,14 @@ end
         -min(-sat_excess, Γᵢ * max(0, q_icl)) / timescale,
         sat_excess / timescale,
     )
-    limiter = INP_limiter(tendency, tps, T)
+    limiter = INP_limiter(tendency, tps, T; q_lcl, limits...)
     return ifelse(limiter, zero(tendency), tendency)
 end
 @inline function conv_q_vap_to_q_icl(
-    ::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
+    opt::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
     (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
     (; ρ, T) = thermo
-    pp = mp.process_params.cloud_ice_formation
+    pp = CMP.process_params(mp, opt)
     τ_sub = pp.τ_relax
     τ_dep = τ_relax(mp.cloud.ice, mp.air_properties, pp.frostenberg, q_icl, T, ρ)
 
@@ -349,8 +358,8 @@ concentration (τ of a few seconds).
 - `thermo`: thermodynamic state `(; ρ, T)`
 """
 @inline τ_vap_to_q_lcl(::Nothing, mp, tps::TDI.PS, micro, thermo) = typeof(thermo.T)(Inf)
-@inline τ_vap_to_q_lcl(::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo) =
-    mp.process_params.cloud_liquid_formation.τ_relax
+@inline τ_vap_to_q_lcl(opt::CMP.CloudLiquidFormation, mp, tps::TDI.PS, micro, thermo) =
+    CMP.process_params(mp, opt).τ_relax
 
 """
     τ_vap_to_q_icl(opt, mp, tps, micro, thermo)
@@ -371,19 +380,23 @@ for how the timescale is used.
 - `thermo`: thermodynamic state `(; ρ, T)`
 """
 @inline τ_vap_to_q_icl(::Nothing, mp, tps::TDI.PS, micro, thermo) = typeof(thermo.T)(Inf)
-@inline τ_vap_to_q_icl(::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo) =
-    mp.process_params.cloud_ice_formation.τ_relax
+@inline τ_vap_to_q_icl(opt::CMP.ConstantTimescale, mp, tps::TDI.PS, micro, thermo) =
+    CMP.process_params(mp, opt).τ_relax
 @inline τ_vap_to_q_icl(::CMP.PrescribedIceNumber, mp, tps::TDI.PS, micro, thermo) =
     τ_relax(mp.cloud.ice, mp.air_properties, micro.q_icl, thermo.ρ)
-@inline τ_vap_to_q_icl(::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo) =
-    τ_relax(
-        mp.cloud.ice, mp.air_properties, mp.process_params.cloud_ice_formation,
-        micro.q_icl, thermo.T, thermo.ρ,
-    )
-@inline function τ_vap_to_q_icl(::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
+@inline function τ_vap_to_q_icl(opt::CMP.TemperatureDependentIceNumber, mp, tps::TDI.PS, micro, thermo)
     (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
     (; ρ, T) = thermo
-    pp = mp.process_params.cloud_ice_formation
+    τ = τ_relax(mp.cloud.ice, mp.air_properties, CMP.process_params(mp, opt), q_icl, T, ρ)
+    sat_excess =
+        TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno) - TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
+    blocked = INP_limiter(sat_excess, tps, T; q_lcl, _ice_deposition_limits(opt, mp)...)
+    return ifelse(blocked, oftype(τ, Inf), τ)
+end
+@inline function τ_vap_to_q_icl(opt::CMP.TemperatureDependent, mp, tps::TDI.PS, micro, thermo)
+    (; q_tot, q_lcl, q_icl, q_rai, q_sno) = micro
+    (; ρ, T) = thermo
+    pp = CMP.process_params(mp, opt)
     qᵥ = TDI.q_vap(q_tot, q_lcl + q_rai, q_icl + q_sno)
     qᵥ_sat_ice = TDI.saturation_vapor_specific_content_over_ice(tps, T, ρ)
     τ_dep = τ_relax(mp.cloud.ice, mp.air_properties, pp.frostenberg, q_icl, T, ρ)
@@ -425,9 +438,10 @@ function terminal_velocity(
     v_term = CO.particle_terminal_velocity(vel, ρₐ)
     # `clamp_to_nonneg` is domain sanitization for the cbrt below (keeps the discarded
     # ifelse branch finite); the physical threshold is the `q > ϵ_numerics` gate.
+    safe_ρ = UT.clamp_to_nonneg(ρₐ)
     safe_q = UT.clamp_to_nonneg(q)
     # Mean volume diameter from assumed number concentration
-    D = cbrt(FT(6 / π) * ρₐ * safe_q / N_0 / ρw)
+    D = cbrt(FT(6 / π) * safe_ρ * safe_q / N_0 / ρw)
     fall_w = v_term(D)
     return ifelse(q > UT.ϵ_numerics(FT), fall_w, zero(FT))
 end
@@ -441,9 +455,10 @@ function terminal_velocity(
     v_term = CO.particle_terminal_velocity(vel, ρₐ, ρᵢ)
     # `clamp_to_nonneg` is domain sanitization for the cbrt below (keeps the discarded
     # ifelse branch finite); the physical threshold is the `q > ϵ_numerics` gate.
+    safe_ρ = UT.clamp_to_nonneg(ρₐ)
     safe_q = UT.clamp_to_nonneg(q)
     # Mean volume diameter from assumed number concentration
-    D = cbrt(FT(6 / π) * ρₐ * safe_q / N_0 / ρᵢ)
+    D = cbrt(FT(6 / π) * safe_ρ * safe_q / N_0 / ρᵢ)
     fall_w = max(FT(0), v_term(D))
     return ifelse(q > UT.ϵ_numerics(FT), fall_w, zero(FT))
 end

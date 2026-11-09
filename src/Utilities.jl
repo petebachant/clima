@@ -10,9 +10,10 @@ module Utilities
 import UnrolledUtilities as UU
 import SpecialFunctions as SF
 import ForwardDiff as FD
+import RootSolvers as RS
 
-export clamp_to_nonneg, ϵ_numerics, ϵ_numerics_2M_M, ϵ_numerics_2M_N, ϵ_numerics_P3_B
-export promote_typeof
+export clamp_to_nonneg, ϵ_numerics
+export promote_typeof, return_type_of, find_zeros, scan_zeros
 export fac
 
 """
@@ -25,6 +26,108 @@ their types. Useful to guarantee a single, concrete return type for functions
 that accept mixed input types (e.g. `Float32` and `ForwardDiff.Dual{Float32}`)
 """
 @inline promote_typeof(args...) = Base.promote_typeof(args...)
+
+"""
+    return_type_of(f, args...)
+
+Return the type that `f(args...)` returns, as inferred by the compiler, without calling `f`.
+
+The type is concrete for a type-stable `f`, which every integrand must be.
+"""
+@inline return_type_of(f::F, args...) where {F} = Core.Compiler.return_type(f, typeof(args))
+
+"""
+    find_zeros(f, method, x_lo, x_hi, ::Val{n_scan}, ::Val{max_roots}, tol, maxiters)
+
+Find up to `max_roots` zeros of `f` in `[x_lo, x_hi]`, in ascending order.
+
+`f` is evaluated at `n_scan + 1` evenly spaced points, and the first `max_roots` sign changes between
+adjacent points are recorded. After the scan, each recorded sign change is refined by
+`RootSolvers.find_zero` with the two-point `method`, which starts from the residuals of the scan. A
+scan point at which `f` is zero is a zero. Two zeros between adjacent points are missed.
+
+# Arguments
+- `f`: function of one argument
+- `method`: two-point method type of RootSolvers, e.g. `RegulaFalsiMethod`
+- `x_lo`, `x_hi`: bounds of the search
+- `n_scan`: number of scan intervals
+- `max_roots`: largest number of zeros returned
+- `tol`, `maxiters`: tolerance and iteration limit of `RootSolvers.find_zero`
+
+# Returns
+- `(; roots, n_found, f_lo)`: an `NTuple{max_roots}` of the zeros, with `x_lo` in place of each zero not
+  found, the number of zeros found, and `f(x_lo)`
+"""
+function find_zeros(
+    f::F, ::Type{M}, x_lo, x_hi, n_scan::Val, max_roots::Val, tol, maxiters,
+) where {F, M}
+    no_summand = x -> (f(x), nothing)
+    (; roots, n_found, f_lo) =
+        scan_zeros(no_summand, f, M, x_lo, x_hi, n_scan, max_roots, tol, maxiters, (i, Δx) -> nothing)
+    return (; roots, n_found, f_lo)
+end
+
+"""
+    scan_zeros(g, f, method, x_lo, x_hi, ::Val{n_scan}, ::Val{max_roots}, tol, maxiters, weight)
+
+Find up to `max_roots` zeros of `f` in `[x_lo, x_hi]` as [`find_zeros`](@ref) does, and compute a weighted sum of a second function `h` over the scan points.
+
+At each of the `n_scan + 1` scan points `x`, `g(x)` returns `(f(x), h(x))`, so that one evaluation
+gives the residual of the scan and the summand. The first element of `g(x)` must equal `f(x)`, and
+`f` alone refines the sign changes. The sum is `Σᵢ weight(i, Δx) h(x_lo + i Δx)` over the scan
+points `i = 0, …, n_scan` of spacing `Δx`, and it is `nothing` if `h` returns `nothing`.
+
+# Returns
+- `(; roots, n_found, f_lo, total)`: as [`find_zeros`](@ref), and the weighted sum `total` of `h`
+"""
+@inline function scan_zeros(
+    g::G, f::F, ::Type{M}, x_lo, x_hi, ::Val{n_scan}, ::Val{max_roots}, tol, maxiters, weight::W,
+) where {G, F, M, n_scan, max_roots, W}
+    Δx = (x_hi - x_lo) / n_scan
+    (f_lo, summand) = g(x_lo)
+    total = _weighted(weight(0, Δx), summand)
+    # Each bracket is `(x_a, x_b, f(x_a), f(x_b))`, with `x_a = x_b = x_lo` for a zero not found
+    brackets = ntuple(_ -> (x_lo, x_lo, f_lo, f_lo), Val(max_roots))
+    exact = ntuple(_ -> false, Val(max_roots))
+    n_found = 0
+    x_prev, y_prev = x_lo, f_lo
+    for i in 1:n_scan
+        x = x_lo + i * Δx
+        (y, summand) = g(x)
+        total = _add(total, _weighted(weight(i, Δx), summand))
+        record = (iszero(y) | (y * y_prev < 0)) & (n_found < max_roots)
+        # No entry has the index 0, so an unrecorded point changes no bracket
+        k = ifelse(record, n_found + 1, 0)
+        brackets = _replace_entry(brackets, (x_prev, x, y_prev, y), k)
+        exact = _replace_entry(exact, iszero(y), k)
+        n_found += record
+        x_prev, y_prev = x, y
+    end
+    found = ntuple(identity, Val(max_roots)) .≤ n_found
+    roots = map(
+        @inline((bracket, at_point, is_found) -> _refined_zero(f, M, bracket, at_point, is_found, x_lo, tol, maxiters)),
+        brackets,
+        exact,
+        found,
+    )
+    return (; roots, n_found, f_lo, total)
+end
+
+@inline function _refined_zero(
+    f::F, ::Type{M}, (x_a, x_b, y_a, y_b), at_point, is_found, x_lo, tol, maxiters,
+) where {F, M}
+    is_found || return x_lo
+    at_point && return x_b
+    return @inline(RS.find_zero(f, M, x_a, x_b, y_a, y_b, RS.CompactSolution(), tol, maxiters)).root
+end
+
+@inline _weighted(w, summand) = w * summand
+@inline _weighted(w, ::Nothing) = nothing
+@inline _add(a, b) = a + b
+@inline _add(::Nothing, ::Nothing) = nothing
+
+# The tuple `t` with entry `i` replaced by `v`, without the bounds check of `Base.setindex`
+@inline _replace_entry(t::NTuple{N}, v, i) where {N} = ntuple(k -> ifelse(k == i, v, t[k]), Val(N))
 export unrolled_logsumexp
 export rime_mass_fraction, rime_density
 export guarded_quotient, nearest_admissible_b
@@ -214,7 +317,7 @@ end
     end
 
     # Initial guess
-    if p < 0.5
+    if p < FT(0.5)
         x = FT((p * SF.gamma(a + 1))^(1 / a))
     else
         x = FT(a - log(q))
@@ -264,22 +367,16 @@ end
 #    `ifelse(cond, rate, 0)` cannot produce Inf/NaN, which matters for
 #    ForwardDiff gradients). They do not decide whether a tracer is "present".
 #
-# 2. Physical thresholds: the `ϵ_numerics*` functions below, used as `q > ϵ`
-#    gates that treat a tracer as absent. There is exactly one threshold per
-#    moment class, always called from here so the value has a single source of
-#    truth (no bare literals/zeros scattered across the schemes).
+# 2. Physical thresholds: `ϵ_numerics` below, used as `q > ϵ` gates that treat
+#    a tracer as absent. There is exactly one threshold, always called from here
+#    so the value has a single source of truth (no bare literals/zeros scattered
+#    across the schemes).
 #
-# The threshold values intentionally differ by moment class:
-#   - `ϵ_numerics`      = cbrt(floatmin(FT))  (≈3.8e-13 @ f32) - a floatmin-derived
-#     floor, sized so cbrt/pow arguments stay above `floatmin` (its cube is
-#     `floatmin`). Used by the 1-moment scheme.
-#   - `ϵ_numerics_2M_*` = eps(FT)             (≈1.2e-7  @ f32) - a relative round-off
-#     threshold for the 2-moment mass/number variables.
-#   - `ϵ_numerics_P3_B` = eps(FT)                                - same, for the P3
-#     rime-volume (B_rim) variable.
-# The ~6 orders of magnitude gap reflects the different roles (underflow-avoiding
-# floor vs. relative-precision threshold). If a scheme needs a different value,
-# change it here rather than at the call sites.
+# The mass and number thresholds of the 1-moment and 2-moment schemes are the same
+# value, `cbrt(floatmin(FT))` (≈2.3e-13 @ f32, ≈2.8e-103 @ f64). Its cube is
+# `floatmin`, so products of up to three small contents in the rate expressions
+# stay normal floats. It is many orders of magnitude below any physically relevant
+# content in both precisions, so the rates do not depend on the precision.
 # ---------------------------------------------------------------------------
 
 """
@@ -289,7 +386,7 @@ Clamp values to be non-negative. Compatible with dual numbers (AD) and GPUs.
 
 This is **domain sanitization**, not a physical threshold: use it to keep an
 argument of `cbrt`/`log`/`^` finite, not to decide whether a tracer is present
-(use the `ϵ_numerics*` gates for that).
+(use the [`ϵ_numerics`](@ref) gate for that).
 
 # Arguments
 - `x`: value to clamp
@@ -315,37 +412,20 @@ end
     ϵ_numerics(FT)
     ϵ_numerics(x::Real)
 
-Physical smallness threshold for the **1-moment** scheme: below this a tracer is
-treated as absent. Returns `cbrt(floatmin(float(FT)))`, a floatmin-derived floor
-that also keeps `cbrt`/`^` arguments above `floatmin`. The `float` guard maps
-integer types to their float counterpart, so gates accept integer inputs. The
-value method keys the threshold to the argument's own type, `ϵ_numerics(q)`.
-See the note above for how this relates to the 2-moment/P3 thresholds.
+Physical smallness threshold for the **1-moment** and **2-moment** schemes.
+
+Below this threshold a tracer is treated as absent.
+
+Returns `cbrt(floatmin(float(FT)))`, a floatmin-derived floor
+that also keeps `cbrt`/`^` arguments above `floatmin`.
+
+Can be called in three ways:
+- With a floating-point type (e.g., `Float32` or `Float64`), returning the threshold for that type.
+- With a concrete floating-point value, returning the threshold for its type.
+- With an integer type or value, returning the threshold for its float counterpart (e.g., `Int32` → `Float32`).
 """
 @inline ϵ_numerics(FT) = cbrt(floatmin(float(FT)))
 @inline ϵ_numerics(x::Real) = ϵ_numerics(typeof(x))
-
-"""
-    ϵ_numerics_2M_M(FT)
-
-Physical smallness threshold for **2-moment mass** variables (`eps(FT)`).
-"""
-@inline ϵ_numerics_2M_M(FT) = eps(FT)
-
-"""
-    ϵ_numerics_2M_N(FT)
-
-Physical smallness threshold for **2-moment number** variables (`eps(FT)`).
-"""
-@inline ϵ_numerics_2M_N(FT) = eps(FT)
-
-"""
-    ϵ_numerics_P3_B(FT)
-
-Physical smallness threshold for the **P3** rime-volume variable `B_rim`
-(`eps(FT)`).
-"""
-@inline ϵ_numerics_P3_B(FT) = eps(FT)
 
 """
     unrolled_logsumexp(x)
@@ -493,6 +573,7 @@ end
 
 """
     nearest_admissible_b(q, b_trial, ρ_min, ρ_max)
+    nearest_admissible_b(q, b_trial, (ρ_min, ρ_max))
 
 The value nearest `b_trial` whose ratio `q / b` lies in `[ρ_min, ρ_max]`, for a nonnegative `q`. 
 
@@ -508,5 +589,7 @@ Clamping the two independently can leave a positive `q` whose `b` has clipped to
 @inline function nearest_admissible_b(q, b_trial, ρ_min, ρ_max)
     return ifelse(q > 0, clamp(b_trial, q / ρ_max, q / ρ_min), zero(q))
 end
+@inline nearest_admissible_b(q, b_trial, (ρ_min, ρ_max)) =
+    nearest_admissible_b(q, b_trial, ρ_min, ρ_max)
 
 end # module

@@ -4,6 +4,7 @@ ENV["GKSwstype"] = "nul"
 using CloudMicrophysics, Documenter
 using DocumenterCitations
 using Literate
+using Random: RandomDevice
 
 # Bibliography
 bib = CitationBibliography(joinpath(@__DIR__, "bibliography.bib"))
@@ -41,11 +42,15 @@ for Guide in UnliteratedGuides
     )
 end
 
+# Parameter reference table, generated from the parameter constructors
+include("generate_parameters_reference.jl")
+
 Parameterizations = [
     "0-moment precipitation microphysics" => "Microphysics0M.md",
     "1-moment precipitation microphysics" => "Microphysics1M.md",
     "2-moment precipitation microphysics" => "Microphysics2M.md",
     "P3 Scheme" => "P3Scheme.md",
+    "P3 internals" => "P3Internals.md",
     "Terminal Velocity" => "TerminalVelocity.md",
     "Non-equilibrium cloud formation" => "MicrophysicsNonEq.md",
     "Smooth transition at thresholds" => "ThresholdsTransition.md",
@@ -73,6 +78,10 @@ pages = Any[
     "Parameterizations" => Parameterizations,
     "Bulk tendencies" => "BulkTendencies.md",
     "Thermodynamics interface" => "Thermodynamics.md",
+    "Parameters interface" => [
+        "Overview" => "Parameters.md",
+        "Parameter reference" => "generated/ParametersReference.md",
+    ],
     "How to guides" => Guides,
     "Models" => Models,
     "API" => "API.md",
@@ -94,7 +103,7 @@ format = Documenter.HTML(
     prettyurls = get(ENV, "CI", nothing) == "true",
     mathengine = mathengine,
     collapselevel = 1,
-    size_threshold_ignore = ["API.md"],
+    size_threshold_ignore = ["API.md", "generated/ParametersReference.md"],
 )
 
 makedocs(
@@ -106,7 +115,7 @@ makedocs(
     plugins = [bib, links],
 )
 
-deploydocs(
+deploy() = deploydocs(
     repo = "github.com/CliMA/CloudMicrophysics.jl.git",
     target = "build",
     push_preview = all(
@@ -116,3 +125,4 @@ deploydocs(
     devbranch = "main",
     forcepush = true,
 )
+retry(deploy; delays = rand(RandomDevice(), 10:30, 9))()

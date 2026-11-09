@@ -134,6 +134,30 @@ function test_microphysics_noneq(FT)
         qᵥ_si_w = TDI.p2q(tps, T_warm, ρ, TDI.saturation_vapor_pressure_over_ice(tps, T_warm))
         TT.@test _conv(FT(1.5) * qᵥ_si_w, FT(0), ρ, T_warm) == FT(0)
         TT.@test _conv(FT(0.5) * qᵥ_si_w, FT(1e-3), ρ, T_warm) < FT(0)
+
+        # deposition temperature limits: none above T_dep_max, and above T_vap_nuc only with cloud liquid
+        fit_lim = CMP.IceNumberTemperatureFit(;
+            fit.N_ref, fit.a, fit.b, fit.N_max, fit.T_freeze, T_dep_max = FT(268.15), T_vap_nuc = FT(248.15),
+        )
+        mp_lim = (; cloud = (; ice), air_properties = aps, process_params = (; cloud_ice_formation = fit_lim))
+        function _conv_lim(mp_, T_, RHi, q_lcl)
+            q_icl = FT(1e-5)
+            q_si = TDI.p2q(tps, T_, ρ, TDI.saturation_vapor_pressure_over_ice(tps, T_))
+            micro = (; q_tot = RHi * q_si + q_lcl + q_icl, q_lcl, q_icl, q_rai = FT(0), q_sno = FT(0))
+            return CMNe.conv_q_vap_to_q_icl(opt, mp_, tps, micro, (; ρ, T = T_))
+        end
+        q_lcl = FT(1e-4)
+        TT.@test _conv_lim(mp_lim, FT(270), FT(1.05), q_lcl) == FT(0)
+        TT.@test _conv_lim(mp_lim, FT(260), FT(1.05), FT(0)) == FT(0)
+        TT.@test _conv_lim(mp_lim, FT(260), FT(1.05), q_lcl) == _conv_lim(mp_fit, FT(260), FT(1.05), q_lcl) > FT(0)
+        TT.@test _conv_lim(mp_lim, FT(240), FT(1.05), FT(0)) == _conv_lim(mp_fit, FT(240), FT(1.05), FT(0)) > FT(0)
+        TT.@test _conv_lim(mp_lim, FT(260), FT(0.9), FT(0)) == _conv_lim(mp_fit, FT(260), FT(0.9), FT(0)) < FT(0)
+        TT.@test _conv_lim(mp_fit, FT(260), FT(1.05), FT(0)) > FT(0)
+        TT.@test _conv_lim(mp_lim, FT(260), FT(1.05), FT(5e-11)) == FT(0)   # liquid below q_min counts as none
+        # the timescale accessor reports a blocked deposition as no relaxation
+        micro_lim = (; q_tot = FT(1.05) * qᵥ_si, q_lcl = FT(0), q_icl = FT(1e-5), q_rai = FT(0), q_sno = FT(0))
+        TT.@test CMNe.τ_vap_to_q_icl(opt, mp_lim, tps, micro_lim, (; ρ, T)) == FT(Inf)
+        TT.@test isfinite(CMNe.τ_vap_to_q_icl(opt, mp_fit, tps, micro_lim, (; ρ, T)))
     end
 
     TT.@testset "CondEvap_DepSub" begin
@@ -288,6 +312,52 @@ function test_microphysics_noneq(FT)
         rate_a = _conv_pin(FT(1.5 * qᵥ_si), FT(0), FT(1e-5), ρ, T)
         rate_b = _conv_pin(FT(1.5 * qᵥ_si), FT(0), FT(1e-3), ρ, T)
         TT.@test rate_a != rate_b  # timescale changes with q_icl
+    end
+
+    TT.@testset "OptionParamsMismatch" begin
+        # passing an option inconsistent with how `mp` was built must fail
+        # with an actionable error, not an obscure field-access failure (or a
+        # silent success: TemperatureDependent params also carry `τ_relax`)
+        mp = CMP.Microphysics1MParams(FT)
+        mpTD = CMP.Microphysics1MParams(FT; cloud_ice_formation = CMP.TemperatureDependent())
+        mpPIN = CMP.Microphysics1MParams(FT; cloud_ice_formation = CMP.PrescribedIceNumber())
+        mpTDIN = CMP.Microphysics1MParams(FT; cloud_ice_formation = CMP.TemperatureDependentIceNumber())
+        mpNoLiq = CMP.Microphysics1MParams(FT; cloud_liquid_formation = nothing)
+        micro = (; q_tot = FT(1e-2), q_lcl = FT(1e-3), q_icl = FT(1e-3), q_rai = FT(0), q_sno = FT(0))
+        thermo = (; ρ = FT(0.8), T = FT(263))
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(CMP.ConstantTimescale(), mpTD, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(CMP.ConstantTimescale(), mpPIN, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(CMP.TemperatureDependent(), mp, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_lcl(CMP.CloudLiquidFormation(), mpNoLiq, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(
+            CMP.TemperatureDependentIceNumber(),
+            mp,
+            tps,
+            micro,
+            thermo,
+        )
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(
+            CMP.TemperatureDependentIceNumber(),
+            mpTD,
+            tps,
+            micro,
+            thermo,
+        )
+        TT.@test_throws ArgumentError CMNe.conv_q_vap_to_q_icl(CMP.ConstantTimescale(), mpTDIN, tps, micro, thermo)
+        # the timescale accessors check the pairing too
+        TT.@test_throws ArgumentError CMNe.τ_vap_to_q_lcl(CMP.CloudLiquidFormation(), mpNoLiq, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.τ_vap_to_q_icl(CMP.ConstantTimescale(), mpTD, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.τ_vap_to_q_icl(CMP.TemperatureDependent(), mp, tps, micro, thermo)
+        TT.@test_throws ArgumentError CMNe.τ_vap_to_q_icl(CMP.TemperatureDependentIceNumber(), mpTD, tps, micro, thermo)
+        # matched combinations still work
+        TT.@test CMNe.conv_q_vap_to_q_icl(CMP.ConstantTimescale(), mp, tps, micro, thermo) isa FT
+        TT.@test CMNe.conv_q_vap_to_q_icl(CMP.TemperatureDependent(), mpTD, tps, micro, thermo) isa FT
+        TT.@test CMNe.conv_q_vap_to_q_lcl(CMP.CloudLiquidFormation(), mp, tps, micro, thermo) isa FT
+        TT.@test CMNe.conv_q_vap_to_q_icl(CMP.TemperatureDependentIceNumber(), mpTDIN, tps, micro, thermo) isa FT
+        TT.@test CMNe.τ_vap_to_q_lcl(CMP.CloudLiquidFormation(), mp, tps, micro, thermo) isa FT
+        TT.@test CMNe.τ_vap_to_q_icl(CMP.ConstantTimescale(), mp, tps, micro, thermo) isa FT
+        TT.@test CMNe.τ_vap_to_q_icl(CMP.TemperatureDependent(), mpTD, tps, micro, thermo) isa FT
+        TT.@test CMNe.τ_vap_to_q_icl(CMP.TemperatureDependentIceNumber(), mpTDIN, tps, micro, thermo) isa FT
     end
 
 

@@ -24,6 +24,9 @@ export Chen2022_vel_coeffs
 export Chen2022_monodisperse_pdf
 export Chen2022_exponential_pdf
 export ventilation_factor
+export ventilation_coefficients
+export KK2000_autoconversion
+export KK2000_accretion
 
 """
     G_func_liquid(air_props, tps, T)
@@ -303,7 +306,7 @@ See [Chen2022](@cite) for more details.
 """
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeRain, ρₐ)
     (; ρ0, a, a3_pow, b, b_ρ, c) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    ρₐ = max(ρₐ, UT.ϵ_numerics(ρₐ))
     # Table B1
     q = exp(ρ0 * ρₐ)
     ai = (a[1] * q, a[2] * q, a[3] * q * ρₐ^a3_pow)
@@ -315,7 +318,7 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeSmallIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    ρₐ = max(ρₐ, UT.ϵ_numerics(ρₐ))
     # Table B3 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
@@ -335,7 +338,7 @@ end
 @inline function Chen2022_vel_coeffs(coeffs::CMP.Chen2022VelTypeLargeIce, ρₐ, ρᵢ)
     FT = eltype(coeffs)
     (; A, B, C, E, F, G, H) = coeffs
-    ρₐ = max(ρₐ, zero(ρₐ))
+    ρₐ = max(ρₐ, UT.ϵ_numerics(ρₐ))
     # Table B5 - cache sqrt for reuse
     log_ρᵢ = log(ρᵢ)
     sqrt_ρᵢ = sqrt(ρᵢ)
@@ -382,8 +385,11 @@ function Chen2022VelocityCurve(ai::NTuple{N, Any}, bi::NTuple{N, Any}, ci::NTupl
     FT = promote_type(map(typeof, ai)..., map(typeof, bi)..., map(typeof, ci)...)
     return Chen2022VelocityCurve{N, FT}(map(FT, ai), map(FT, bi), map(FT, ci))
 end
-@inline (v::Chen2022VelocityCurve)(D) =
-    unrolled_sum(abc -> abc[1] * D^abc[2] * exp(-abc[3] * D), map(tuple, v.ai, v.bi, v.ci))
+@inline function (v::Chen2022VelocityCurve)(D)
+    # One `exp` per term, D^b exp(-cD) = exp(b log(D) - cD)
+    logD = log(D)
+    return unrolled_sum(abc -> abc[1] * exp(muladd(abc[2], logD, -abc[3] * D)), map(tuple, v.ai, v.bi, v.ci))
+end
 
 """
     Chen2022_monodisperse_pdf(a, b, c)
@@ -466,7 +472,8 @@ regime (Re < 1).
 function particle_terminal_velocity(velocity_params::CMP.StokesRegimeVelType, ρ)
     (; ρw, grav, ν_air) = velocity_params
     FT = eltype(ρ)
-    terminal_velocity_prefactor = FT(1 / 18) * (ρw / ρ - 1) * grav / ν_air
+    ρ_safe = max(ρ, UT.ϵ_numerics(ρ))
+    terminal_velocity_prefactor = FT(1 / 18) * max(ρw / ρ_safe - 1, zero(FT)) * grav / ν_air
     v_term(D) = terminal_velocity_prefactor * D^2
     return v_term
 end
@@ -498,12 +505,29 @@ See also [`volume_sphere_D`](@ref).
 @inline volume_sphere_R(R) = volume_sphere_D(2R)
 
 """
+    ventilation_coefficients(vent, aps)
+
+Return the coefficients `(a, b)` of the ventilation factor `F_v(D) = a + b √(D v(D))` of [`ventilation_factor`](@ref).
+
+The coefficients are `a = aᵥ` and `b = bᵥ Sc^(1/3) / √ν`, with the Schmidt number `Sc = ν / D_v`.
+
+# Arguments
+- `vent`: ventilation parameterization constants (contains `aᵥ`, `bᵥ`)
+- `aps`: air properties parameters (contains `ν_air`, `D_vapor`)
+"""
+@inline function ventilation_coefficients((; aᵥ, bᵥ), (; ν_air, D_vapor))
+    N_sc = ν_air / D_vapor  # Schmidt number
+    return (aᵥ, bᵥ * cbrt(N_sc) / sqrt(ν_air))
+end
+
+"""
     ventilation_factor(vent, aps, v_term)
 
 Returns a function that computes the ventilation factor for a particle as a function of its diameter.
 
 The ventilation factor parameterizes the increase in the mass and heat exchange for falling particles.
 See e.g., Seifert and Beheng (2006), https://doi.org/10.1007/s00703-005-0112-4, Eq. (24).
+The factor is `F_v(D) = a + b √(D v(D))`, with the coefficients of [`ventilation_coefficients`](@ref).
 
 # Arguments
 - `vent`: ventilation parameterization constants (contains `aᵥ`, `bᵥ`)
@@ -521,6 +545,52 @@ See e.g., Seifert and Beheng (2006), https://doi.org/10.1007/s00703-005-0112-4, 
     N_Re(D) = D * v_term(D) / ν_air  # Reynolds number
     F_v(D) = aᵥ + bᵥ * cbrt_N_sc * sqrt(N_Re(D))  # Ventilation factor
     return F_v
+end
+
+"""
+    KK2000_autoconversion(acnv, A_N, q_lcl, ρ)
+
+Khairoutdinov and Kogan (2000) autoconversion rate of cloud liquid to rain,
+`A_N max(0, q_lcl)^a (ρ / ρ_ref)^c`, with `A_N = A (N_d / N_ref)^b` from
+[`CMP.KK2000_autoconversion_coefficient`](@ref), a separate argument so that a prescribed
+`N_d` lets it be evaluated once per parameter set. The fit is from Khairoutdinov and Kogan (2000),
+https://doi.org/10.1175/1520-0493(2000)128<0229:ANCPPI>2.0.CO;2, with the air-density
+dependence of Wood (2005), Table 1, https://doi.org/10.1175/JAS3530.1. Shared by the
+1-moment scheme (prescribed `N_d`) and the 2-moment scheme (prognostic `N_d`).
+
+# Arguments
+- `acnv`: `AcnvKK2000` parameters (`a`, `c`, `ρ_ref`)
+- `A_N`: rate coefficient [1/s]
+- `q_lcl`: cloud liquid water specific content [kg/kg]
+- `ρ`: air density [kg/m³]
+
+# Returns
+- Rain autoconversion rate [kg/kg/s]
+"""
+@inline function KK2000_autoconversion(acnv, A_N, q_lcl, ρ)
+    (; a, c, ρ_ref) = acnv
+    return A_N * max(0, q_lcl)^a * (ρ / ρ_ref)^c
+end
+
+"""
+    KK2000_accretion(accr, q_lcl, q_rai, ρ)
+
+Khairoutdinov and Kogan (2000) accretion rate of cloud liquid by rain,
+`A (max(0, q_lcl) max(0, q_rai))^a (ρ / ρ_ref)^b`, with the air-density dependence of
+Wood (2005), Table 1. Shared by the 1-moment and 2-moment schemes.
+
+# Arguments
+- `accr`: `AccrKK2000` parameters (`A`, `a`, `b`, `ρ_ref`)
+- `q_lcl`: cloud liquid water specific content [kg/kg]
+- `q_rai`: rain water specific content [kg/kg]
+- `ρ`: air density [kg/m³]
+
+# Returns
+- Rain accretion rate [kg/kg/s]
+"""
+@inline function KK2000_accretion(accr, q_lcl, q_rai, ρ)
+    (; A, a, b, ρ_ref) = accr
+    return A * (max(0, q_lcl) * max(0, q_rai))^a * (ρ / ρ_ref)^b
 end
 
 end # module end
