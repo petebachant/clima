@@ -3,6 +3,17 @@ ClimaAnalysis.jl Release Notes
 main
 -------
 
+v0.5.25
+-------
+
+## Bug fixes
+
+- When reading NetCDF files whose time dimension is stored as dates, times are
+  now converted to seconds relative to the `start_date` attribute of the
+  variable if it is present instead of the first time of the time dimension.
+  `SimDir` now converts these dates to seconds too, instead of returning them as
+  dates.
+
 v0.5.24
 -------
 

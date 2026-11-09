@@ -1,5 +1,7 @@
 using Test
 import ClimaAnalysis
+import Dates
+import NCDatasets
 
 @testset "SimDir" begin
 
@@ -71,10 +73,32 @@ end
 
     simdir = ClimaAnalysis.SimDir(simulation_path)
 
-    @test sprint(show, simdir) ==
-          "Output directory: " *
-          simulation_path *
-          "\nVariables:\n- va\n    average (2.0h)\n- pfull\n    inst (1.0d)\n- ua\n    average (6.0h)\n- orog\n    inst (nothing)\n- thetaa\n    average (1d)\n- ta\n    average (3.0h)\n    max (4.0h, 3.0h)\n    min (3.0h)\n- ts\n    max (1.0h)"
+    # Dict iteration order varies across Julia versions, so compare the lines of
+    # each variable block as sets. The two periods of ta max can also come in
+    # either order, so both are listed
+    header, blocks... = split(sprint(show, simdir), "\n- ")
+    @test header == "Output directory: $simulation_path\nVariables:"
+    @test length(blocks) == 7
+    @test Set(Set(split(block, "\n")) for block in blocks) ⊆ Set([
+        Set(["va", "    average (2.0h)"]),
+        Set(["pfull", "    inst (1.0d)"]),
+        Set(["ua", "    average (6.0h)"]),
+        Set(["orog", "    inst (nothing)"]),
+        Set(["thetaa", "    average (1d)"]),
+        Set([
+            "ta",
+            "    average (3.0h)",
+            "    max (4.0h, 3.0h)",
+            "    min (3.0h)",
+        ]),
+        Set([
+            "ta",
+            "    average (3.0h)",
+            "    max (3.0h, 4.0h)",
+            "    min (3.0h)",
+        ]),
+        Set(["ts", "    max (1.0h)"]),
+    ])
     @test sprint(summary, simdir) == sprint(show, simdir)
 
     # Empty simdir
@@ -280,4 +304,35 @@ end
 
     @test orog_var |> ClimaAnalysis.times == [0.0, 1.0, 2.0]
     @test orog_var.data |> size == (3, 180, 90)
+end
+
+@testset "Times relative to start_date" begin
+    # The first output is not at the start date and times are encoded as dates
+    simulation_path = mktempdir()
+    path = joinpath(simulation_path, "ts_1h_inst.nc")
+    NCDatasets.NCDataset(path, "c") do nc
+        nc.dim["time"] = 2
+        NCDatasets.defVar(
+            nc,
+            "time",
+            [Dates.DateTime(2010, 1, 1, 1), Dates.DateTime(2010, 1, 1, 2)],
+            ("time",),
+            attrib = ["units" => "seconds since 2010-01-01 00:00:00"],
+        )
+        NCDatasets.defVar(
+            nc,
+            "ts",
+            [1.0, 2.0],
+            ("time",),
+            attrib = ["start_date" => "2010-01-01T00:00:00"],
+        )
+    end
+
+    for var in (
+        ClimaAnalysis.OutputVar(path),
+        get(ClimaAnalysis.SimDir(simulation_path), "ts"),
+    )
+        @test ClimaAnalysis.times(var) == [3600.0, 7200.0]
+        @test var.attributes["start_date"] == "2010-01-01T00:00:00"
+    end
 end
