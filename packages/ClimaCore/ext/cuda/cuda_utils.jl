@@ -2,7 +2,6 @@ import CUDA
 import ClimaCore.Fields
 import ClimaCore.DataLayouts
 import ClimaCore.Utilities
-import GPUCompiler
 
 function uncached_device_attributes()
     device = CUDA.device()
@@ -35,6 +34,10 @@ function uncached_device_attributes()
         get_attr(CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR),
         reserved_shmem_per_block =
         get_attr(CUDA.DEVICE_ATTRIBUTE_RESERVED_SHARED_MEMORY_PER_BLOCK),
+        # a kernel can use more than max_shmem_per_block after opting in (see
+        # launch_configuration)
+        max_shmem_per_block_optin =
+        get_attr(CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN),
 
         # more hardware properties from version 12.9 of the CUDA Runtime Headers
         # https://gitlab.com/nvidia/headers/cuda-individual/cudart/-/blob/main/cuda_occupancy.h#L606-779
@@ -113,6 +116,11 @@ function max_active_blocks(threads_per_block, regs_per_thread, shmem_per_block)
             end
         end
         max_blocks_per_sm_by_warps = fld(max_warps_per_sm, warps_per_block)
+        # Blocks of two warps are dealt unevenly to the four schedulers of a multiprocessor
+        # unless every scheduler gets the same number of blocks.
+        if warps_per_block == 2 && attrs.schedulers_per_sm == 4
+            max_blocks_per_sm_by_warps = 4 * fld(max_blocks_per_sm_by_warps, 4)
+        end
         if max_blocks_per_sm_by_warps < max_blocks_per_sm
             (max_blocks_per_sm, limit) = (max_blocks_per_sm_by_warps, warp_limit)
         end
@@ -120,7 +128,8 @@ function max_active_blocks(threads_per_block, regs_per_thread, shmem_per_block)
 
     if !iszero(shmem_per_block)
         min_shmem_per_block = shmem_per_block + attrs.reserved_shmem_per_block
-        max_shmem_per_block = attrs.max_shmem_per_block + attrs.reserved_shmem_per_block
+        max_shmem_per_block =
+            attrs.max_shmem_per_block_optin + attrs.reserved_shmem_per_block
         allocated_shmem_per_block =
             round_up(min_shmem_per_block, attrs.shmem_per_allocation)
         allocated_shmem_per_block > max_shmem_per_block && return (0, :shared_memory)
@@ -133,14 +142,32 @@ function max_active_blocks(threads_per_block, regs_per_thread, shmem_per_block)
     return (max_blocks_per_sm * attrs.sm_count, limit)
 end
 
+"""
+    DynamicShmem(region_bytes, region_threads)
+
+Dynamic shared memory of a kernel launch, as a function of its number of threads per block:
+`region_bytes` for every `region_threads` threads, or for the whole block when
+`region_threads` is 0 (see `scoped_static_array`). A `Function`, so that
+`CUDA.launch_configuration` accepts it as its `shmem`.
+"""
+struct DynamicShmem <: Function
+    region_bytes::Int
+    region_threads::Int
+end
+(shmem::DynamicShmem)(threads_per_block) =
+    iszero(shmem.region_threads) ? shmem.region_bytes :
+    shmem.region_bytes * fld(threads_per_block, shmem.region_threads)
+const NO_DYNAMIC_SHMEM = DynamicShmem(0, 0)
+
 # cudaOccMaxPotentialOccupancyBlockSize times the maximum number of waves,
 # optimized for single-stream execution of both small and large workloads
 # https://gitlab.com/nvidia/headers/cuda-individual/cudart/-/blob/main/cuda_occupancy.h#L1865-1965
 function uncached_launch_configuration(
     cu_func,
     strict,
-    default_max_waves,
+    max_waves,
     default_granularity,
+    dynamic_shmem,
     config_args...,
 )
     attrs = device_attributes()
@@ -166,22 +193,11 @@ function uncached_launch_configuration(
     user_constraints_ignorable = user_max_threads_per_block >= default_max_threads_per_block
     max_threads_per_block = min(user_max_threads_per_block, default_max_threads_per_block)
 
-    # Launch a single wave of blocks unless a caller asks for more. An A100
-    # sweep over max_waves in (1, 2, 4) on small unit benchmarks found one
-    # wave at least as fast throughout and fastest for reductions (the
-    # equal-shape lazy reduction: 129 us at one wave, 145 us at more). On a
-    # realistic problem with zero per-step device allocations (baroclinic
-    # wave, h_elem = 30, z_elem = 63, A100; see perf/sweep_kernel_configs.jl),
-    # 4-8 waves measured ~6% faster per step (215 vs 228 ms). The default
-    # stays at one wave until the reduction slowdown at higher wave counts is
-    # revisited; CLIMA_CUDA_MAX_WAVES overrides it for tuning experiments.
-    max_waves = something(default_max_waves, MAX_WAVES[])
-
     # Block sizes are searched in whole multiples of this unit, one warp unless
     # a caller needs a coarser one: a partially populated sub-block skips the
-    # points of the threads it is missing (see subscope_launch_threads). The
-    # unit is clamped to the largest launchable block, so the search always has
-    # a candidate.
+    # points of the threads it is missing (see the whole subscopes invariant in
+    # DataLayouts.subscope_indices). The unit is clamped to the largest launchable
+    # block, so the search always has a candidate.
     granularity = max(something(default_granularity, 0), attrs.threads_per_warp)
     unit = min(granularity, max_threads_per_block)
 
@@ -203,8 +219,11 @@ function uncached_launch_configuration(
     # also confining large workloads to as few blocks as possible.
     (best_threads_per_block, best_num_blocks, best_limit) = (0, 0, :user)
     for threads_per_block in block_sizes
-        (max_blocks_per_wave, active_blocks_limit) =
-            max_active_blocks(threads_per_block, regs_per_thread, shmem_per_block)
+        (max_blocks_per_wave, active_blocks_limit) = max_active_blocks(
+            threads_per_block,
+            regs_per_thread,
+            shmem_per_block + dynamic_shmem(threads_per_block),
+        )
         user_max_blocks = get_user_max_blocks(threads_per_block, config_args...)
         user_constraints_ignorable &= user_max_blocks >= max_blocks_per_wave * max_waves
         (num_blocks, limit) =
@@ -217,6 +236,21 @@ function uncached_launch_configuration(
         end
     end
 
+    # Every candidate was rejected (see max_active_blocks), or the user asked for no
+    # threads; the shared memory of a launch is the usual cause, since a kernel's static
+    # resources are checked against the device's largest block when it is compiled, and its
+    # dynamic shared memory counts against the same limit per block.
+    iszero(best_num_blocks) && throw(
+        ArgumentError(
+            "No block of a whole number of $unit threads can be launched: a block of $unit \
+             threads needs $(dynamic_shmem(unit)) bytes of dynamic shared memory and \
+             $shmem_per_block bytes of static shared memory, more than the \
+             $(attrs.max_shmem_per_block_optin) bytes of shared memory available per block \
+             (the kernel can be launched with at most $default_max_threads_per_block \
+             threads per block)",
+        ),
+    )
+
     # Compare searches unaffected by config_args against CUDA's implementation,
     # which only ever considers whole warps.
     if DataLayouts.VALIDATE_LAUNCH_CONFIGURATIONS[] &&
@@ -224,8 +258,17 @@ function uncached_launch_configuration(
        isnothing(default_granularity)
         min_blocks_per_wave = cld(best_num_blocks, max_waves)
         cuda_config = (; blocks = min_blocks_per_wave, threads = best_threads_per_block)
-        @assert CUDA.launch_configuration(cu_func) == cuda_config
+        # CUDA's shmem is the dynamic shared memory alone (it adds the static memory itself).
+        @assert CUDA.launch_configuration(cu_func; shmem = dynamic_shmem) == cuda_config
     end
+
+    # A block above the function's limit on dynamic shared memory (48 KB less its static
+    # shared memory, until it is raised) needs the limit raised first: once, since the
+    # configuration is cached, and never lowered, since the launches of the function's other
+    # configurations may need the earlier limit.
+    dynamic_bytes = dynamic_shmem(best_threads_per_block)
+    attribute = CUDA.FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+    cu_func_attrs[attribute] < dynamic_bytes && (cu_func_attrs[attribute] = dynamic_bytes)
 
     return (;
         threads = best_threads_per_block,
@@ -234,14 +277,48 @@ function uncached_launch_configuration(
     )
 end
 
-const LAUNCH_CONFIGURATION_CACHE =
-    IdDict{Any, @NamedTuple{threads::Int, blocks::Int, limit::Symbol}}()
+# Keyed by function handles, so that lookups allocate nothing (the type of the handle is
+# CUDA.CUfunction before CUDA.jl v6 and CUDA.CUDACore.CUfunction after).
+const CUfunction = fieldtype(CUDA.CuFunction, :handle)
+# The module that compiles kernels (CUDA before CUDA.jl v6 and CUDACore after), through
+# which GPUCompiler is reached.
+const CUDA_COMPILER = parentmodule(CUDA.cufunction)
+
+# The maxregs keyword of a kernel compilation (the register cap of a slice loop; see
+# register_cap), or none when the count is left to ptxas.
+maxregs_kwarg(::Nothing) = (;)
+maxregs_kwarg(maxregs::Int) = (; maxregs)
+
+# A buffer that exceeds the shared memory level of its slice loop fails to compile (see
+# check_shmem_level); the marker is the name of the undefined function that the check calls,
+# read from the invalid IR error's metadata, and the largest one gives the bytes the loop
+# needs (see launch_slice_loop, which launches the loop at the level that holds them), or 0
+# when the error has no marker. The metadata is untyped, so the markers are read in a loop
+# that narrows it, rather than by a closure that would be dispatched on it.
+function shmem_level_error_bytes(err::CUDA_COMPILER.GPUCompiler.InvalidIRError)
+    bytes = 0
+    for (_, _, meta) in err.errors
+        meta isa String || continue
+        startswith(meta, SHMEM_LEVEL_ERROR) || continue
+        digits = chop(
+            meta;
+            head = ncodeunits(SHMEM_LEVEL_ERROR) + 1,
+            tail = ncodeunits("_bytes"),
+        )
+        bytes = max(bytes, something(tryparse(Int, digits), 0))
+    end
+    return bytes
+end
+const LAUNCH_CONFIGURATION_CACHE = Dict{
+    Tuple{CUfunction, Bool, Int, Int, DynamicShmem, Int, Int},
+    @NamedTuple{threads::Int, blocks::Int, limit::Symbol},
+}()
 const LAUNCH_CONFIGURATION_CACHE_LOCK = ReentrantLock()
 
 """
-    launch_configuration(f, args; max_waves = nothing)
-    launch_configuration(f, args, max_threads; strict = true, max_waves = nothing)
-    launch_configuration(f, args, max_threads_per_block, max_blocks; max_waves = nothing)
+    launch_configuration(kernel; [max_waves], [granularity], [shmem])
+    launch_configuration(kernel, max_threads; strict = true, [max_waves], [granularity], [shmem])
+    launch_configuration(kernel, max_threads_per_block, max_blocks; [max_waves], [granularity], [shmem])
 
 Analogue of `CUDA.launch_configuration` optimized for single-stream execution,
 which maximizes occupancy across the entire device instead of just one
@@ -260,20 +337,23 @@ as possible. While `CUDA.launch_configuration` and its underlying C function
     and grid dimensions of the launch configuration are individually limited
     (similar to CUDA's implementation, but with the addition of `max_blocks`).
 
-A `granularity` may also be specified, in which case only block sizes that are
-whole multiples of it are considered. This defaults to the warp size, which is
-the smallest unit a block can usefully be made of; a loop that hands each slice
-to a sub-block needs the coarser unit of one sub-block (see
-`DataLayouts.subscope_launch_threads`).
-
 In each case, `max_waves` can be specified to control how many waves of blocks
 are scheduled. Kernels with uneven load distributions (e.g., due to conditional
 branches or nonuniform memory accesses) may require multiple waves to prevent
 some multiprocessors from idling while others are still active. However, block
 scheduling also adds measurable latency, so the number of waves should not be
-increased unless load redistribution is necessary. Setting `max_waves` to
-`nothing` gives it the default of one wave, which the `CLIMA_CUDA_MAX_WAVES`
-environment variable overrides.
+increased unless load redistribution is necessary. By default, `max_waves` is
+set to 1, but the `CLIMA_CUDA_MAX_WAVES` environment variable overrides this.
+
+A `granularity` may also be specified, in which case only block sizes that are
+whole multiples of it are considered. This defaults to the warp size, which is
+the smallest unit a block can usefully be made of; a loop that hands each slice
+to a sub-block needs the coarser unit of one sub-block (see
+the whole subscopes invariant in `DataLayouts.subscope_indices`).
+
+A kernel that uses dynamic shared memory is given it as a [`DynamicShmem`](@ref) `shmem`,
+which every block size considered has to accommodate along with the kernel's static
+shared memory.
 
 Like `CUDA.launch_configuration`, this returns a `NamedTuple` containing the
 optimal number of threads per block and the optimal number of blocks, and it
@@ -287,42 +367,44 @@ also returns a symbol identifying the dominant factor that limits occupancy:
 
 Computing a launch configuration requires querying the C driver for the kernel's
 register pressure and shared memory requirements, which adds measurable latency
-if done more than once per kernel, so the result is cached in an `IdDict`. A
+if done more than once per kernel, so the result is cached in a `Dict`. A
 lock is used to prevent multiple threads from updating the cache simultaneously,
-since an `IdDict` should never be read as it is being rehashed.
+since a `Dict` should never be read as it is being rehashed.
 """
 function launch_configuration(
-    f::F,
-    args,
+    kernel::CUDA.HostKernel,
     config_args...;
     strict = true,
-    max_waves = nothing,
+    max_waves = MAX_WAVES[],
     granularity = nothing,
-) where {F}
-    cu_func = (CUDA.@cuda always_inline = true launch = false f(args...)).fun
-    # The default is resolved before the cache key is built, so that changing
-    # MAX_WAVES[] at runtime (as perf/sweep_kernel_configs.jl does) misses the
-    # cache instead of returning configurations computed for the old value.
-    max_waves = something(max_waves, MAX_WAVES[])
-    cache_key = (cu_func, strict, max_waves, granularity, config_args...)
-    lock(LAUNCH_CONFIGURATION_CACHE_LOCK)
-    try
-        return get!(LAUNCH_CONFIGURATION_CACHE, cache_key) do
-            uncached_launch_configuration(cache_key...)
-        end
-    finally
-        unlock(LAUNCH_CONFIGURATION_CACHE_LOCK)
+    shmem::DynamicShmem = NO_DYNAMIC_SHMEM,
+)
+    cu_func = kernel.fun
+    cache_key = (
+        cu_func.handle,
+        strict,
+        max_waves,
+        something(granularity, -1),
+        shmem,
+        get(config_args, 1, -1),
+        get(config_args, 2, -1),
+    )
+    return @lock LAUNCH_CONFIGURATION_CACHE_LOCK get!(
+        LAUNCH_CONFIGURATION_CACHE,
+        cache_key,
+    ) do
+        uncached_launch_configuration(
+            cu_func, strict, max_waves, granularity, shmem, config_args...,
+        )
     end
 end
 
-threads_via_occupancy(f::F, args) where {F} = launch_configuration(f, args).threads
-function config_via_occupancy(f::F, nitems, args) where {F}
-    threads_per_block = launch_configuration(f, args, nitems; strict = false).threads
-    return (; threads = threads_per_block, blocks = cld(nitems, threads_per_block))
-end
-
 const reported_stats = Dict()
-const kernel_names = IdDict()
+# Cache of kernel names, keyed by the same pair that identifies a kernel
+# specialization: the kernel function's type and the tuple type of its
+# arguments. Concretely typed so that the lookup in `auto_launch!` is
+# inference-friendly (see the comment there).
+const kernel_names = Dict{Tuple{Type, Type}, Union{String, Nothing}}()
 
 # A compile-time constant, not a `Ref`, so that inference folds away the
 # development-only statistics block in `auto_launch!` (which is otherwise
@@ -330,6 +412,9 @@ const kernel_names = IdDict()
 # `CLIMA_COLLECT_KERNEL_STATS` before the extension precompiles to enable it,
 # or redefine this method (as perf/stress_test_compiler.jl does).
 collect_kernel_stats() = COLLECT_KERNEL_STATS
+# Every kernel launched while RECORD_KERNELS[] is true, for tests of kernel resources.
+const RECORD_KERNELS = Ref(false)
+const RECORDED_KERNELS = CUDA.HostKernel[]
 
 function _memory_bytes(memory, key::Symbol)
     if hasproperty(memory, key)
@@ -387,14 +472,12 @@ function _getenv_int(
 end
 
 # Refs to hold settings read from environment variables in __init__: kernel
-# naming from stack traces, per-launch kernel statistics, the wave count used
-# by the launch-configuration search, and the block-size cap of the eager FD
-# kernel.
+# naming from stack traces, per-launch kernel statistics, and the wave count
+# used by the launch-configuration search.
 const NAME_KERNELS_FROM_STACK_TRACE = Ref{Bool}(false)
 const COLLECT_KERNEL_STATS =
     _getenv_bool("CLIMA_COLLECT_KERNEL_STATS"; default = false)
 const MAX_WAVES = Ref{Int}(1)
-const FD_MAX_THREADS = Ref{Int}(128)
 const DSS_MAX_THREADS = Ref{Int}(256)
 
 # Always reload when module is imported so precompilation doesn't make it "stick"
@@ -403,9 +486,8 @@ function __init__()
         "CLIMA_NAME_CUDA_KERNELS_FROM_STACK_TRACE"; default = false,
     )
     MAX_WAVES[] = _getenv_int("CLIMA_CUDA_MAX_WAVES", 1)
-    # 1024 is CUDA's threads-per-block limit; these caps feed block sizes
+    # 1024 is CUDA's threads-per-block limit; this cap feeds block sizes
     # directly, so a larger value would fail at the first kernel launch.
-    FD_MAX_THREADS[] = _getenv_int("CLIMA_FD_MAX_THREADS", 128; max = 1024)
     DSS_MAX_THREADS[] = _getenv_int("CLIMA_DSS_MAX_THREADS", 256; max = 1024)
 end
 
@@ -421,9 +503,15 @@ const IGNORE_MODULES = (
     :ClimaCoreCUDAExt,
 )
 
-# Functions withing ClimaCore to ignore when determining relevant stack frames
-const CLIMACORE_IGNORE_FUNCS =
-    (:materialize, :materialize!, :foreach, :unrolled_foreach, Symbol("macro expansion"))
+# Functions within ClimaCore to ignore when determining relevant stack frames
+const CLIMACORE_IGNORE_FUNCS = (
+    :materialize,
+    :materialize!,
+    :copyto!,
+    :foreach,
+    :unrolled_foreach,
+    Symbol("macro expansion"),
+)
 # Helper function to check if a stack frame is relevant
 @inline function is_relevant_frame(frame::Base.StackTraces.StackFrame)
     frame_method = frame.linfo isa Core.CodeInstance ? frame.linfo.def : frame.linfo
@@ -440,45 +528,113 @@ end
     return string(mi.def.file::Symbol)::String
 end
 
-"""
-    auto_launch!(f!::F!, args,
-        ::Union{
-            Int,
-            NTuple{N, <:Int},
-            AbstractArray,
-            DataLayout,
-            Field,
-        };
-        auto = false,
-        threads_s,
-        blocks_s,
-        always_inline = true,
-        shmem = 0,
+# Arguments are converted once per launch, before its kernel is compiled: CUDA.jl v6
+# converts them in a KernelCall, which also tracks the memory that they use, and CUDA.jl v5
+# kernel calls skip their own conversion with convert = Val(false) (isbits closures need no
+# conversion, so they skip Adapt).
+#
+# A compile error from a buffer that exceeds the shared memory level of its slice loop (see
+# check_shmem_level) is returned here as the bytes that the loop needs (see
+# shmem_level_error_bytes). The try block wraps the compilation, not the launch: a value
+# that is live in a try block is boxed on the heap, which would copy the launch's arguments.
+@static if isdefined(CUDA, :KernelCall)
+    converted_kernel_call(f!, args) = CUDA.KernelCall(f!, args...)
+    function compile_kernel(call, name; maxregs = nothing)
+        try
+            return compile_kernel_call(call, name, maxregs)
+        catch err
+            err isa CUDA_COMPILER.GPUCompiler.InvalidIRError || rethrow()
+            bytes = shmem_level_error_bytes(err)
+            iszero(bytes) && rethrow()
+            return bytes
+        end
+    end
+    compile_kernel_call(call, ::Nothing, maxregs) =
+        CUDA.kernel_compile(call; always_inline = true, maxregs_kwarg(maxregs)...)
+    compile_kernel_call(call, name, maxregs) =
+        CUDA.kernel_compile(call; name, always_inline = true, maxregs_kwarg(maxregs)...)
+    launch_kernel(kernel, call, threads, blocks, shmem) =
+        CUDA.kernel_launch(kernel, call; threads, blocks, shmem)
+else
+    converted_kernel_call(f!::F!, args) where {F!} = (;
+        f! = isbitstype(F!) ? f! : CUDA.cudaconvert(f!),
+        args = map(CUDA.cudaconvert, args),
+        source = (f!, args),
     )
+    compile_kernel(call, name; maxregs = nothing) =
+        compile_function(call.f!, argument_types(call), name, maxregs)
+    function compile_function(f!::F!, tt, name, maxregs) where {F!}
+        try
+            return compile_function_call(f!, tt, name, maxregs)
+        catch err
+            err isa CUDA_COMPILER.GPUCompiler.InvalidIRError || rethrow()
+            bytes = shmem_level_error_bytes(err)
+            iszero(bytes) && rethrow()
+            return bytes
+        end
+    end
+    compile_function_call(f!, tt, ::Nothing, maxregs) =
+        CUDA.cufunction(f!, tt; always_inline = true, maxregs_kwarg(maxregs)...)
+    compile_function_call(f!, tt, name, maxregs) =
+        CUDA.cufunction(f!, tt; name, always_inline = true, maxregs_kwarg(maxregs)...)
+    argument_types(call) = Tuple{map(Core.Typeof, call.args)...}
+    launch_kernel(kernel, call, threads, blocks, shmem) = GC.@preserve call kernel(
+        call.args...;
+        threads,
+        blocks,
+        shmem,
+        convert = Val(false),
+    )
+end
 
-Launch a cuda kernel, using `CUDA.launch_configuration` (if `auto=true`)
-to determine the number of threads/blocks.
+"""
+    auto_launch!(f!, args; [nitems], [config], [threads_s], [blocks_s], [shmem])
 
-Suggested threads and blocks (`threads_s`, `blocks_s`) can be given
-to benchmark compare against auto-determined threads/blocks (if `auto=false`).
+Launch a cuda kernel, using `launch_configuration` to determine the number of
+threads and blocks.
+
+The threads and blocks are computed from the compiled kernel by `config` if it is
+given, or else so that each of `nitems` items gets its own thread; otherwise, the
+suggested threads and blocks (`threads_s`, `blocks_s`) are used. The kernel is launched
+with the [`DynamicShmem`](@ref) `shmem` evaluated at its number of threads per block (none
+by default), which a `config` must also pass to `launch_configuration`, since the launch
+configuration raises the limit on dynamic shared memory of a kernel that needs more than
+the default (a launch given `threads_s` must stay within it). Every kernel that allocates
+dynamic shared memory (see `scoped_static_array`) must be given enough of it.
+
+Return `nothing` once the kernel is launched. A kernel that does not compile because a
+buffer exceeds the shared memory level of its slice loop (see `check_shmem_level`) is not
+launched, and the bytes it needs are returned instead (see `launch_slice_loop`).
 """
 function auto_launch!(
     f!::F!,
-    args,
-    nitems::Union{Integer, Nothing} = nothing;
-    auto = false,
+    args;
+    nitems = nothing,
+    config = nothing,
     threads_s = nothing,
     blocks_s = nothing,
-    always_inline = true,
-    caller = :unknown,
-    shmem = 0,
+    shmem::DynamicShmem = NO_DYNAMIC_SHMEM,
+    maxregs = nothing,
 ) where {F!}
     # If desired, compute a kernel name from the stack trace and store in
     # a global Dict, which serves as an in memory cache
     kernel_name = nothing
     if name_kernels_from_stack_trace()
-        # Create a key from the method instance and types of the args
-        key = objectid(GPUCompiler.methodinstance(typeof(f!), typeof(args)))
+        # Key on the kernel function's type and the tuple type of its
+        # arguments, the pair that identifies a kernel specialization. Both are
+        # statically known here, so building the key introduces no runtime
+        # dispatch. That matters because `name_kernels_from_stack_trace()`
+        # reads a `Ref` and so cannot be const-folded: inference sees this
+        # branch on every launch path, and a dispatch here would show up in
+        # every `@test_opt` over a kernel launch.
+        #
+        # Unlike the method instance it replaces, this key does not change
+        # when Revise redefines the kernel function, so a revised kernel keeps
+        # the name cached before the edit, including a possibly stale file and
+        # line, until `empty!(kernel_names)` or a restart. Only the name is
+        # stale: CUDA's compilation cache tracks the world age and recompiles
+        # the revised kernel either way.
+        key = (F!, typeof(args))
         kernel_name_exists = key in keys(kernel_names)
         if !kernel_name_exists
             # Construct the kernel name, ignoring modules we don't care about
@@ -526,33 +682,26 @@ function auto_launch!(
         kernel_name = kernel_names[key]
     end
 
-    if auto
-        @assert !isnothing(nitems)
-        if nitems ≥ 0
-            # Note: `name = nothing` here will revert to default behavior
-            kernel = CUDA.@cuda name = kernel_name always_inline = true launch =
-                false f!(args...)
-            config = launch_configuration(f!, args)
-            threads = min(nitems, config.threads)
-            blocks = cld(nitems, threads)
-            kernel(args...; threads, blocks) # This knows to use always_inline from above.
-        end
+    # Alternative to CUDA.@cuda that passes the kernel to launch_configuration.
+    call = converted_kernel_call(f!, args)
+    kernel = compile_kernel(call, kernel_name; maxregs)
+    kernel isa CUDA.HostKernel || return kernel # the bytes of a buffer beyond the level
+    if !isnothing(config)
+        (; threads, blocks) = config(kernel)
+    elseif isnothing(nitems)
+        (threads, blocks) = (threads_s, blocks_s)
     else
-        kernel =
-            CUDA.@cuda name = kernel_name always_inline = always_inline threads =
-                threads_s blocks = blocks_s shmem = shmem f!(args...)
+        threads = launch_configuration(kernel, nitems; strict = false, shmem).threads
+        blocks = cld(nitems, threads)
     end
+    launch_kernel(kernel, call, threads, blocks, shmem(prod(threads)))
+    RECORD_KERNELS[] && push!(RECORDED_KERNELS, kernel)
 
     if collect_kernel_stats() # only for development use
         key = (F!, typeof(args), CUDA.registers(kernel))
         # CUDA.registers(kernel) > 50 || return nothing # for debugging
         # occursin("single_field_solve_kernel", string(nameof(F!))) || return nothing
         if !haskey(reported_stats, key)
-            kernel = CUDA.@cuda always_inline = true launch = false f!(args...)
-            config = launch_configuration(f!, args)
-            threads = isnothing(nitems) ? nothing : min(nitems, config.threads)
-            blocks = isnothing(nitems) ? nothing : cld(nitems, threads)
-            # Collect the launch information for inspection.
 #! format: off
             s = ""
             s *= "Launching kernel $f! with following config:\n"
@@ -585,7 +734,6 @@ function auto_launch!(
             # error("Oops") # for debugging
             # Main.Infiltrator.@exfiltrate # for debugging/performance optimization
         end
-        # end
     end
     return nothing
 end
@@ -596,39 +744,8 @@ end
 Return the linear index of the current thread across all blocks:
 
 ```julia
-(CUDA.blockIdx().x - Int32(1)) * CUDA.blockDim().x + CUDA.threadIdx().x
+(CUDA.blockIdx().x - 1) * CUDA.blockDim().x + CUDA.threadIdx().x
 ```
 """
 @inline thread_index() =
-    (CUDA.blockIdx().x - Int32(1)) * CUDA.blockDim().x + CUDA.threadIdx().x
-
-"""
-    kernel_indexes(tidx, n)
-
-Return the `CartesianIndex` corresponding to the linear thread index `tidx` in data of
-size `n`, a tuple of lengths along each dimension.
-"""
-Base.@propagate_inbounds kernel_indexes(tidx, n::Tuple) =
-    CartesianIndices(map(x -> Base.OneTo(x), n))[tidx]
-
-"""
-    valid_range(tidx, n::Int)
-
-Return whether the thread index `tidx` is in the valid range `1:n`, where `n` is the
-total number of items to process.
-
-# Examples
-
-```julia
-function kernel!(data, n)
-    @inbounds begin
-        tidx = thread_index()
-        if valid_range(tidx, n)
-            I = kernel_indexes(tidx, n)
-            do_work!(data[I])
-        end
-    end
-end
-```
-"""
-@inline valid_range(tidx, n) = 1 ≤ tidx ≤ n
+    (CUDA.blockIdx().x - UInt32(1)) * CUDA.blockDim().x + CUDA.threadIdx().x

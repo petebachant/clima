@@ -43,10 +43,16 @@ DataScope(::A) where {A <: AbstractArray} = DataScope(A)
 DataScope(::Type{<:Array}) = ThisThreadPool()
 DataScope(::Type{<:StaticArrays.StaticArray}) = ThisThread()
 DataScope(::Type{<:SubArray{<:Any, <:Any, A}}) where {A} = DataScope(A)
+DataScope(::Type{<:PointView{<:Any, <:Any, A}}) where {A} = DataScope(A)
 DataScope(::Type{<:Base.ReshapedArray{<:Any, <:Any, A}}) where {A} = DataScope(A)
 
-# Infer parent types of other AbstractArrays (constant-folding not guaranteed).
-DataScope(::Type{A}) where {A <: AbstractArray} = DataScope(return_type(parent, Tuple{A}))
+# Infer parent types of other AbstractArrays (constant-folding not guaranteed). An array
+# that is its own parent, like a RegisterArray, only has the scope of a layout around it.
+function DataScope(::Type{A}) where {A <: AbstractArray}
+    P = return_type(parent, Tuple{A})
+    P === A && throw(UnknownScopeError{A}())
+    return DataScope(P)
+end
 
 # Scope errors are singleton exception types whose messages are only generated
 # by showerror on the host. Interpolating the scope types into a message where
@@ -68,12 +74,17 @@ InvalidSubscopeError(::S1, ::S2) where {S1, S2} =
 Base.showerror(io::IO, ::InvalidSubscopeError{S1, S2}) where {S1, S2} =
     print(io, "$S1 is not a subset of $S2")
 
+struct UnknownScopeError{A} <: Exception end
+Base.showerror(io::IO, ::UnknownScopeError{A}) where {A} =
+    print(io, "The DataScope of $A cannot be inferred from its type")
+
 DataScope(scope1::DataScope, scope2::DataScope) =
     is_subscope(scope1, scope2) ? scope1 :
     is_subscope(scope2, scope1) ? scope2 :
     throw(NonOverlappingScopesError(scope1, scope2))
 
-DataScope(arg1, arg2, args...) = DataScope(DataScope(arg1), DataScope(arg2, args...))
+@inline DataScope(arg1, arg2, args...) =
+    unrolled_mapreduce(DataScope, DataScope, (arg1, arg2, args...))
 
 """
     partition(scope)
@@ -98,14 +109,16 @@ Return whether `subscope` is equal to the [`DataScope`](@ref) `scope`, or is a
 @noinline throw_invalid_subscope(subscope, scope) =
     throw(InvalidSubscopeError(subscope, scope))
 
-@inline num_subscopes(subscope, scope) =
-    subscope == scope ? 1 :
-    is_subscope(subscope, scope) ? cld(num_threads(scope), num_threads(subscope)) :
+# Rank of the subscope that holds thread n of scope, in the integer type of n: UInt32 on
+# GPUs, which emulate 64-bit arithmetic and shift for unsigned divisions by powers of 2.
+@inline num_subscopes(subscope, scope) = subscope_rank(subscope, scope, num_threads(scope))
+@inline subscope_rank(subscope, scope) = subscope_rank(subscope, scope, thread_rank(scope))
+@inline function subscope_rank(subscope, scope, n)
+    subscope == scope && return one(n)
+    is_subscope(subscope, scope) &&
+        return fld(n - one(n), oftype(n, num_threads(subscope))) + one(n)
     throw_invalid_subscope(subscope, scope)
-@inline subscope_rank(subscope, scope) =
-    subscope == scope ? 1 :
-    is_subscope(subscope, scope) ? fld(thread_rank(scope) - 1, num_threads(subscope)) + 1 :
-    throw_invalid_subscope(subscope, scope)
+end
 
 """
     num_threads(scope)
@@ -124,23 +137,6 @@ can be assigned.
 """
 static_num_threads(scope) = nothing
 
-# Number of threads that a device launch must give each of its launch units (a
-# thread block on a GPU) when a loop assigns every slice to a subscope of the
-# launch's scope: max_threads rounded down to a whole multiple of
-# num_threads(subscope), and never fewer than one whole subscope.
-#
-# WHOLE SUBSCOPES INVARIANT: a slice loop gives the thread of rank r the
-# strided subset r:num_threads(subscope):Np of a slice's points, with the
-# stride read from the subscope's *type*: in a partial subscope, points
-# assigned to a missing rank are silently skipped, and the point-to-register
-# correspondence of a register_similar destination breaks. Every launch unit
-# must therefore hold a whole number of subscopes, and max_threads must be at
-# least num_threads(subscope), which holds on supported devices.
-@inline function subscope_launch_threads(subscope, max_threads)
-    subscope_threads = Int(num_threads(subscope))
-    return max(fld(Int(max_threads), subscope_threads), 1) * subscope_threads
-end
-
 """
     num_partitions(scope)
 
@@ -155,9 +151,11 @@ Return the number of partitions (results of [`partition`](@ref)) in a
 Return an integer between 1 and [`num_threads`](@ref) that identifies the calling
 thread within a [`DataScope`](@ref).
 """
-@inline thread_rank(scope) =
-    (partition_rank(scope) - 1) * num_threads(partition(scope)) +
-    thread_rank(partition(scope))
+@inline function thread_rank(scope)
+    partition_rank_ = partition_rank(scope)
+    return (partition_rank_ - one(partition_rank_)) * num_threads(partition(scope)) +
+           thread_rank(partition(scope))
+end
 
 """
     partition_rank(scope)
@@ -223,18 +221,33 @@ scoped_array(scope, ::Type{T}, dims; buffer = false) where {T} =
 @generated invalid_allocation_string(scope) = "Cannot allocate array for $scope"
 
 """
-    scoped_static_array(scope, T, dims)
+    scoped_static_array(scope, T, dims, [Val(offset)])
 
 Return a statically sized array with element type `T` and size `dims`, whose values
 can be modified by every thread in a [`DataScope`](@ref). If a `DataScope` does not
 provide its own method, this falls back to calling [`scoped_array`](@ref).
 
-Two allocations with equal element types and sizes may be assigned to the same
-memory (this is what happens for block-level allocations on GPUs, which are
-stored in shared memory), so their lifetimes must not overlap unless they are
-guaranteed to hold identical values.
+A scope whose allocations share memory (as with the dynamic shared memory of GPU blocks)
+places the array at byte `offset` of that memory, which is 0 by default, so two arrays
+that are live at the same time must be given non-overlapping offsets; see the buffer reuse
+invariant in `Operators.apply_operator`. Every array in such memory occupies
+[`scoped_buffer_bytes`](@ref) of it, so an offset after another array is the bytes that
+the array occupies. Other scopes ignore the offset.
 """
 scoped_static_array(scope, ::Type{T}, dims) where {T} = scoped_array(scope, T, dims)
+scoped_static_array(scope, ::Type{T}, dims, ::Val) where {T} =
+    scoped_static_array(scope, T, dims)
+
+"""
+    scoped_buffer_bytes(scope, bytes)
+
+Bytes of the memory of `scope` that an array of `bytes` bytes from
+[`scoped_static_array`](@ref) occupies: `bytes` by default, since the arrays of a scope that
+allocates each one separately (as on CPUs) need no padding, and extended for scopes whose
+allocations share memory (as with the dynamic shared memory of GPU blocks), which round
+`bytes` up to the alignment of their arrays.
+"""
+@inline scoped_buffer_bytes(scope, bytes) = bytes
 
 """
     strided_access(scope)
@@ -255,6 +268,16 @@ struct ThisThread <: DataScope end
 num_threads(::ThisThread) = 1
 static_num_threads(::ThisThread) = 1
 thread_rank(::ThisThread) = 1
+
+"""
+    total_buffer_limit(scope)
+
+Number of bytes that the buffers allocated in `scope` can occupy. The scopes of unsliced
+fields, which allocate no buffers, and of single threads have no limit: the buffers of a
+[`ThisThread`](@ref) are private, so compiling operators separately to share them would only
+add calls to every slice, which makes CPU loops slower without compiling them faster.
+"""
+total_buffer_limit(::ThisThread) = typemax(Int)
 scoped_array(::ThisThread, ::Type{T}, dims; buffer = false) where {T} =
     buffer ? task_reduction_buffer(Array{T, 1}, dims) : Array{T}(undef, dims)
 scoped_static_array(::ThisThread, ::Type{T}, dims) where {T} =
@@ -273,6 +296,7 @@ multithreaded loop located outside of ClimaCore — runs on the thread that
 launched it.
 """
 struct ThisThreadPool <: DataScope end
+total_buffer_limit(::ThisThreadPool) = typemax(Int)
 
 # Threads._nthreads_in_pool is two pointer loads of jl_n_threads_per_pool; the public
 # Threads.threadpoolsize wraps _sym_to_tpid, whose unreachable ArgumentError branch has
@@ -290,10 +314,16 @@ end
 # detects threaded loops from outside of ClimaCore and nothing else. The threads must be
 # spawned into the default pool explicitly, since a plain Task inherits the pool of the
 # task that creates it, which may be the interactive pool.
-function launch_pool_threads(f::F, n) where {F}
+#
+# Like parallelize_over, this is a function barrier: @nospecialize gives every
+# loop body a single shared method instance, which is what keeps compile time
+# from scaling with the number of distinct loops. It costs one dynamic call per
+# loop launch, which is negligible beside the Threads.@spawn calls below.
+# @nospecializeinfer also shares inference, which @nospecialize alone repeats per body type.
+Base.@nospecializeinfer @noinline function launch_pool_threads(@nospecialize(f), n::Int)
     tasks = Vector{Task}(undef, n)
     for rank in Base.OneTo(n)
-        @inbounds tasks[rank] = Threads.@spawn :default begin
+        @inbounds tasks[rank] = @inline Threads.@spawn :default begin
             task_local_storage(:climacore_pool_threads, ($rank, $n))
             f()
         end
@@ -331,7 +361,14 @@ pool_loop_threads() = (n = pool_thread_info()[2]; n > 0 ? n : default_pool_size(
 partition(::ThisThreadPool) = ThisThread()
 num_threads(::ThisThreadPool) = pool_loop_threads()
 thread_rank(::ThisThreadPool) = max(pool_thread_info()[1], 1)
-parallelize_over(f::F, ::ThisThreadPool) where {F} =
+# Both this and launch_pool_threads are function barriers: @noinline keeps the
+# loop body out of the caller, and @nospecialize compiles a single method
+# instance for every loop body instead of one per closure type. Unlike the
+# per-slab barrier ruled out in scoped_slice_loop, this barrier is crossed once
+# per loop launch rather than once per slice, so its dynamic dispatch is
+# amortized against the Threads.@spawn calls that immediately follow it, while
+# the compile-time saving applies to every distinct loop in the program.
+Base.@nospecializeinfer @noinline parallelize_over(@nospecialize(f), ::ThisThreadPool) =
     iszero(pool_thread_info()[1]) ? launch_pool_threads(f, pool_loop_threads()) :
     throw(ArgumentError("Nested loops over ThisThreadPool are not supported"))
 
@@ -434,6 +471,17 @@ lengths differ from each other by at most 1, which guarantees that every subset
 of the scope gets a nonempty chunk whenever there are at least as many indices
 as subsets. In contrast, always assigning `cld(length(indices), n_subsets)`
 indices to each subset can lead to one or more empty subsets.
+
+# Whole subscopes invariant
+
+A slice loop gives the thread of rank `r` the strided subset `r:num_threads(subscope):Np`
+of a slice's points, with the stride read from the subscope's *type*. In a partial
+subscope, one whose launch unit (a thread block on a GPU) holds only some of its threads,
+the points assigned to a missing rank are silently skipped, and the point-to-register
+correspondence of a [`register_similar`](@ref) destination breaks. Every launch unit must
+therefore hold a whole number of subscopes, which a device launch enforces by sizing its
+units in whole subscopes (the granularity of a slice loop's launch configuration in the
+CUDA extension).
 """
 Base.@propagate_inbounds function subscope_indices(subscope, scope, indices)
     subscope == scope && return indices
@@ -449,50 +497,89 @@ Base.@propagate_inbounds function subscope_indices(subscope, scope, indices)
     return subscope_index_view(scope, indices, view_range)
 end
 
-# AbstractRange of len Ints beginning at start and increasing by step, with its
-# length stored rather than derived from its endpoints. Base's StepRange
-# divides its endpoints by its step every time its length is read, which a
-# slice loop does several times per nested loop, and only the outermost loop's
+# AbstractRange of the integers in start:step:stop, stored by its bound. Base's StepRange
+# divides by its step when built and whenever its length is read, which a slice loop does
+# at least once per nested loop, and only the outermost loop's
 # step is not a compile-time constant -- the loop every other one runs inside.
 # GPUs have no integer division unit, so each such division expands into a long
 # emulation sequence; hosts divide out of order and once per slice rather than
 # per point, which is why the divisions are invisible in CPU timings.
-struct StridedRange <: AbstractRange{Int}
-    start::Int
-    step::Int
-    len::Int
+# Iterating compares values with the bound (straight-line for one point per thread); it is
+# exact when start, step >= 1, stop >= 0, and stop + step fits in the integer type.
+struct StridedRange{I <: Integer} <: AbstractRange{I}
+    start::I
+    step::I
+    stop::I
 end
+
+# Unsigned division, exact for a nonnegative offset, without ÷'s check for a zero step.
+@inline function strided_length(range::StridedRange{I}) where {I}
+    isempty(range) && return zero(I)
+    return Base.udiv_int(range.stop - range.start, range.step) + one(I)
+end
+
 @inline Base.first(range::StridedRange) = range.start
 @inline Base.step(range::StridedRange) = range.step
-@inline Base.length(range::StridedRange) = range.len
-@inline Base.size(range::StridedRange) = (range.len,)
-@inline Base.last(range::StridedRange) = range.start + (range.len - 1) * range.step
-Base.@propagate_inbounds function Base.getindex(range::StridedRange, i::Int)
+@inline Base.isempty(range::StridedRange) = range.start > range.stop
+@inline Base.length(range::StridedRange) = Int(strided_length(range))
+@inline Base.size(range::StridedRange) = (length(range),)
+@inline Base.last(range::StridedRange{I}) where {I} =
+    range.start + (strided_length(range) - one(I)) * range.step
+Base.@propagate_inbounds function Base.getindex(
+    range::StridedRange{I}, i::Integer,
+) where {I}
     @boundscheck checkbounds(range, i)
-    return range.start + (i - 1) * range.step
+    return range.start + (i % I - one(I)) * range.step
 end
+@inline Base.iterate(range::StridedRange) =
+    isempty(range) ? nothing : (range.start, range.start)
+@inline function Base.iterate(range::StridedRange{I}, i::I) where {I}
+    next = i + range.step
+    next <= range.stop || return nothing
+    return (next, next)
+end
+
+@inline stop_value(sub::StridedRange) = sub.stop
+@inline stop_value(sub::AbstractRange) = last(sub)
 
 # Range subsets of strided ranges, taken by nested slice loops and views of
 # views. Every range subindex must be covered by one of these methods: a missed
 # pair falls back to the generic AbstractArray getindex, which allocates a
 # Vector and interpolates an error string, neither of which is GPU-compilable.
+# Subsets keep the integer type (32 bits on GPUs); a subset's bound maps the bound of its
+# positions (no division if strided) into the range, clipped in 64 bits to avoid overflow.
 Base.@propagate_inbounds function Base.getindex(
-    range::StridedRange, sub::AbstractRange{<:Integer},
+    range::StridedRange,
+    sub::Union{StridedRange, AbstractUnitRange, StepRange{<:Any, <:Unsigned}},
 )
     @boundscheck checkbounds(range, sub)
-    start = range.start + (first(sub) - 1) * range.step
-    return StridedRange(start, range.step * step(sub), length(sub))
+    I = typeof(range.start)
+    start = range.start + (first(sub) % I - one(I)) * range.step
+    unclipped_stop = Int(range.start) + (Int(stop_value(sub)) - 1) * Int(range.step)
+    stop = max(min(unclipped_stop, Int(range.stop)), 0) % I
+    return StridedRange(start, range.step * (step(sub) % I), stop)
+end
+# A StridedRange only steps forward, so the subsets of ranges whose types do not ensure that
+# their steps are positive (e.g., StepRanges with signed steps) are Int ranges.
+Base.@propagate_inbounds function Base.getindex(range::StridedRange, sub::AbstractRange)
+    @boundscheck checkbounds(range, sub)
+    return Int(range.start) .+ (sub .- 1) .* Int(range.step)
 end
 Base.@propagate_inbounds function Base.getindex(
-    range::AbstractUnitRange{<:Integer}, sub::StridedRange,
+    range::Union{Base.OneTo, UnitRange}, sub::StridedRange,
 )
     @boundscheck checkbounds(range, sub)
-    return StridedRange(first(range) + sub.start - 1, sub.step, sub.len)
+    I = typeof(sub.start)
+    offset = first(range) % I - one(I)
+    stop = max(min(sub.stop + offset, last(range) % I), zero(I))
+    return StridedRange(sub.start + offset, sub.step, stop)
 end
 
-# The strided subset rank:n:n_indices, whose length is computed once here.
-@inline strided_range(rank, n, n_indices) =
-    StridedRange(rank, n, rank > n_indices ? 0 : (n_indices - rank) ÷ n + 1)
+# rank:n:n_indices in the type of rank and n; GPU launches check that n_indices < 2^31.
+@inline strided_range(rank::I, n::I, n_indices) where {I <: Integer} =
+    StridedRange(rank, n, n_indices % I)
+@inline strided_range(rank, n, n_indices) = strided_range(promote(rank, n)..., n_indices)
+
 # Return a view by default, so iterating over it is as efficient as iterating
 # over the original indices. GPU scopes must override this, since a strided view
 # of CartesianIndices is a ReshapedArray with GPU-incompatible bounds checks.
@@ -506,5 +593,20 @@ end
 StridedCartesianIndices(indices::CartesianIndices{N}, view_range) where {N} =
     StridedCartesianIndices{N, typeof(indices), typeof(view_range)}(indices, view_range)
 Base.size(strided::StridedCartesianIndices) = (length(strided.view_range),)
-Base.@propagate_inbounds Base.getindex(strided::StridedCartesianIndices, n::Int) =
-    strided.indices[strided.view_range[n]]
+Base.@propagate_inbounds Base.getindex(strided::StridedCartesianIndices, n::Integer) =
+    single_axis_cartesian_index(strided.indices, strided.view_range[n])
+
+# Linear-to-Cartesian conversion without divisions when at most one axis is longer than 1.
+@inline function single_axis_cartesian_index(indices::CartesianIndices, index)
+    ranges = indices.indices
+    unrolled_sum(range -> Int(!isone(length(range))), ranges) <= 1 ||
+        return @inbounds indices[cartesian_index_from_linear(size(indices), index)]
+    return CartesianIndex(
+        unrolled_map(
+            range ->
+                isone(length(range)) ? first(range) :
+                Int(first(range) % typeof(index) + index - one(index)),
+            ranges,
+        ),
+    )
+end
