@@ -14,11 +14,11 @@ Compute the coefficient relating a bulk difference to its similarity scale.
 Returns `ϕ` such that `scale = Δvalue * ϕ`; for example, `u★ = ΔU * ϕ_m`. It is given by
 
 ```math
-ϕ = \\frac{κ}{\\hat{F}(Δz_{eff}, ζ, z_0)}
+ϕ = \\frac{κ}{\\widehat{F}(Δz_{eff}, ζ, z_0)}
 ```
 
 where `κ` is the von Kármán constant and `F̂ = F + P` is the RSL-corrected dimensionless
-profile (`P ≤ 0` from [`rsl_profile_correction`](@ref), zero when `rsl_model` is
+profile (see [`rsl_corrected_profile`](@ref); `P = 0` when `rsl_model` is
 [`NoRoughnessSubLayer`](@ref)).
 
 # Arguments
@@ -42,9 +42,65 @@ function compute_physical_scale_coeff(
     κ = SFP.von_karman_const(param_set)
     uf = SFP.uf_params(param_set)
 
-    profile = UF.dimensionless_profile(uf, Δz_eff, ζ, z0, transport, scheme)
-    P = rsl_profile_correction(rsl_model, Δz_eff, z0, transport)
-    return κ / (profile + P)
+    F̂ = rsl_corrected_profile(uf, rsl_model, Δz_eff, ζ, z0, transport, scheme)
+    return κ / F̂
+end
+
+"""
+    physical_scale_coeff(param_set, inputs, scheme, ζ, z0, transport)
+
+Return the coefficient `ϕ = κ / F̂` of [`compute_physical_scale_coeff`](@ref)
+for `inputs` at the capped stability parameter ([`capped_stability`](@ref))
+and roughness length `z0` of `transport`. Returns `inputs.ϕ_m` or `inputs.ϕ_h`
+when stored ([`with_profile_coefficients`](@ref)), and evaluates the universal
+profile otherwise.
+"""
+@inline function physical_scale_coeff(param_set::APS, inputs, scheme, ζ, z0, transport)
+    ϕ = stored_profile_coefficient(inputs, transport)
+    ϕ === nothing || return ϕ
+    return compute_physical_scale_coeff(
+        param_set,
+        effective_height(param_set, inputs),
+        capped_stability(param_set, inputs, scheme, ζ),
+        z0,
+        transport,
+        scheme,
+        inputs.rsl_model,
+    )
+end
+
+@inline stored_profile_coefficient(inputs, ::UF.MomentumTransport) =
+    get(inputs, :ϕ_m, nothing)
+@inline stored_profile_coefficient(inputs, ::UF.HeatTransport) = get(inputs, :ϕ_h, nothing)
+
+"""
+    with_profile_coefficients(inputs, param_set, scheme, ζ, z0m, z0h)
+
+Return `inputs` with `ϕ_m` and `ϕ_h` set to the coefficients `κ / F̂_m` and
+`κ / F̂_h` of [`compute_physical_scale_coeff`](@ref) at the capped stability
+parameter `ζ` and roughness lengths `z0m`, `z0h`. The MOST solver calls this
+once per residual evaluation when the roughness lengths are independent of
+`ustar`, so [`physical_scale_coeff`](@ref) and [`heat_conductance`](@ref)
+reuse the stored coefficients at that `ζ`.
+"""
+@inline function with_profile_coefficients(inputs, param_set::APS, scheme, ζ, z0m, z0h)
+    Δz_eff = effective_height(param_set, inputs)
+    ζ_c = capped_stability(param_set, inputs, scheme, ζ)
+    uf = SFP.uf_params(param_set)
+    κ = SFP.von_karman_const(param_set)
+    rsl_model = inputs.rsl_model
+    F̂_m = rsl_corrected_profile(
+        uf,
+        rsl_model,
+        Δz_eff,
+        ζ_c,
+        z0m,
+        UF.MomentumTransport(),
+        scheme,
+    )
+    F̂_h =
+        rsl_corrected_profile(uf, rsl_model, Δz_eff, ζ_c, z0h, UF.HeatTransport(), scheme)
+    return (; inputs..., ϕ_m = κ / F̂_m, ϕ_h = κ / F̂_h)
 end
 
 """
@@ -53,7 +109,9 @@ end
 Return the friction velocity implied by the Monin-Obukhov solution.
 
 If a friction velocity is prescribed via `inputs.ustar` (in the inputs container),
-it is returned directly; otherwise it is recomputed from the similarity coefficients.
+it is returned directly; otherwise it is recomputed from the similarity coefficients,
+evaluated at the stability parameter capped by any stability cap in `inputs`
+(see [`MaxHeatFluxStabilityCap`](@ref) and [`capped_stability`](@ref)).
 
 # Arguments
 - `param_set`: Parameter set.
@@ -77,16 +135,7 @@ function compute_ustar(
     end
 
     ΔU = windspeed(inputs, gustiness)
-    Δz_eff = effective_height(inputs)
-    ϕ = compute_physical_scale_coeff(
-        param_set,
-        Δz_eff,
-        ζ,
-        z0,
-        UF.MomentumTransport(),
-        scheme,
-        inputs.rsl_model,
-    )
+    ϕ = physical_scale_coeff(param_set, inputs, scheme, ζ, z0, UF.MomentumTransport())
     return ΔU * ϕ
 end
 
@@ -116,7 +165,7 @@ function compute_theta_star(
 )
     thermo_params = SFP.thermodynamics_params(param_set)
     Φ_int = interior_geopotential(param_set, inputs)
-    Φ_sfc = surface_geopotential(inputs)
+    Φ_sfc = surface_geopotential(param_set, inputs)
 
     DSE_int = TD.dry_static_energy(thermo_params, inputs.T_int, Φ_int)
     DSE_sfc = TD.dry_static_energy(thermo_params, T_sfc, Φ_sfc)
@@ -125,15 +174,7 @@ function compute_theta_star(
     c_p = TD.cp_m(thermo_params, inputs.q_tot_int, inputs.q_liq_int, inputs.q_ice_int)
     Δθ = ΔDSE / c_p
 
-    Δz_eff = effective_height(inputs)
-    ϕ = compute_physical_scale_coeff(
-        param_set,
-        Δz_eff,
-        ζ,
-        z0h,
-        UF.HeatTransport(),
-        scheme,
-    )
+    ϕ = physical_scale_coeff(param_set, inputs, scheme, ζ, z0h, UF.HeatTransport())
     return Δθ * ϕ
 end
 
@@ -163,19 +204,11 @@ function compute_q_star(
     q_vap_sfc = something(inputs.q_vap_sfc_guess, inputs.q_tot_int),
 )
     # Δq = q_vap_int - q_vap_sfc
-    q_vap_int = inputs.q_tot_int - inputs.q_liq_int - inputs.q_ice_int
+    q_vap_int = interior_vapor_specific_humidity(inputs)
     Δq = q_vap_int - q_vap_sfc
 
     # Scalars use HeatTransport coefficients in MOST
-    Δz_eff = effective_height(inputs)
-    ϕ = compute_physical_scale_coeff(
-        param_set,
-        Δz_eff,
-        ζ,
-        z0h,
-        UF.HeatTransport(),
-        scheme,
-    )
+    ϕ = physical_scale_coeff(param_set, inputs, scheme, ζ, z0h, UF.HeatTransport())
     return Δq * ϕ
 end
 
